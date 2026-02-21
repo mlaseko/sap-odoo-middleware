@@ -50,6 +50,30 @@ dotnet run --project src/SapOdooMiddleware
 
 The API starts on `http://localhost:5000` by default.
 
+## Swagger UI
+
+Swagger UI is enabled automatically when running in the **Development** environment (the default for `dotnet run`).
+
+Open your browser at:
+
+```
+http://localhost:5000/swagger
+```
+
+To enable Swagger UI in Production (e.g. when accessed via the Cloudflare hostname), set the environment variable before starting the service:
+
+```bash
+ENABLE_SWAGGER=true dotnet run --project src/SapOdooMiddleware
+```
+
+Then open it via the Cloudflare hostname, e.g.:
+
+```
+https://<your-cloudflare-hostname>/swagger
+```
+
+Click **Authorize** in Swagger UI, enter your API key, and it will be sent as the `X-Api-Key` header on every request.
+
 ## Authentication
 
 All endpoints (except `/health`) require the `X-Api-Key` header:

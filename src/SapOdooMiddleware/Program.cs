@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.OpenApi.Models;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Middleware;
 using SapOdooMiddleware.Services;
@@ -21,7 +22,39 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;
     });
 
+// --- Swagger ---
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo { Title = "SAP-Odoo Middleware API", Version = "v1" });
+
+    var apiKeyScheme = new OpenApiSecurityScheme
+    {
+        Name = "X-Api-Key",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.ApiKey,
+        Description = "API key required for all endpoints except /health and /swagger",
+        Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "ApiKey" }
+    };
+
+    options.AddSecurityDefinition("ApiKey", apiKeyScheme);
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        { apiKeyScheme, Array.Empty<string>() }
+    });
+});
+
 var app = builder.Build();
+
+// --- Swagger UI (Development by default; override with ENABLE_SWAGGER=true) ---
+bool enableSwagger = app.Environment.IsDevelopment()
+    || string.Equals(Environment.GetEnvironmentVariable("ENABLE_SWAGGER"), "true", StringComparison.OrdinalIgnoreCase);
+
+if (enableSwagger)
+{
+    app.UseSwagger();
+    app.UseSwaggerUI(options => options.SwaggerEndpoint("/swagger/v1/swagger.json", "SAP-Odoo Middleware v1"));
+}
 
 // --- Middleware ---
 app.UseMiddleware<ApiKeyMiddleware>();
