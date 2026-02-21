@@ -25,6 +25,9 @@ public class SapB1Settings
     /// <summary>License server address (host:port).</summary>
     public string LicenseServer { get; set; } = string.Empty;
 
+    /// <summary>SLD Server address (host:port, e.g. "WIN-GJGQ73V0C3K:40000"). Leave empty to skip.</summary>
+    public string SLDServer { get; set; } = string.Empty;
+
     /// <summary>Whether to auto-create a pick list after SO creation.</summary>
     public bool AutoCreatePickList { get; set; } = true;
 }

@@ -182,6 +182,18 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         // Map DbServerType string to enum value
         company.DbServerType = MapDbServerType(_settings.DbServerType);
 
+        if (!string.IsNullOrEmpty(_settings.SLDServer))
+        {
+            try
+            {
+                company.SLDServer = _settings.SLDServer;
+            }
+            catch (COMException ex)
+            {
+                _logger.LogWarning(ex, "SLDServer property not supported by this version of SAPbobsCOM; skipping.");
+            }
+        }
+
         int connectResult = company.Connect();
         if (connectResult != 0)
         {
