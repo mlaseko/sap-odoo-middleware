@@ -183,6 +183,9 @@ public class OdooJsonRpcService : IOdooService
             callArgs.Add(arg?.DeepClone());
         }
 
+        if (kwargs != null)
+            callArgs.Add(kwargs);
+
         var payload = new JsonObject
         {
             ["jsonrpc"] = "2.0",
@@ -195,9 +198,6 @@ public class OdooJsonRpcService : IOdooService
                 ["args"] = callArgs
             }
         };
-
-        if (kwargs != null)
-            callArgs.Add(kwargs);
 
         return await SendRpcAsync("/jsonrpc", payload);
     }
