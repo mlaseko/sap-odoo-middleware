@@ -12,6 +12,11 @@ ASP.NET Core Web API middleware that integrates **Odoo** and **SAP Business One*
 
 - **.NET 8 SDK** (or later)
 - **SAP Business One DI API** installed on the Windows host (COM interop — `SAPbobsCOM.Company`)
+  - The DI API version **must exactly match** the SAP B1 server's Feature Package / patch level.
+    For example, if the server runs **10.00.110**, install the **10.00.110** DI API on the app machine.
+    A mismatch is the most common cause of connection error **-132** (SBO user authentication failure).
+  - The DI API bitness must match the application's target platform:
+    **x86 app → 32-bit DI API**, **x64 app → 64-bit DI API**.
 - **Cloudflare Tunnel** exposing the SQL Server to the middleware (already configured)
 - **Odoo** instance with JSON-RPC access enabled
 
@@ -53,6 +58,60 @@ dotnet run --project src/SapOdooMiddleware
 ```
 
 The API starts on `http://localhost:5000` by default.
+
+## Troubleshooting: SAP B1 DI API Connection
+
+Use `GET /api/sapb1/ping` (authenticated) to test connectivity. Common failures and their resolutions:
+
+### Error -132 — SBO user authentication failure
+
+This is the most frequent connection error. Work through this checklist in order:
+
+1. **DI API version matches the server patch level (critical)**
+   Install the DI API that matches your SAP B1 server exactly, e.g. **10.00.110** client DI API for a
+   **10.00.110** server. Even a minor Feature-Package mismatch (e.g. 10.00.170 DI API against a
+   10.00.110 server) triggers -132. Reinstall the DI API from the SAP B1 installation media that
+   shipped with your server version.
+
+2. **LicenseServer is set and reachable**
+   `LicenseServer` is always required. The default SAP B1 license-server port is **30000**:
+   ```
+   "LicenseServer": "YOUR_SAP_SERVER_HOST:30000"
+   ```
+   If this setting is empty the middleware logs a warning at startup and the DI API will reject the
+   connection. Verify the license service (`SAPBOLicenseServer`) is running on the SAP B1 host.
+
+3. **UserName / Password are SAP B1 application credentials**
+   Use an SAP B1 application-level user (e.g. `manager`), **not** a SQL Server login. The DI API
+   authenticates against SAP B1, not against SQL Server directly.
+
+4. **DI API bitness matches the application target platform**
+   - **x86 application → 32-bit DI API** (default for most SAP B1 DI API installers)
+   - **x64 application → 64-bit DI API** (check SAP Note 1492196 for availability)
+
+5. **DbServerType matches your SQL Server version**
+   Supported values and their SQL Server versions:
+
+   | `DbServerType` value | SQL Server version |
+   |---|---|
+   | `dst_MSSQL2019` | SQL Server 2019 (default) |
+   | `dst_MSSQL2017` | SQL Server 2017 |
+   | `dst_MSSQL2016` | SQL Server 2016 |
+   | `dst_MSSQL2014` | SQL Server 2014 |
+   | `dst_MSSQL2012` | SQL Server 2012 |
+   | `dst_HANADB` | SAP HANA |
+
+6. **SLDServer (if required by your landscape)**
+   Needed when SAP B1 is registered with an SLD (System Landscape Directory). Format:
+   ```
+   "SLDServer": "YOUR_SLD_HOST:40000"
+   ```
+   Leave empty if SLD is not configured.
+
+### SAPbobsCOM.Company COM class not found
+
+The DI API is not installed or was not registered. Re-run the DI API installer and verify that
+`SAPbobsCOM.Company` can be instantiated from a 32-bit or 64-bit COM host matching your application.
 
 ## Swagger UI
 
