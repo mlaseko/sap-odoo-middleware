@@ -109,6 +109,41 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    public async Task<SapB1PingResponse> PingAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var company = _company!;
+
+            string? companyName = null;
+            string? version = null;
+
+            try { companyName = (string)company.CompanyName; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read CompanyName from SAP B1 company object."); }
+
+            try { version = (string)company.Version; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Version from SAP B1 company object."); }
+
+            return new SapB1PingResponse
+            {
+                Connected = true,
+                Server = _settings.Server,
+                CompanyDb = _settings.CompanyDb,
+                LicenseServer = _settings.LicenseServer,
+                SldServer = _settings.SLDServer,
+                CompanyName = companyName,
+                Version = version
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <summary>
     /// Creates a Pick List (Pick &amp; Pack) for the given Sales Order.
     /// See: SAPbobsCOM PickLists / PickLists_Lines documentation.

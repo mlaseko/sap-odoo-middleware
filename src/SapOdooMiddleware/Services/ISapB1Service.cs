@@ -11,4 +11,9 @@ public interface ISapB1Service
     /// Creates a Sales Order in SAP B1 via DI API and optionally a Pick List.
     /// </summary>
     Task<SapSalesOrderResponse> CreateSalesOrderAsync(SapSalesOrderRequest request);
+
+    /// <summary>
+    /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
+    /// </summary>
+    Task<SapB1PingResponse> PingAsync();
 }

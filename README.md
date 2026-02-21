@@ -4,6 +4,7 @@ ASP.NET Core Web API middleware that integrates **Odoo** and **SAP Business One*
 
 | Flow | Direction | Endpoint |
 |------|-----------|----------|
+| SAP B1 connectivity check | Middleware → SAP B1 | `GET /api/sapb1/ping` |
 | Sales Order creation | Odoo → SAP B1 | `POST /api/sales-orders` |
 | Delivery confirmation | SAP B1 → Odoo | `POST /api/deliveries` |
 
@@ -75,7 +76,13 @@ Then open it via the Cloudflare hostname, e.g.:
 https://<your-cloudflare-hostname>/swagger
 ```
 
-Click **Authorize** in Swagger UI, enter your API key, and it will be sent as the `X-Api-Key` header on every request.
+### Authenticating in Swagger UI
+
+1. Click the **Authorize 🔒** button at the top of the Swagger UI page.
+2. In the dialog that appears, enter your API key in the **Value** field.
+3. Click **Authorize**, then **Close**.
+
+Swagger UI will now send the `X-Api-Key` header automatically on every **Try it out** request.
 
 ## Authentication
 
@@ -94,6 +101,41 @@ GET /health
 ```
 
 No authentication required. Returns `{ "status": "healthy", "timestamp": "..." }`.
+
+### SAP B1 Connectivity Check
+
+```
+GET /api/sapb1/ping
+X-Api-Key: YOUR_KEY
+```
+
+Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
+
+**Response (200 — connected):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "connected": true,
+    "server": "sql-server-host",
+    "company_db": "SBODemoUS",
+    "license_server": "license-host:30000",
+    "sld_server": "WIN-GJGQ73V0C3K:40000",
+    "company_name": "Demo Company",
+    "version": "10.0"
+  }
+}
+```
+
+**Response (500 — connection failed):**
+
+```json
+{
+  "success": false,
+  "errors": ["SAP B1 DI API connection failed (65): ..."]
+}
+```
 
 ### Create Sales Order (Odoo → SAP B1)
 
