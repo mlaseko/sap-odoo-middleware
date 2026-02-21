@@ -18,6 +18,8 @@ ASP.NET Core Web API middleware that integrates **Odoo** and **SAP Business One*
 
 Edit `appsettings.json` (or use environment variables / user secrets):
 
+> **Tip:** Any setting can be overridden via an environment variable using the double-underscore separator, e.g. `SapB1__SLDServer=WIN-GJGQ73V0C3K:40000`.
+
 ```jsonc
 {
   "ApiKey": {
@@ -30,6 +32,7 @@ Edit `appsettings.json` (or use environment variables / user secrets):
     "Password": "secret",
     "DbServerType": "dst_MSSQL2019",
     "LicenseServer": "license-host:30000",
+    "SLDServer": "WIN-GJGQ73V0C3K:40000",
     "AutoCreatePickList": true
   },
   "Odoo": {
