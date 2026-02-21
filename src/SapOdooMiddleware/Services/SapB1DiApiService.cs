@@ -109,6 +109,41 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    public async Task<SapB1PingResponse> PingAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var company = _company!;
+
+            string? companyName = null;
+            string? version = null;
+
+            try { companyName = (string)company.CompanyName; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read CompanyName from SAP B1 company object."); }
+
+            try { version = (string)company.Version; }
+            catch (Exception ex) { _logger.LogDebug(ex, "Failed to read Version from SAP B1 company object."); }
+
+            return new SapB1PingResponse
+            {
+                Connected = true,
+                Server = _settings.Server,
+                CompanyDb = _settings.CompanyDb,
+                LicenseServer = _settings.LicenseServer,
+                SldServer = _settings.SLDServer,
+                CompanyName = companyName,
+                Version = version
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <summary>
     /// Creates a Pick List (Pick &amp; Pack) for the given Sales Order.
     /// See: SAPbobsCOM PickLists / PickLists_Lines documentation.
@@ -165,12 +200,26 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             _company = null;
         }
 
-        _logger.LogInformation("Connecting to SAP B1 DI API: Server={Server}, CompanyDb={CompanyDb}",
-            _settings.Server, _settings.CompanyDb);
+        // --- Pre-connection diagnostics ---
+        if (string.IsNullOrWhiteSpace(_settings.LicenseServer))
+            _logger.LogWarning(
+                "SapB1:LicenseServer is not configured. " +
+                "A license server (e.g. \"hostname:30000\") is required by the SAP B1 DI API. " +
+                "Connection will likely fail with error -132.");
+
+        _logger.LogInformation(
+            "Connecting to SAP B1 DI API — Server={Server}, CompanyDb={CompanyDb}, " +
+            "LicenseServer={LicenseServer}, DbServerType={DbServerType}, SLDServer={SLDServer}, UserName={UserName}",
+            _settings.Server, _settings.CompanyDb,
+            string.IsNullOrWhiteSpace(_settings.LicenseServer) ? "(empty)" : _settings.LicenseServer,
+            _settings.DbServerType,
+            string.IsNullOrWhiteSpace(_settings.SLDServer) ? "(not set)" : _settings.SLDServer,
+            _settings.UserName);
 
         var companyType = Type.GetTypeFromProgID("SAPbobsCOM.Company")
             ?? throw new InvalidOperationException(
-                "SAPbobsCOM.Company COM class not found. Ensure SAP B1 DI API is installed.");
+                "SAPbobsCOM.Company COM class not found. Ensure the SAP B1 DI API is installed and its " +
+                "version matches the SAP B1 server patch level (e.g. 10.00.110).");
 
         dynamic company = Activator.CreateInstance(companyType)!;
         company.Server = _settings.Server;
@@ -200,7 +249,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             int errCode = company.GetLastErrorCode();
             string errMsg = company.GetLastErrorDescription();
             Marshal.ReleaseComObject(company);
-            throw new InvalidOperationException($"SAP B1 DI API connection failed ({errCode}): {errMsg}");
+
+            var hint = errCode == -132
+                ? " Hint for error -132 (SBO user authentication): verify that (1) LicenseServer is set correctly, " +
+                  "(2) the installed DI API version matches the SAP B1 server patch level exactly, " +
+                  "(3) UserName/Password are valid SAP B1 application credentials (not SQL credentials), " +
+                  "and (4) the DI API bitness (x86/x64) matches this application's target platform."
+                : string.Empty;
+
+            throw new InvalidOperationException(
+                $"SAP B1 DI API connection failed ({errCode}): {errMsg}.{hint}");
         }
 
         _company = company;

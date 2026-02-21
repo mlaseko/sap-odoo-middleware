@@ -22,4 +22,23 @@ public class SapB1SettingsTests
 
         Assert.Equal("WIN-GJGQ73V0C3K:40000", settings.SLDServer);
     }
+
+    [Fact]
+    public void LicenseServer_DefaultValue_IsEmpty()
+    {
+        var settings = new SapB1Settings();
+
+        Assert.Equal(string.Empty, settings.LicenseServer);
+    }
+
+    [Fact]
+    public void LicenseServer_CanBeAssigned()
+    {
+        var settings = new SapB1Settings
+        {
+            LicenseServer = "license-host:30000"
+        };
+
+        Assert.Equal("license-host:30000", settings.LicenseServer);
+    }
 }
