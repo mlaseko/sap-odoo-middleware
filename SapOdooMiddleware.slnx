@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SapOdooMiddleware/SapOdooMiddleware.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SapOdooMiddleware.Tests/SapOdooMiddleware.Tests.csproj" />
+  </Folder>
+</Solution>
