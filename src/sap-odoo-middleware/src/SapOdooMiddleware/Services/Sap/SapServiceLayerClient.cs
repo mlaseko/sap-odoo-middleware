@@ -46,6 +46,7 @@ public class SapServiceLayerClient : ISapServiceLayerClient
 
         var content = await response.Content.ReadFromJsonAsync<JsonElement>();
         _sessionId = content.GetProperty("SessionId").GetString();
+        // SAP B1 Service Layer sessions expire after 30 minutes; refresh at 25 min
         _sessionExpiry = DateTime.UtcNow.AddMinutes(25);
 
         _logger.LogInformation("SAP Service Layer login successful, session expires at {Expiry}", _sessionExpiry);

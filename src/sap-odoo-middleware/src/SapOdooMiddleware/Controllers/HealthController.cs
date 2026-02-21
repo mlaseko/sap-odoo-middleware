@@ -43,7 +43,7 @@ public class HealthController : ControllerBase
                 sap_service_layer = new { status = sapHealthy ? "up" : "down" },
                 odoo_jsonrpc = new { status = odooHealthy ? "up" : "down" }
             },
-            version = "1.0.0"
+            version = typeof(HealthController).Assembly.GetName().Version?.ToString() ?? "1.0.0"
         };
 
         return Ok(ApiResponse<object>.Ok(healthData));
