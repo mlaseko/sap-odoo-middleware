@@ -1,8 +1,16 @@
 <Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+  </Configurations>
   <Folder Name="/src/">
-    <Project Path="src/SapOdooMiddleware/SapOdooMiddleware.csproj" />
+    <Project Path="src/SapOdooMiddleware/SapOdooMiddleware.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/SapOdooMiddleware.Tests/SapOdooMiddleware.Tests.csproj" />
+    <Project Path="tests/SapOdooMiddleware.Tests/SapOdooMiddleware.Tests.csproj">
+      <Platform Solution="*|x64" Project="x64" />
+    </Project>
   </Folder>
 </Solution>
