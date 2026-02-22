@@ -24,6 +24,15 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     {
         _settings = settings.Value;
         _logger = logger;
+
+        _logger.LogInformation(
+            "🔧 SAP DI API config loaded | Server={Server} | CompanyDB={CompanyDB} | User={User} | DbType={DbType} | LicenseServer={LicenseServer} | SLDServer={SLDServer}",
+            _settings.Server,
+            _settings.CompanyDb,
+            _settings.UserName,
+            _settings.DbServerType,
+            _settings.LicenseServer,
+            _settings.SLDServer);
     }
 
     public async Task<SapSalesOrderResponse> CreateSalesOrderAsync(SapSalesOrderRequest request)
@@ -227,6 +236,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         company.UserName = _settings.UserName;
         company.Password = _settings.Password;
         company.LicenseServer = _settings.LicenseServer;
+        company.UseTrusted = false;
+        company.language = 8; // BoSuppLangs.ln_English
 
         // Map DbServerType string to enum value
         company.DbServerType = MapDbServerType(_settings.DbServerType);
