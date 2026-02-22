@@ -94,12 +94,14 @@ This is the most frequent connection error. Work through this checklist in order
 
    | `DbServerType` value | SQL Server version |
    |---|---|
-   | `dst_MSSQL2019` | SQL Server 2019 (default) |
-   | `dst_MSSQL2017` | SQL Server 2017 |
-   | `dst_MSSQL2016` | SQL Server 2016 |
-   | `dst_MSSQL2014` | SQL Server 2014 |
-   | `dst_MSSQL2012` | SQL Server 2012 |
-   | `dst_HANADB` | SAP HANA |
+   | `dst_MSSQL2019` (or `MSSQL2019`) | SQL Server 2019 (default) |
+   | `dst_MSSQL2017` (or `MSSQL2017`) | SQL Server 2017 |
+   | `dst_MSSQL2016` (or `MSSQL2016`) | SQL Server 2016 |
+   | `dst_MSSQL2014` (or `MSSQL2014`) | SQL Server 2014 |
+   | `dst_MSSQL2012` (or `MSSQL2012`) | SQL Server 2012 |
+   | `dst_HANADB` (or `HANADB`) | SAP HANA |
+
+   The `dst_` prefix is optional and matching is case-insensitive.
 
 6. **SLDServer (if required by your landscape)**
    Needed when SAP B1 is registered with an SLD (System Landscape Directory). Format:
