@@ -242,9 +242,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         company.UseTrusted = false;
         company.Language = LanguageEnglish;
 
-        // Map DbServerType string to enum value
-        company.DbServerType = MapDbServerType(_settings.DbServerType);
-
         if (!string.IsNullOrEmpty(_settings.SLDServer))
         {
             try
@@ -257,11 +254,39 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             }
         }
 
-        int connectResult = company.Connect();
+        // Try each candidate enum value for DbServerType; different SAPbobsCOM
+        // versions use different ordinals for the same logical server type.
+        int[] candidates = MapDbServerTypeCandidates(_settings.DbServerType);
+        int connectResult = -1;
+        int errCode = 0;
+        string errMsg = string.Empty;
+
+        for (int i = 0; i < candidates.Length; i++)
+        {
+            company.DbServerType = candidates[i];
+            _logger.LogInformation(
+                "Attempting SAP B1 DI API connection with DbServerType ordinal {Ordinal} (attempt {Attempt}/{Total})",
+                candidates[i], i + 1, candidates.Length);
+
+            connectResult = company.Connect();
+            if (connectResult == 0)
+                break;
+
+            errCode = company.GetLastErrorCode();
+            errMsg = company.GetLastErrorDescription();
+
+            if (errCode == -119 && i < candidates.Length - 1)
+            {
+                _logger.LogWarning(
+                    "SAP B1 DI API connection failed with DbServerType ordinal {Ordinal} (error {Code}: {Message}). " +
+                    "Retrying with next candidate ordinal {NextOrdinal}.",
+                    candidates[i], errCode, errMsg, candidates[i + 1]);
+                continue;
+            }
+        }
+
         if (connectResult != 0)
         {
-            int errCode = company.GetLastErrorCode();
-            string errMsg = company.GetLastErrorDescription();
             Marshal.ReleaseComObject(company);
 
             var hint = errCode == -132
@@ -280,11 +305,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     /// <summary>
-    /// Maps a string DbServerType (e.g. "dst_MSSQL2019", "MSSQL2019", "MSSQL2016") to the
-    /// SAPbobsCOM enum ordinal value. Accepts values with or without the "dst_" prefix,
-    /// case-insensitive.
+    /// Maps a string DbServerType (e.g. "dst_MSSQL2019", "MSSQL2019", "MSSQL2016") to one or
+    /// more SAPbobsCOM enum ordinal candidates. Different SAPbobsCOM versions assign different
+    /// ordinals to the same logical server type, so multiple values may be returned.
+    /// The first value is the most common mapping; subsequent values are alternatives tried
+    /// when error -119 ("Database server type not supported") is returned.
+    /// Accepts values with or without the "dst_" prefix, case-insensitive.
     /// </summary>
-    private static int MapDbServerType(string dbServerType)
+    internal static int[] MapDbServerTypeCandidates(string dbServerType)
     {
         // Normalize: trim, uppercase, strip "dst_" prefix if present
         var normalized = (dbServerType ?? "").Trim().ToUpperInvariant();
@@ -293,15 +321,15 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
         return normalized switch
         {
-            "MSSQL" => 1,
-            "MSSQL2005" => 4,
-            "MSSQL2008" => 5,
-            "MSSQL2012" => 6,
-            "MSSQL2014" => 7,
-            "MSSQL2016" => 8,
-            "MSSQL2017" => 9,
-            "MSSQL2019" => 10,
-            "HANADB" => 11,
+            "MSSQL"     => [1],
+            "MSSQL2005" => [4],
+            "MSSQL2008" => [5, 6],
+            "MSSQL2012" => [6, 7],
+            "MSSQL2014" => [7, 8],
+            "MSSQL2016" => [8, 10],
+            "MSSQL2017" => [9, 15],
+            "MSSQL2019" => [10, 16],
+            "HANADB"    => [11, 9],
             _ => throw new InvalidOperationException(
                 $"Unrecognized DbServerType '{dbServerType}'. " +
                 $"Supported values: MSSQL, MSSQL2005, MSSQL2008, MSSQL2012, MSSQL2014, MSSQL2016, MSSQL2017, MSSQL2019, HANADB " +

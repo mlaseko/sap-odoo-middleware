@@ -103,6 +103,13 @@ This is the most frequent connection error. Work through this checklist in order
 
    The `dst_` prefix is optional and matching is case-insensitive.
 
+   > **Automatic fallback for error -119:** Different SAPbobsCOM versions assign
+   > different internal enum ordinals to the same `DbServerType` value. If the
+   > DI API rejects the first ordinal with error **-119** ("Database server type
+   > not supported"), the middleware automatically retries with an alternative
+   > ordinal. No configuration change is needed — just set the logical type that
+   > matches your SQL Server version.
+
 6. **SLDServer (if required by your landscape)**
    Needed when SAP B1 is registered with an SLD (System Landscape Directory). Format:
    ```

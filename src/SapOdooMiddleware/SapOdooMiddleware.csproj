@@ -7,6 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="SapOdooMiddleware.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Interop.SAPbobsCOM" Version="8.82.76" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
