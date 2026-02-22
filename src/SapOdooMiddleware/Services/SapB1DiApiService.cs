@@ -266,21 +266,34 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     /// <summary>
-    /// Maps a string DbServerType (e.g. "dst_MSSQL2019") to the SAPbobsCOM enum ordinal value.
+    /// Maps a string DbServerType (e.g. "dst_MSSQL2019", "MSSQL2019", "MSSQL2016") to the
+    /// SAPbobsCOM enum ordinal value. Accepts values with or without the "dst_" prefix,
+    /// case-insensitive.
     /// </summary>
-    private static int MapDbServerType(string dbServerType) => dbServerType switch
+    private static int MapDbServerType(string dbServerType)
     {
-        "dst_MSSQL" => 1,
-        "dst_MSSQL2005" => 4,
-        "dst_MSSQL2008" => 5,
-        "dst_MSSQL2012" => 6,
-        "dst_MSSQL2014" => 7,
-        "dst_MSSQL2016" => 8,
-        "dst_MSSQL2017" => 9,
-        "dst_MSSQL2019" => 10,
-        "dst_HANADB" => 11,
-        _ => 10 // default to MSSQL2019
-    };
+        // Normalize: trim, uppercase, strip "dst_" prefix if present
+        var normalized = (dbServerType ?? "").Trim().ToUpperInvariant();
+        if (normalized.StartsWith("DST_"))
+            normalized = normalized["DST_".Length..];
+
+        return normalized switch
+        {
+            "MSSQL" => 1,
+            "MSSQL2005" => 4,
+            "MSSQL2008" => 5,
+            "MSSQL2012" => 6,
+            "MSSQL2014" => 7,
+            "MSSQL2016" => 8,
+            "MSSQL2017" => 9,
+            "MSSQL2019" => 10,
+            "HANADB" => 11,
+            _ => throw new InvalidOperationException(
+                $"Unrecognized DbServerType '{dbServerType}'. " +
+                $"Supported values: MSSQL, MSSQL2005, MSSQL2008, MSSQL2012, MSSQL2014, MSSQL2016, MSSQL2017, MSSQL2019, HANADB " +
+                $"(with or without 'dst_' prefix).")
+        };
+    }
 
     public void Dispose()
     {
