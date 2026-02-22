@@ -28,7 +28,7 @@ public class SalesOrdersController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] SapSalesOrderRequest request)
     {
-        _logger.LogInformation("Received SO creation request for Odoo ref {OdooSoRef}", request.OdooSoRef);
+        _logger.LogInformation("Received SO creation request for Odoo ref {UOdooSoId}", request.ResolvedSoId);
 
         try
         {
@@ -42,7 +42,7 @@ public class SalesOrdersController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to create SAP Sales Order for Odoo ref {OdooSoRef}", request.OdooSoRef);
+            _logger.LogError(ex, "Failed to create SAP Sales Order for Odoo ref {UOdooSoId}", request.ResolvedSoId);
             return StatusCode(500, ApiResponse<SapSalesOrderResponse>.Fail(ex.Message));
         }
     }

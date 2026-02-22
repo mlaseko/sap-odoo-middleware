@@ -30,8 +30,8 @@ public class DeliveriesController : ControllerBase
     public async Task<IActionResult> Create([FromBody] DeliveryUpdateRequest request)
     {
         _logger.LogInformation(
-            "Received delivery update: OdooSoRef={OdooSoRef}, SapDeliveryNo={SapDeliveryNo}",
-            request.OdooSoRef, request.SapDeliveryNo);
+            "Received delivery update: UOdooSoId={UOdooSoId}, SapDeliveryNo={SapDeliveryNo}",
+            request.ResolvedSoId, request.SapDeliveryNo);
 
         try
         {
@@ -45,7 +45,7 @@ public class DeliveriesController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to confirm delivery in Odoo for ref {OdooSoRef}", request.OdooSoRef);
+            _logger.LogError(ex, "Failed to confirm delivery in Odoo for ref {UOdooSoId}", request.ResolvedSoId);
             return StatusCode(500, ApiResponse<DeliveryUpdateResponse>.Fail(ex.Message));
         }
     }
