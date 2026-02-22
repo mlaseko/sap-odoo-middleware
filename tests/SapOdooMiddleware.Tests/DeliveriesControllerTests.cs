@@ -25,7 +25,7 @@ public class DeliveriesControllerTests
         // Arrange
         var request = new DeliveryUpdateRequest
         {
-            OdooSoRef = "SO0042",
+            UOdooSoId = "SO0042",
             SapDeliveryNo = "DN-001",
             DeliveryDate = new DateTime(2025, 1, 15),
             Status = "delivered"
@@ -33,7 +33,7 @@ public class DeliveriesControllerTests
 
         var expected = new DeliveryUpdateResponse
         {
-            OdooSoRef = "SO0042",
+            UOdooSoId = "SO0042",
             PickingId = 77,
             PickingName = "WH/OUT/00012",
             State = "done",
@@ -51,11 +51,41 @@ public class DeliveriesControllerTests
         var okResult = Assert.IsType<OkObjectResult>(result);
         var response = Assert.IsType<ApiResponse<DeliveryUpdateResponse>>(okResult.Value);
         Assert.True(response.Success);
-        Assert.Equal("SO0042", response.Data!.OdooSoRef);
+        Assert.Equal("SO0042", response.Data!.UOdooSoId);
         Assert.Equal(77, response.Data.PickingId);
         Assert.Equal("WH/OUT/00012", response.Data.PickingName);
         Assert.Equal("done", response.Data.State);
         Assert.Equal("DN-001", response.Data.SapDeliveryNo);
+    }
+
+    [Fact]
+    public void Create_WithDeprecatedOdooSoRef_ResolvedSoIdFallsBack()
+    {
+        // Arrange: only deprecated field supplied
+        var request = new DeliveryUpdateRequest
+        {
+            UOdooSoId = string.Empty,
+            OdooSoRef = "SO0042",
+            SapDeliveryNo = "DN-001"
+        };
+
+        // Assert: ResolvedSoId falls back to deprecated alias
+        Assert.Equal("SO0042", request.ResolvedSoId);
+    }
+
+    [Fact]
+    public void Create_UOdooSoIdTakesPrecedenceOverOdooSoRef()
+    {
+        // Arrange: both fields supplied
+        var request = new DeliveryUpdateRequest
+        {
+            UOdooSoId = "SO0042",
+            OdooSoRef = "SO_OLD",
+            SapDeliveryNo = "DN-001"
+        };
+
+        // Assert: UOdooSoId wins
+        Assert.Equal("SO0042", request.ResolvedSoId);
     }
 
     [Fact]
@@ -64,7 +94,7 @@ public class DeliveriesControllerTests
         // Arrange
         var request = new DeliveryUpdateRequest
         {
-            OdooSoRef = "SO0099",
+            UOdooSoId = "SO0099",
             SapDeliveryNo = "DN-002"
         };
 

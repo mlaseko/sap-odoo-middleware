@@ -5,8 +5,8 @@ namespace SapOdooMiddleware.Models.Odoo;
 /// </summary>
 public class DeliveryUpdateResponse
 {
-    /// <summary>The Odoo sale.order reference that was updated.</summary>
-    public string OdooSoRef { get; set; } = string.Empty;
+    /// <summary>The Odoo sale.order identifier that was updated.</summary>
+    public string UOdooSoId { get; set; } = string.Empty;
 
     /// <summary>Odoo stock.picking id that was validated.</summary>
     public int PickingId { get; set; }

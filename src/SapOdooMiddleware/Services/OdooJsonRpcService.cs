@@ -35,32 +35,34 @@ public class OdooJsonRpcService : IOdooService
     {
         await EnsureAuthenticatedAsync();
 
-        // 1. Find sale.order by odoo_so_ref (name field)
+        var soId = request.ResolvedSoId;
+
+        // 1. Find sale.order by name (which matches the Odoo SO identifier, e.g. "SO0042")
         var soIds = await SearchAsync("sale.order", new JsonArray
         {
-            new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(request.OdooSoRef) }
+            new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(soId) }
         });
 
         if (soIds.Count == 0)
-            throw new InvalidOperationException($"Sale order '{request.OdooSoRef}' not found in Odoo.");
+            throw new InvalidOperationException($"Sale order '{soId}' not found in Odoo.");
 
-        int soId = soIds[0];
-        _logger.LogInformation("Found Odoo sale.order id={SoId} for ref={OdooSoRef}", soId, request.OdooSoRef);
+        int soDbId = soIds[0];
+        _logger.LogInformation("Found Odoo sale.order id={SoId} for ref={UOdooSoId}", soDbId, soId);
 
         // 2. Find related outgoing stock.picking that is not done/cancelled
         var pickingIds = await SearchAsync("stock.picking", new JsonArray
         {
-            new JsonArray { JsonValue.Create("sale_id"), JsonValue.Create("="), JsonValue.Create(soId) },
+            new JsonArray { JsonValue.Create("sale_id"), JsonValue.Create("="), JsonValue.Create(soDbId) },
             new JsonArray { JsonValue.Create("picking_type_code"), JsonValue.Create("="), JsonValue.Create("outgoing") },
             new JsonArray { JsonValue.Create("state"), JsonValue.Create("not in"), new JsonArray { JsonValue.Create("done"), JsonValue.Create("cancel") } }
         });
 
         if (pickingIds.Count == 0)
             throw new InvalidOperationException(
-                $"No pending outgoing picking found for sale order '{request.OdooSoRef}'.");
+                $"No pending outgoing picking found for sale order '{soId}'.");
 
         int pickingId = pickingIds[0];
-        _logger.LogInformation("Found Odoo stock.picking id={PickingId} for SO ref={OdooSoRef}", pickingId, request.OdooSoRef);
+        _logger.LogInformation("Found Odoo stock.picking id={PickingId} for SO ref={UOdooSoId}", pickingId, soId);
 
         // 3. action_assign() — reserve stock
         await ExecuteMethodAsync("stock.picking", "action_assign", new JsonArray { pickingId });
@@ -101,7 +103,7 @@ public class OdooJsonRpcService : IOdooService
 
         return new DeliveryUpdateResponse
         {
-            OdooSoRef = request.OdooSoRef,
+            UOdooSoId = soId,
             PickingId = pickingId,
             PickingName = pickingName,
             State = state,

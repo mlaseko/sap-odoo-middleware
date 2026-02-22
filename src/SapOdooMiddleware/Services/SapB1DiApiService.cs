@@ -50,17 +50,21 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             EnsureConnected();
 
             var company = _company!;
+            var soId = request.ResolvedSoId;
 
             // --- Create Sales Order ---
             dynamic order = company.GetBusinessObject(17); // oOrders = 17
             order.CardCode = request.CardCode;
-            order.NumAtCard = request.OdooSoRef; // Odoo SO ref on header
+            order.NumAtCard = soId; // Odoo SO identifier on header (NumAtCard)
 
             if (request.DocDate.HasValue)
                 order.DocDate = request.DocDate.Value;
 
             if (request.DocDueDate.HasValue)
                 order.DocDueDate = request.DocDueDate.Value;
+
+            // Set header UDF U_Odoo_SO_ID
+            TrySetUserField(order, "U_Odoo_SO_ID", soId);
 
             for (int i = 0; i < request.Lines.Count; i++)
             {
@@ -71,15 +75,23 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                 order.Lines.ItemCode = line.ItemCode;
                 order.Lines.Quantity = line.Quantity;
+                order.Lines.UnitPrice = line.UnitPrice;
 
-                if (line.UnitPrice.HasValue)
-                    order.Lines.UnitPrice = line.UnitPrice.Value;
+                if (line.GrossBuyPr.HasValue)
+                    order.Lines.GrossBuyPr = line.GrossBuyPr.Value;
 
                 if (!string.IsNullOrEmpty(line.WarehouseCode))
                     order.Lines.WarehouseCode = line.WarehouseCode;
 
-                if (!string.IsNullOrEmpty(line.OdooLineRef))
-                    order.Lines.FreeText = line.OdooLineRef;
+                // Set line UDFs
+                if (!string.IsNullOrEmpty(line.UOdooSoLineId))
+                    TrySetLineUserField(order, "U_Odoo_SOLine_ID", line.UOdooSoLineId);
+
+                if (!string.IsNullOrEmpty(line.UOdooMoveId))
+                    TrySetLineUserField(order, "U_Odoo_Move_ID", line.UOdooMoveId);
+
+                if (!string.IsNullOrEmpty(line.UOdooDeliveryId))
+                    TrySetLineUserField(order, "U_Odoo_Delivery_ID", line.UOdooDeliveryId);
             }
 
             int result = order.Add();
@@ -99,8 +111,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             int docNum = (int)order.DocNum;
 
             _logger.LogInformation(
-                "Created SAP Sales Order DocEntry={DocEntry} DocNum={DocNum} for Odoo ref {OdooSoRef}",
-                docEntry, docNum, request.OdooSoRef);
+                "Created SAP Sales Order DocEntry={DocEntry} DocNum={DocNum} for Odoo ref {UOdooSoId}",
+                docEntry, docNum, soId);
 
             // --- Optionally create Pick List ---
             int? pickListEntry = null;
@@ -115,13 +127,45 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             {
                 DocEntry = docEntry,
                 DocNum = docNum,
-                OdooSoRef = request.OdooSoRef,
+                UOdooSoId = soId,
                 PickListEntry = pickListEntry
             };
         }
         finally
         {
             _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Attempts to set a user-defined field (UDF) on the document header.
+    /// Logs a warning and continues if the UDF does not exist in this SAP B1 system.
+    /// </summary>
+    private void TrySetUserField(dynamic obj, string fieldName, string value)
+    {
+        try
+        {
+            obj.UserFields.Fields.Item(fieldName).Value = value;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "UDF '{FieldName}' not found on document header — skipping.", fieldName);
+        }
+    }
+
+    /// <summary>
+    /// Attempts to set a user-defined field (UDF) on the current document line.
+    /// Logs a warning and continues if the UDF does not exist in this SAP B1 system.
+    /// </summary>
+    private void TrySetLineUserField(dynamic obj, string fieldName, string value)
+    {
+        try
+        {
+            obj.Lines.UserFields.Fields.Item(fieldName).Value = value;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "UDF '{FieldName}' not found on document line — skipping.", fieldName);
         }
     }
 

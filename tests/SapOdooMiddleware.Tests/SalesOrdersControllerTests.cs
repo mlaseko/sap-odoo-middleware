@@ -25,11 +25,11 @@ public class SalesOrdersControllerTests
         // Arrange
         var request = new SapSalesOrderRequest
         {
-            OdooSoRef = "SO0042",
+            UOdooSoId = "SO0042",
             CardCode = "C10000",
             Lines =
             [
-                new SapSalesOrderLineRequest { ItemCode = "ITEM001", Quantity = 10 }
+                new SapSalesOrderLineRequest { ItemCode = "ITEM001", Quantity = 10, UnitPrice = 25.50 }
             ]
         };
 
@@ -37,7 +37,7 @@ public class SalesOrdersControllerTests
         {
             DocEntry = 100,
             DocNum = 200,
-            OdooSoRef = "SO0042",
+            UOdooSoId = "SO0042",
             PickListEntry = 50
         };
 
@@ -54,8 +54,62 @@ public class SalesOrdersControllerTests
         Assert.True(response.Success);
         Assert.Equal(100, response.Data!.DocEntry);
         Assert.Equal(200, response.Data.DocNum);
-        Assert.Equal("SO0042", response.Data.OdooSoRef);
+        Assert.Equal("SO0042", response.Data.UOdooSoId);
         Assert.Equal(50, response.Data.PickListEntry);
+    }
+
+    [Fact]
+    public void Create_WithDeprecatedOdooSoRef_ResolvedSoIdFallsBack()
+    {
+        // Arrange: only deprecated field supplied
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = string.Empty,
+            OdooSoRef = "SO0099",
+            CardCode = "C10000",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10 }]
+        };
+
+        // Assert: ResolvedSoId falls back to deprecated alias
+        Assert.Equal("SO0099", request.ResolvedSoId);
+    }
+
+    [Fact]
+    public void Create_UOdooSoIdTakesPrecedenceOverOdooSoRef()
+    {
+        // Arrange: both fields supplied
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO0042",
+            OdooSoRef = "SO_OLD",
+            CardCode = "C10000",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10 }]
+        };
+
+        // Assert: UOdooSoId wins
+        Assert.Equal("SO0042", request.ResolvedSoId);
+    }
+
+    [Fact]
+    public void Create_LineWithOptionalUdfFields_MapsCorrectly()
+    {
+        // Arrange: line with all optional UDF fields
+        var line = new SapSalesOrderLineRequest
+        {
+            ItemCode = "ITEM001",
+            Quantity = 5,
+            UnitPrice = 100.0,
+            GrossBuyPr = 80.0,
+            UOdooSoLineId = "SOL/0042/1",
+            UOdooMoveId = "MOVE/001",
+            UOdooDeliveryId = "PICK/001",
+            WarehouseCode = "01"
+        };
+
+        Assert.Equal("SOL/0042/1", line.UOdooSoLineId);
+        Assert.Equal("MOVE/001", line.UOdooMoveId);
+        Assert.Equal("PICK/001", line.UOdooDeliveryId);
+        Assert.Equal(80.0, line.GrossBuyPr);
     }
 
     [Fact]
@@ -64,9 +118,9 @@ public class SalesOrdersControllerTests
         // Arrange
         var request = new SapSalesOrderRequest
         {
-            OdooSoRef = "SO0099",
+            UOdooSoId = "SO0099",
             CardCode = "C10000",
-            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1 }]
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10 }]
         };
 
         _sapServiceMock

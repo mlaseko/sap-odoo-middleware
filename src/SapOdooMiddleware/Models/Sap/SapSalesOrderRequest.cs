@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 
 namespace SapOdooMiddleware.Models.Sap;
 
@@ -7,9 +8,19 @@ namespace SapOdooMiddleware.Models.Sap;
 /// </summary>
 public class SapSalesOrderRequest
 {
-    /// <summary>Odoo sale.order reference (e.g. "SO0042") stored on the SAP SO for traceability.</summary>
+    /// <summary>
+    /// Odoo sale.order identifier stored in SAP B1 header UDF <c>U_Odoo_SO_ID</c>
+    /// and used as <c>NumAtCard</c> on the SAP Sales Order.
+    /// Maps to JSON field <c>u_odoo_so_id</c>.
+    /// </summary>
     [Required]
-    public string OdooSoRef { get; set; } = string.Empty;
+    public string UOdooSoId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// [Deprecated] Use <c>u_odoo_so_id</c> instead.
+    /// Accepted for backwards compatibility; ignored when <c>u_odoo_so_id</c> is present.
+    /// </summary>
+    public string? OdooSoRef { get; set; }
 
     /// <summary>SAP Business Partner (customer) card code.</summary>
     [Required]
@@ -25,6 +36,14 @@ public class SapSalesOrderRequest
     [Required]
     [MinLength(1)]
     public List<SapSalesOrderLineRequest> Lines { get; set; } = [];
+
+    /// <summary>
+    /// Returns the effective Odoo SO identifier: <c>UOdooSoId</c> if set,
+    /// otherwise falls back to the deprecated <c>OdooSoRef</c>.
+    /// </summary>
+    [JsonIgnore]
+    public string ResolvedSoId =>
+        !string.IsNullOrEmpty(UOdooSoId) ? UOdooSoId : (OdooSoRef ?? string.Empty);
 }
 
 public class SapSalesOrderLineRequest
@@ -37,12 +56,32 @@ public class SapSalesOrderLineRequest
     [Range(0.0001, double.MaxValue)]
     public double Quantity { get; set; }
 
-    /// <summary>Unit price (optional — can fall back to SAP price list).</summary>
-    public double? UnitPrice { get; set; }
+    /// <summary>Unit price (required — used as the line selling price in SAP B1).</summary>
+    [Required]
+    public double UnitPrice { get; set; }
+
+    /// <summary>
+    /// Gross buy price for the line (optional). Maps to SAP B1 line field <c>GrossBuyPr</c>.
+    /// </summary>
+    public double? GrossBuyPr { get; set; }
 
     /// <summary>SAP warehouse code for this line.</summary>
     public string? WarehouseCode { get; set; }
 
-    /// <summary>Odoo sale.order.line reference for traceability.</summary>
-    public string? OdooLineRef { get; set; }
+    /// <summary>
+    /// Odoo sale.order.line ID. Maps to SAP B1 line UDF <c>U_Odoo_SOLine_ID</c>.
+    /// </summary>
+    public string? UOdooSoLineId { get; set; }
+
+    /// <summary>
+    /// Odoo stock.move ID for delivery traceability. Maps to SAP B1 line UDF <c>U_Odoo_Move_ID</c>.
+    /// Optional.
+    /// </summary>
+    public string? UOdooMoveId { get; set; }
+
+    /// <summary>
+    /// Odoo delivery (stock.picking) ID. Maps to SAP B1 line UDF <c>U_Odoo_Delivery_ID</c>
+    /// if that UDF is defined in your SAP B1 system. Optional.
+    /// </summary>
+    public string? UOdooDeliveryId { get; set; }
 }

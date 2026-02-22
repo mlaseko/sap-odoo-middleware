@@ -213,7 +213,7 @@ X-Api-Key: YOUR_KEY
 Content-Type: application/json
 
 {
-  "odoo_so_ref": "SO0042",
+  "u_odoo_so_id": "SO0042",
   "card_code": "C10000",
   "doc_date": "2025-01-15",
   "doc_due_date": "2025-01-30",
@@ -222,12 +222,40 @@ Content-Type: application/json
       "item_code": "ITEM001",
       "quantity": 10,
       "unit_price": 25.50,
+      "gross_buy_pr": 20.00,
       "warehouse_code": "01",
-      "odoo_line_ref": "SOL/0042/1"
+      "u_odoo_so_line_id": "SOL/0042/1",
+      "u_odoo_move_id": "MOVE/001",
+      "u_odoo_delivery_id": "PICK/001"
     }
   ]
 }
 ```
+
+**Field mapping (SAP B1):**
+
+| JSON field | SAP B1 field / UDF | Required |
+|---|---|---|
+| `u_odoo_so_id` | `NumAtCard` + header UDF `U_Odoo_SO_ID` | ✅ |
+| `card_code` | `CardCode` | ✅ |
+| `doc_date` | `DocDate` | No |
+| `doc_due_date` | `DocDueDate` | No |
+| `lines[].item_code` | `Lines.ItemCode` | ✅ |
+| `lines[].quantity` | `Lines.Quantity` | ✅ |
+| `lines[].unit_price` | `Lines.UnitPrice` | ✅ |
+| `lines[].gross_buy_pr` | `Lines.GrossBuyPr` | No |
+| `lines[].warehouse_code` | `Lines.WarehouseCode` | No |
+| `lines[].u_odoo_so_line_id` | Line UDF `U_Odoo_SOLine_ID` | No |
+| `lines[].u_odoo_move_id` | Line UDF `U_Odoo_Move_ID` | No |
+| `lines[].u_odoo_delivery_id` | Line UDF `U_Odoo_Delivery_ID` | No |
+
+> **Note:** UDF fields (`U_Odoo_SO_ID`, `U_Odoo_SOLine_ID`, `U_Odoo_Move_ID`, `U_Odoo_Delivery_ID`)
+> must be defined in your SAP B1 system (RDR and RDR1 tables respectively). If a UDF is not present,
+> the middleware logs a warning and continues — it will **not** abort the order creation.
+
+> **Backwards compatibility:** The deprecated field `odoo_so_ref` is still accepted as an alias for
+> `u_odoo_so_id`. When both are supplied, `u_odoo_so_id` takes precedence.
+> `odoo_so_ref` will be removed in a future version.
 
 **Response:**
 
@@ -237,7 +265,7 @@ Content-Type: application/json
   "data": {
     "doc_entry": 100,
     "doc_num": 200,
-    "odoo_so_ref": "SO0042",
+    "u_odoo_so_id": "SO0042",
     "pick_list_entry": 50
   }
 }
@@ -251,12 +279,16 @@ X-Api-Key: YOUR_KEY
 Content-Type: application/json
 
 {
-  "odoo_so_ref": "SO0042",
+  "u_odoo_so_id": "SO0042",
   "sap_delivery_no": "DN-001",
   "delivery_date": "2025-01-20",
   "status": "delivered"
 }
 ```
+
+> **Backwards compatibility:** The deprecated field `odoo_so_ref` is still accepted as an alias for
+> `u_odoo_so_id`. When both are supplied, `u_odoo_so_id` takes precedence.
+> `odoo_so_ref` will be removed in a future version.
 
 **Response:**
 
@@ -264,7 +296,7 @@ Content-Type: application/json
 {
   "success": true,
   "data": {
-    "odoo_so_ref": "SO0042",
+    "u_odoo_so_id": "SO0042",
     "picking_id": 77,
     "picking_name": "WH/OUT/00012",
     "state": "done",
@@ -279,7 +311,7 @@ Content-Type: application/json
 
 1. Sales Order created in Odoo
 2. Odoo sends POST to `/api/sales-orders` with order data
-3. Middleware creates SO in SAP B1 via DI API (with Odoo ref on header `NumAtCard`)
+3. Middleware creates SO in SAP B1 via DI API (with Odoo identifier on header `NumAtCard` and UDF `U_Odoo_SO_ID`)
 4. Middleware auto-creates a Pick List for the new SO
 5. Warehouse completes picking/packing in SAP B1
 6. SAP posts Delivery Note (stock is issued)
@@ -288,7 +320,7 @@ Content-Type: application/json
 
 1. SAP Delivery Note is posted
 2. SAP sends header-only POST to `/api/deliveries`
-3. Middleware finds the `sale.order` in Odoo by `odoo_so_ref`
+3. Middleware finds the `sale.order` in Odoo by `u_odoo_so_id` (matched against the Odoo `name` field, e.g. "SO0042")
 4. Finds the related outgoing `stock.picking` (not done/cancelled)
 5. Runs standard Odoo workflow:
    - `action_assign()` — reserve stock
