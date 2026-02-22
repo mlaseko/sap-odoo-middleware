@@ -17,6 +17,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     private readonly ILogger<SapB1DiApiService> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
+    // BoSuppLangs.ln_English = 8 (SAPbobsCOM language enum value)
+    private const int LanguageEnglish = 8;
+
     private dynamic? _company;
     private bool _disposed;
 
@@ -237,7 +240,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         company.Password = _settings.Password;
         company.LicenseServer = _settings.LicenseServer;
         company.UseTrusted = false;
-        company.language = 8; // BoSuppLangs.ln_English
+        company.Language = LanguageEnglish;
 
         // Map DbServerType string to enum value
         company.DbServerType = MapDbServerType(_settings.DbServerType);
