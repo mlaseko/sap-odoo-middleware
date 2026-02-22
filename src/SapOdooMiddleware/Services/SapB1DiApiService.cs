@@ -20,6 +20,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     // BoSuppLangs.ln_English = 8 (SAPbobsCOM language enum value)
     private const int LanguageEnglish = 8;
 
+    // SAP B1 DI API error codes
+    private const int ErrorDbServerTypeNotSupported = -119;
+    private const int ErrorSboAuthentication = -132;
+
     private dynamic? _company;
     private bool _disposed;
 
@@ -275,7 +279,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             errCode = company.GetLastErrorCode();
             errMsg = company.GetLastErrorDescription();
 
-            if (errCode == -119 && i < candidates.Length - 1)
+            if (errCode == ErrorDbServerTypeNotSupported && i < candidates.Length - 1)
             {
                 _logger.LogWarning(
                     "SAP B1 DI API connection failed with DbServerType ordinal {Ordinal} (error {Code}: {Message}). " +
@@ -289,7 +293,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             Marshal.ReleaseComObject(company);
 
-            var hint = errCode == -132
+            var hint = errCode == ErrorSboAuthentication
                 ? " Hint for error -132 (SBO user authentication): verify that (1) LicenseServer is set correctly, " +
                   "(2) the installed DI API version matches the SAP B1 server patch level exactly, " +
                   "(3) UserName/Password are valid SAP B1 application credentials (not SQL credentials), " +
