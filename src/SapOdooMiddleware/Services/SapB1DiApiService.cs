@@ -157,15 +157,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 var warehouseForLogging = line.WarehouseCode ?? "(default)";
 
                 _logger.LogDebug(
-                    "Line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={UnitPrice}, GrossBuyPr={GrossBuyPr}, Warehouse={Warehouse}",
-                    i, line.ItemCode, line.Quantity, line.UnitPrice, line.GrossBuyPr, warehouseForLogging);
+                    "Line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={UnitPrice}, Warehouse={Warehouse}",
+                    i, line.ItemCode, line.Quantity, line.UnitPrice, warehouseForLogging);
 
                 order.Lines.ItemCode = line.ItemCode;
                 order.Lines.Quantity = line.Quantity;
                 order.Lines.UnitPrice = line.UnitPrice;
-
-                if (line.GrossBuyPr.HasValue)
-                    order.Lines.GrossBuyPr = line.GrossBuyPr.Value;
 
                 if (!string.IsNullOrEmpty(line.WarehouseCode))
                     order.Lines.WarehouseCode = line.WarehouseCode;
@@ -215,14 +212,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
                     pickList.PickDate = DateTime.Now;
 
-                    for (int i = 0; i < request.Lines.Count; i++)
-                    {
-                        if (i > 0) pickList.Lines.Add();
-                        pickList.Lines.DocumentEntry = docEntry;
-                        pickList.Lines.DocumentRowID = i;
-                        pickList.Lines.ReleasedQuantity = request.Lines[i].Quantity;
-                    }
-
                     int plResult = pickList.Add();
 
                     if (plResult != 0)
@@ -235,7 +224,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     {
                         int pickListEntry = int.Parse(_company!.GetNewObjectKey());
                         _logger.LogInformation(
-                            "✅ Pick list created: AbsEntry={PickListEntry}", pickListEntry);
+                            "✅ Pick list created (header-only — no lines explicitly added by middleware): AbsEntry={PickListEntry}", pickListEntry);
                         response.PickListEntry = pickListEntry;
                     }
 

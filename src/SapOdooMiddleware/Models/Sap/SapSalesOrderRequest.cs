@@ -67,11 +67,6 @@ public class SapSalesOrderLineRequest
     [JsonPropertyName("price")]
     public double Price { get => UnitPrice; set => UnitPrice = value; }
 
-    /// <summary>
-    /// Gross buy price for the line (optional). Maps to SAP B1 line field <c>GrossBuyPr</c>.
-    /// </summary>
-    public double? GrossBuyPr { get; set; }
-
     /// <summary>SAP warehouse code for this line.</summary>
     public string? WarehouseCode { get; set; }
 
