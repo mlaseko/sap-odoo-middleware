@@ -48,32 +48,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         if (dbTypeRaw.StartsWith("dst_", StringComparison.OrdinalIgnoreCase))
             dbTypeRaw = dbTypeRaw.Substring(4);
 
-                var warehouseCode = ResolveWarehouseCode(line.WarehouseCode, _settings.DefaultWarehouseCode);
-                if (string.IsNullOrEmpty(line.WarehouseCode))
-                    _logger.LogInformation(
-                        "No WarehouseCode on line {LineIndex} (item {ItemCode}) for Odoo ref {SoId} — defaulting to '{DefaultWarehouse}'",
-                        i, line.ItemCode, soId, warehouseCode);
-                order.Lines.WarehouseCode = warehouseCode;
-
-                // Set line UDFs
-                if (!string.IsNullOrEmpty(line.UOdooSoLineId))
-                    TrySetLineUserField(order, "U_Odoo_SOLine_ID", line.UOdooSoLineId);
-
-                if (!string.IsNullOrEmpty(line.UOdooMoveId))
-                    TrySetLineUserField(order, "U_Odoo_Move_ID", line.UOdooMoveId);
-
-                if (!string.IsNullOrEmpty(line.UOdooDeliveryId))
-                    TrySetLineUserField(order, "U_Odoo_Delivery_ID", line.UOdooDeliveryId);
-            }
-
-            int result = order.Add();
-            if (result != 0)
-            {
-                int errCode = company.GetLastErrorCode();
-                string errMsg = company.GetLastErrorDescription();
-                _logger.LogError("SAP DI API error creating SO: {Code} - {Message}", errCode, errMsg);
-                throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
-            }
         if (!Enum.TryParse($"dst_{dbTypeRaw}", true, out BoDataServerTypes dbType))
         {
             throw new InvalidOperationException(
@@ -287,9 +261,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             _lock.Release();
         }
-
-        _company = company;
-        _logger.LogInformation("Connected to SAP B1 DI API successfully.");
     }
 
     /// <summary>
