@@ -8,11 +8,22 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <COMReference Include="SAPbobsCOM">
+      <WrapperTool>tlbimp</WrapperTool>
+      <VersionMinor>0</VersionMinor>
+      <VersionMajor>10</VersionMajor>
+      <Guid>fc8030be-f5d2-4b8e-8f92-44228fe30100</Guid>
+      <Lcid>0</Lcid>
+      <Isolated>false</Isolated>
+      <EmbedInteropTypes>true</EmbedInteropTypes>
+    </COMReference>
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="SapOdooMiddleware.Tests" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Interop.SAPbobsCOM" Version="8.82.76" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
     <PackageReference Include="System.Data.Odbc" Version="10.0.3" />
