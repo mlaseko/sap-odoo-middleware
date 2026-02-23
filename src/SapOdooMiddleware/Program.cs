@@ -13,7 +13,11 @@ builder.Services.Configure<OdooSettings>(builder.Configuration.GetSection(OdooSe
 builder.Services.Configure<ApiKeySettings>(builder.Configuration.GetSection(ApiKeySettings.SectionName));
 
 // --- Services ---
+#if WINDOWS_BUILD
 builder.Services.AddSingleton<ISapB1Service, SapB1DiApiService>();
+#else
+builder.Services.AddSingleton<ISapB1Service, SapB1DiApiServiceStub>();
+#endif
 builder.Services.AddHttpClient<IOdooService, OdooJsonRpcService>();
 
 // --- Controllers ---

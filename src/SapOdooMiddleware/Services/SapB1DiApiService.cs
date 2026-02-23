@@ -127,6 +127,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             EnsureConnected();
 
+            _logger.LogInformation(
+                "AutoCreatePickList={AutoCreatePickList}",
+                _settings.AutoCreatePickList);
+
             var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
 
             order.CardCode = request.CardCode;
@@ -138,6 +142,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (request.DocDueDate.HasValue)
                 order.DocDueDate = request.DocDueDate.Value;
 
+            bool udfHeaderSet = TrySetUserField(order.UserFields, "U_Odoo_SO_ID", request.ResolvedSoId, "SO header");
+            if (udfHeaderSet)
+                _logger.LogDebug("UDF U_Odoo_SO_ID set to '{Value}' on SO header.", request.ResolvedSoId);
+
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 if (i > 0)
@@ -145,12 +153,31 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                 var line = request.Lines[i];
 
+                // Display value for logging only — "(default)" when no warehouse was specified.
+                var warehouseForLogging = line.WarehouseCode ?? "(default)";
+
+                _logger.LogDebug(
+                    "Line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={UnitPrice}, GrossBuyPr={GrossBuyPr}, Warehouse={Warehouse}",
+                    i, line.ItemCode, line.Quantity, line.UnitPrice, line.GrossBuyPr, warehouseForLogging);
+
                 order.Lines.ItemCode = line.ItemCode;
                 order.Lines.Quantity = line.Quantity;
                 order.Lines.UnitPrice = line.UnitPrice;
 
+                if (line.GrossBuyPr.HasValue)
+                    order.Lines.GrossBuyPr = line.GrossBuyPr.Value;
+
                 if (!string.IsNullOrEmpty(line.WarehouseCode))
                     order.Lines.WarehouseCode = line.WarehouseCode;
+
+                if (!string.IsNullOrEmpty(line.UOdooSoLineId))
+                    TrySetUserField(order.Lines.UserFields, "U_Odoo_SOLine_ID", line.UOdooSoLineId, $"line[{i}]");
+
+                if (!string.IsNullOrEmpty(line.UOdooMoveId))
+                    TrySetUserField(order.Lines.UserFields, "U_Odoo_Move_ID", line.UOdooMoveId, $"line[{i}]");
+
+                if (!string.IsNullOrEmpty(line.UOdooDeliveryId))
+                    TrySetUserField(order.Lines.UserFields, "U_Odoo_Delivery_ID", line.UOdooDeliveryId, $"line[{i}]");
             }
 
             int result = order.Add();
@@ -171,16 +198,90 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             Marshal.ReleaseComObject(order);
 
-            return new SapSalesOrderResponse
+            var response = new SapSalesOrderResponse
             {
                 DocEntry = docEntry,
                 DocNum = docNum,
                 UOdooSoId = request.ResolvedSoId
             };
+
+            if (_settings.AutoCreatePickList)
+            {
+                _logger.LogInformation(
+                    "AutoCreatePickList enabled — creating pick list for DocEntry={DocEntry}", docEntry);
+
+                try
+                {
+                    var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+                    pickList.PickDate = DateTime.Now;
+
+                    for (int i = 0; i < request.Lines.Count; i++)
+                    {
+                        if (i > 0) pickList.Lines.Add();
+                        pickList.Lines.DocumentEntry = docEntry;
+                        pickList.Lines.DocumentRowID = i;
+                        pickList.Lines.ReleasedQuantity = request.Lines[i].Quantity;
+                    }
+
+                    int plResult = pickList.Add();
+
+                    if (plResult != 0)
+                    {
+                        _company!.GetLastError(out int plErrCode, out string plErrMsg);
+                        _logger.LogWarning(
+                            "Pick list creation failed (ErrCode={ErrCode}): {ErrMsg}", plErrCode, plErrMsg);
+                    }
+                    else
+                    {
+                        int pickListEntry = int.Parse(_company!.GetNewObjectKey());
+                        _logger.LogInformation(
+                            "✅ Pick list created: AbsEntry={PickListEntry}", pickListEntry);
+                        response.PickListEntry = pickListEntry;
+                    }
+
+                    Marshal.ReleaseComObject(pickList);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Pick list creation threw an exception — continuing without pick list.");
+                }
+            }
+            else
+            {
+                _logger.LogDebug("AutoCreatePickList disabled — skipping pick list creation.");
+            }
+
+            _logger.LogInformation(
+                "PickListEntry={PickListEntry} (created={Created})",
+                response.PickListEntry, response.PickListEntry.HasValue);
+
+            return response;
         }
         finally
         {
             _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Attempts to set a User-Defined Field (UDF) on the given <paramref name="userFields"/> object.
+    /// Logs a warning (instead of throwing) when the field does not exist in the SAP B1 schema.
+    /// </summary>
+    /// <returns><c>true</c> if the field was set successfully; <c>false</c> otherwise.</returns>
+    private bool TrySetUserField(UserFields userFields, string fieldName, string value, string context)
+    {
+        try
+        {
+            userFields.Fields.Item(fieldName).Value = value;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to set UDF '{FieldName}' on {Context} — field may not exist in this SAP B1 schema.",
+                fieldName, context);
+            return false;
         }
     }
 
