@@ -99,7 +99,6 @@ public class SalesOrdersControllerTests
             ItemCode = "ITEM001",
             Quantity = 5,
             UnitPrice = 100.0,
-            GrossBuyPr = 80.0,
             UOdooSoLineId = "SOL/0042/1",
             UOdooMoveId = "MOVE/001",
             UOdooDeliveryId = "PICK/001",
@@ -109,7 +108,6 @@ public class SalesOrdersControllerTests
         Assert.Equal("SOL/0042/1", line.UOdooSoLineId);
         Assert.Equal("MOVE/001", line.UOdooMoveId);
         Assert.Equal("PICK/001", line.UOdooDeliveryId);
-        Assert.Equal(80.0, line.GrossBuyPr);
     }
 
     [Fact]
