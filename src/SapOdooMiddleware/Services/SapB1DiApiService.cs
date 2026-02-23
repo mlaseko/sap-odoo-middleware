@@ -152,7 +152,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             TrySetUserField(order.UserFields, "U_Odoo_LastSync", syncDate, "SO header");
             TrySetUserField(order.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "SO header");
 
-            var deliveryId = request.Lines.FirstOrDefault(l => !string.IsNullOrEmpty(l.UOdooDeliveryId))?.UOdooDeliveryId;
+            var deliveryId = request.ResolvedDeliveryId;
             if (!string.IsNullOrEmpty(deliveryId))
             {
                 TrySetUserField(order.UserFields, "U_Odoo_Delivery_ID", deliveryId, "SO header");
@@ -310,7 +310,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             TrySetUserField(order.UserFields, "U_Odoo_LastSync", syncDate, "SO header update");
             TrySetUserField(order.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "SO header update");
 
-            var deliveryId = request.Lines.FirstOrDefault(l => !string.IsNullOrEmpty(l.UOdooDeliveryId))?.UOdooDeliveryId;
+            var deliveryId = request.ResolvedDeliveryId;
             if (!string.IsNullOrEmpty(deliveryId))
             {
                 TrySetUserField(order.UserFields, "U_Odoo_Delivery_ID", deliveryId, "SO header update");

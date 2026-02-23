@@ -84,4 +84,26 @@ public class SapSalesOrderLineRequestTests
         // Assert
         Assert.Equal(123.45, line.Price);
     }
+
+    [Fact]
+    public void Deserialize_NameFieldWithSlashes_SetsNameOnRequest()
+    {
+        // Arrange: Odoo sends "name" containing delivery note reference with slashes
+        const string json = """
+        {
+            "u_odoo_so_id": "SO001",
+            "card_code": "C10000",
+            "name": "WH/OUT/00011",
+            "lines": [{"item_code":"ITEM001","quantity":1,"price":10.00}]
+        }
+        """;
+
+        // Act
+        var request = JsonSerializer.Deserialize<SapSalesOrderRequest>(json, SnakeCaseOptions);
+
+        // Assert: name is deserialized correctly including slashes
+        Assert.NotNull(request);
+        Assert.Equal("WH/OUT/00011", request!.Name);
+        Assert.Equal("WH/OUT/00011", request.ResolvedDeliveryId);
+    }
 }

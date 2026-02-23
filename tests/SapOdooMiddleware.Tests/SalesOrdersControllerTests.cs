@@ -200,4 +200,59 @@ public class SalesOrdersControllerTests
         Assert.False(response.Success);
         Assert.Contains($"DocEntry={docEntry}", response.Errors!.First());
     }
+
+    [Fact]
+    public void ResolvedDeliveryId_HeaderNameSet_ReturnsHeaderName()
+    {
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO001",
+            CardCode = "C10000",
+            Name = "WH/OUT/00011",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10 }]
+        };
+
+        Assert.Equal("WH/OUT/00011", request.ResolvedDeliveryId);
+    }
+
+    [Fact]
+    public void ResolvedDeliveryId_HeaderNameWithSlashes_PreservesSlashes()
+    {
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO001",
+            CardCode = "C10000",
+            Name = "WH/OUT/00099",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10, UOdooDeliveryId = "LINE_DEL_1" }]
+        };
+
+        // Header-level Name takes precedence over line-level UOdooDeliveryId
+        Assert.Equal("WH/OUT/00099", request.ResolvedDeliveryId);
+    }
+
+    [Fact]
+    public void ResolvedDeliveryId_NoHeaderName_FallsBackToLineDeliveryId()
+    {
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO001",
+            CardCode = "C10000",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10, UOdooDeliveryId = "PICK/001" }]
+        };
+
+        Assert.Equal("PICK/001", request.ResolvedDeliveryId);
+    }
+
+    [Fact]
+    public void ResolvedDeliveryId_NoHeaderNameNoLineDeliveryId_ReturnsNull()
+    {
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO001",
+            CardCode = "C10000",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10 }]
+        };
+
+        Assert.Null(request.ResolvedDeliveryId);
+    }
 }
