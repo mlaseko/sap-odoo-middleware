@@ -14,6 +14,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     private readonly ILogger<SapB1DiApiService> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
+    private const string SyncTimestampFormat = "yyyy-MM-ddTHH:mm:ssZ";
+    private const string SyncDirectionOdooToSap = "odoo_to_sap";
+
     private Company? _company;
     private bool _disposed;
 
@@ -146,6 +149,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (udfHeaderSet)
                 _logger.LogDebug("UDF U_Odoo_SO_ID set to '{Value}' on SO header.", request.ResolvedSoId);
 
+            var syncTimestamp = DateTime.UtcNow.ToString(SyncTimestampFormat);
+            TrySetUserField(order.UserFields, "U_Odoo_LastSync", syncTimestamp, "SO header");
+            TrySetUserField(order.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "SO header");
+            _logger.LogDebug("UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header.", syncTimestamp, SyncDirectionOdooToSap);
+
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 if (i > 0)
@@ -263,6 +271,66 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 response.PickListEntry, response.PickListEntry.HasValue);
 
             return response;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<SapSalesOrderResponse> UpdateSalesOrderAsync(int docEntry, SapSalesOrderRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Updating SAP SO — DocEntry={DocEntry}, ResolvedSoId={ResolvedSoId}",
+                docEntry, request.ResolvedSoId);
+
+            var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
+
+            if (!order.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(order);
+                throw new InvalidOperationException(
+                    $"SAP B1 Sales Order with DocEntry={docEntry} not found.");
+            }
+
+            int docNum = order.DocNum;
+
+            TrySetUserField(order.UserFields, "U_Odoo_SO_ID", request.ResolvedSoId, "SO header update");
+
+            var syncTimestamp = DateTime.UtcNow.ToString(SyncTimestampFormat);
+            TrySetUserField(order.UserFields, "U_Odoo_LastSync", syncTimestamp, "SO header update");
+            TrySetUserField(order.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "SO header update");
+            _logger.LogDebug(
+                "UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header update.",
+                syncTimestamp, SyncDirectionOdooToSap);
+
+            int result = order.Update();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(order);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            Marshal.ReleaseComObject(order);
+
+            _logger.LogInformation(
+                "✅ SAP SO updated: DocEntry={DocEntry}, DocNum={DocNum}",
+                docEntry, docNum);
+
+            return new SapSalesOrderResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                UOdooSoId = request.ResolvedSoId
+            };
         }
         finally
         {

@@ -13,6 +13,12 @@ public interface ISapB1Service
     Task<SapSalesOrderResponse> CreateSalesOrderAsync(SapSalesOrderRequest request);
 
     /// <summary>
+    /// Updates an existing Sales Order in SAP B1 via DI API by DocEntry,
+    /// refreshing UDFs including <c>U_Odoo_LastSync</c> and <c>U_Odoo_SyncDir</c>.
+    /// </summary>
+    Task<SapSalesOrderResponse> UpdateSalesOrderAsync(int docEntry, SapSalesOrderRequest request);
+
+    /// <summary>
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();

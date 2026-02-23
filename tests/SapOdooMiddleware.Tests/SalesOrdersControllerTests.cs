@@ -135,4 +135,69 @@ public class SalesOrdersControllerTests
         Assert.False(response.Success);
         Assert.Contains("SAP DI API error 123", response.Errors!.First());
     }
+
+    [Fact]
+    public async Task Update_ValidRequest_ReturnsOkWithSapResponse()
+    {
+        // Arrange
+        const int docEntry = 100;
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO0042",
+            CardCode = "C10000",
+            Lines =
+            [
+                new SapSalesOrderLineRequest { ItemCode = "ITEM001", Quantity = 10, UnitPrice = 25.50 }
+            ]
+        };
+
+        var expected = new SapSalesOrderResponse
+        {
+            DocEntry = docEntry,
+            DocNum = 200,
+            UOdooSoId = "SO0042"
+        };
+
+        _sapServiceMock
+            .Setup(s => s.UpdateSalesOrderAsync(docEntry, request))
+            .ReturnsAsync(expected);
+
+        // Act
+        var result = await _controller.Update(docEntry, request);
+
+        // Assert
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        var response = Assert.IsType<ApiResponse<SapSalesOrderResponse>>(okResult.Value);
+        Assert.True(response.Success);
+        Assert.Equal(docEntry, response.Data!.DocEntry);
+        Assert.Equal(200, response.Data.DocNum);
+        Assert.Equal("SO0042", response.Data.UOdooSoId);
+    }
+
+    [Fact]
+    public async Task Update_ServiceThrows_Returns500WithError()
+    {
+        // Arrange
+        const int docEntry = 999;
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO0099",
+            CardCode = "C10000",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10 }]
+        };
+
+        _sapServiceMock
+            .Setup(s => s.UpdateSalesOrderAsync(docEntry, request))
+            .ThrowsAsync(new InvalidOperationException($"SAP B1 Sales Order with DocEntry={docEntry} not found."));
+
+        // Act
+        var result = await _controller.Update(docEntry, request);
+
+        // Assert
+        var objectResult = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(500, objectResult.StatusCode);
+        var response = Assert.IsType<ApiResponse<SapSalesOrderResponse>>(objectResult.Value);
+        Assert.False(response.Success);
+        Assert.Contains($"DocEntry={docEntry}", response.Errors!.First());
+    }
 }
