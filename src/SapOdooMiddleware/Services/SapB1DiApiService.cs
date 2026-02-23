@@ -224,6 +224,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     for (int i = 0; i < lineCaptures.Count; i++)
                     {
                         if (i > 0) pickList.Lines.Add();
+                        pickList.Lines.BaseObjectType = (int)BoObjectTypes.oOrders;
                         pickList.Lines.OrderEntry = docEntry;
                         pickList.Lines.OrderRowID = lineCaptures[i].lineNum;
                         pickList.Lines.ReleasedQuantity = lineCaptures[i].qty;
