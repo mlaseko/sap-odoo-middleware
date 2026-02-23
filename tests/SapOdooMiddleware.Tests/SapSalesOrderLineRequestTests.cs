@@ -106,4 +106,50 @@ public class SapSalesOrderLineRequestTests
         Assert.Equal("WH/OUT/00011", request!.Name);
         Assert.Equal("WH/OUT/00011", request.ResolvedDeliveryId);
     }
+
+    [Fact]
+    public void Deserialize_OdooDeliveryIdField_SetsOdooDeliveryId()
+    {
+        // Arrange: Odoo sends "odoo_delivery_id" key
+        const string json = """
+        {
+            "u_odoo_so_id": "SO002",
+            "card_code": "C10000",
+            "odoo_delivery_id": "WH/OUT/00042",
+            "lines": [{"item_code":"ITEM001","quantity":1,"price":10.00}]
+        }
+        """;
+
+        // Act
+        var request = JsonSerializer.Deserialize<SapSalesOrderRequest>(json, SnakeCaseOptions);
+
+        // Assert
+        Assert.NotNull(request);
+        Assert.Equal("WH/OUT/00042", request!.OdooDeliveryId);
+        Assert.Equal("WH/OUT/00042", request.ResolvedDeliveryId);
+    }
+
+    [Fact]
+    public void Deserialize_BothOdooDeliveryIdAndName_OdooDeliveryIdTakesPrecedence()
+    {
+        // Arrange: both keys present — odoo_delivery_id should win
+        const string json = """
+        {
+            "u_odoo_so_id": "SO003",
+            "card_code": "C10000",
+            "odoo_delivery_id": "WH/OUT/00099",
+            "name": "WH/OUT/00001",
+            "lines": [{"item_code":"ITEM001","quantity":1,"price":10.00}]
+        }
+        """;
+
+        // Act
+        var request = JsonSerializer.Deserialize<SapSalesOrderRequest>(json, SnakeCaseOptions);
+
+        // Assert: odoo_delivery_id takes precedence
+        Assert.NotNull(request);
+        Assert.Equal("WH/OUT/00099", request!.OdooDeliveryId);
+        Assert.Equal("WH/OUT/00001", request.Name);
+        Assert.Equal("WH/OUT/00099", request.ResolvedDeliveryId);
+    }
 }

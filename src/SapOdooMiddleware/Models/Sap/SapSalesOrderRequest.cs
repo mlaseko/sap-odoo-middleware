@@ -40,7 +40,16 @@ public class SapSalesOrderRequest
     /// <summary>
     /// Odoo delivery note reference (stock.picking name, e.g. <c>WH/OUT/00011</c>).
     /// Stored in SAP B1 header UDF <c>U_Odoo_Delivery_ID</c>.
+    /// Maps to JSON field <c>odoo_delivery_id</c>.
+    /// </summary>
+    [JsonPropertyName("odoo_delivery_id")]
+    public string? OdooDeliveryId { get; set; }
+
+    /// <summary>
+    /// Odoo delivery note reference (stock.picking name, e.g. <c>WH/OUT/00011</c>).
+    /// Stored in SAP B1 header UDF <c>U_Odoo_Delivery_ID</c>.
     /// Maps to JSON field <c>name</c>.
+    /// Accepted for backwards compatibility; <c>odoo_delivery_id</c> takes precedence when present.
     /// </summary>
     public string? Name { get; set; }
 
@@ -53,14 +62,17 @@ public class SapSalesOrderRequest
         !string.IsNullOrEmpty(UOdooSoId) ? UOdooSoId : (OdooSoRef ?? string.Empty);
 
     /// <summary>
-    /// Returns the effective Odoo delivery note reference: header-level <c>Name</c> if set,
-    /// otherwise falls back to the first non-empty line-level <c>UOdooDeliveryId</c>.
+    /// Returns the effective Odoo delivery note reference, checked in priority order:
+    /// <c>OdooDeliveryId</c> (JSON: <c>odoo_delivery_id</c>), then header-level <c>Name</c>,
+    /// then the first non-empty line-level <c>UOdooDeliveryId</c>.
     /// </summary>
     [JsonIgnore]
     public string? ResolvedDeliveryId =>
-        !string.IsNullOrEmpty(Name)
-            ? Name
-            : Lines.FirstOrDefault(l => !string.IsNullOrEmpty(l.UOdooDeliveryId))?.UOdooDeliveryId;
+        !string.IsNullOrEmpty(OdooDeliveryId)
+            ? OdooDeliveryId
+            : !string.IsNullOrEmpty(Name)
+                ? Name
+                : Lines.FirstOrDefault(l => !string.IsNullOrEmpty(l.UOdooDeliveryId))?.UOdooDeliveryId;
 }
 
 public class SapSalesOrderLineRequest
