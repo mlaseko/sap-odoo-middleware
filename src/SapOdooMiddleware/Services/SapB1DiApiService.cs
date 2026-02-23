@@ -193,6 +193,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             order.GetByKey(docEntry);
             int docNum = order.DocNum;
 
+            // Capture line info before releasing the COM object (used for pick list linkage).
+            var lineCaptures = new List<(int lineNum, double qty)>();
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                order.Lines.SetCurrentLine(i);
+                lineCaptures.Add((order.Lines.LineNum, order.Lines.Quantity));
+            }
+
             Marshal.ReleaseComObject(order);
 
             var response = new SapSalesOrderResponse
@@ -205,12 +213,21 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (_settings.AutoCreatePickList)
             {
                 _logger.LogInformation(
-                    "AutoCreatePickList enabled — creating pick list for DocEntry={DocEntry}", docEntry);
+                    "AutoCreatePickList enabled — creating pick list for DocEntry={DocEntry} with {LineCount} line(s)",
+                    docEntry, lineCaptures.Count);
 
                 try
                 {
                     var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
                     pickList.PickDate = DateTime.Now;
+
+                    for (int i = 0; i < lineCaptures.Count; i++)
+                    {
+                        if (i > 0) pickList.Lines.Add();
+                        pickList.Lines.OrderEntry = docEntry;
+                        pickList.Lines.OrderRowID = lineCaptures[i].lineNum;
+                        pickList.Lines.ReleasedQuantity = lineCaptures[i].qty;
+                    }
 
                     int plResult = pickList.Add();
 
@@ -224,7 +241,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     {
                         int pickListEntry = int.Parse(_company!.GetNewObjectKey());
                         _logger.LogInformation(
-                            "✅ Pick list created (header-only — no lines explicitly added by middleware): AbsEntry={PickListEntry}", pickListEntry);
+                            "✅ Pick list created: AbsEntry={PickListEntry}", pickListEntry);
                         response.PickListEntry = pickListEntry;
                     }
 
