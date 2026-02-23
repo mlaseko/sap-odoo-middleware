@@ -202,6 +202,50 @@ public class SalesOrdersControllerTests
     }
 
     [Fact]
+    public async Task Create_WithOdooDeliveryId_PassesThroughToService()
+    {
+        // Arrange: request includes odoo_delivery_id
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO0077",
+            CardCode = "C10000",
+            OdooDeliveryId = "WH/OUT/00042",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10 }]
+        };
+
+        var expected = new SapSalesOrderResponse { DocEntry = 1, DocNum = 1, UOdooSoId = "SO0077" };
+
+        _sapServiceMock
+            .Setup(s => s.CreateSalesOrderAsync(request))
+            .ReturnsAsync(expected);
+
+        // Act
+        var result = await _controller.Create(request);
+
+        // Assert: request passes through with OdooDeliveryId set
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal("WH/OUT/00042", request.OdooDeliveryId);
+        Assert.Equal("WH/OUT/00042", request.ResolvedDeliveryId);
+        _sapServiceMock.Verify(s => s.CreateSalesOrderAsync(request), Times.Once);
+    }
+
+    [Fact]
+    public void ResolvedDeliveryId_OdooDeliveryIdSet_TakesPrecedenceOverNameAndLine()
+    {
+        var request = new SapSalesOrderRequest
+        {
+            UOdooSoId = "SO001",
+            CardCode = "C10000",
+            OdooDeliveryId = "WH/OUT/00099",
+            Name = "WH/OUT/00001",
+            Lines = [new SapSalesOrderLineRequest { ItemCode = "A1", Quantity = 1, UnitPrice = 10, UOdooDeliveryId = "PICK/001" }]
+        };
+
+        Assert.Equal("WH/OUT/00099", request.ResolvedDeliveryId);
+    }
+
+
+    [Fact]
     public void ResolvedDeliveryId_HeaderNameSet_ReturnsHeaderName()
     {
         var request = new SapSalesOrderRequest

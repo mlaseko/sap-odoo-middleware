@@ -153,10 +153,30 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             TrySetUserField(order.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "SO header");
 
             var deliveryId = request.ResolvedDeliveryId;
+            _logger.LogInformation(
+                "OdooDeliveryId received: '{DeliveryId}' (length={Length})",
+                deliveryId ?? "(none)", deliveryId?.Length ?? 0);
+
             if (!string.IsNullOrEmpty(deliveryId))
             {
-                TrySetUserField(order.UserFields, "U_Odoo_Delivery_ID", deliveryId, "SO header");
-                _logger.LogDebug("UDF U_Odoo_Delivery_ID set to '{Value}' on SO header.", deliveryId);
+                _logger.LogInformation(
+                    "Attempting to write UDF U_Odoo_Delivery_ID with value length={Length}",
+                    deliveryId.Length);
+
+                bool deliveryIdSet = TrySetUserField(order.UserFields, "U_Odoo_Delivery_ID", deliveryId, "SO header");
+
+                if (!deliveryIdSet)
+                {
+                    _company!.GetLastError(out int udfErrCode, out string udfErrMsg);
+                    Marshal.ReleaseComObject(order);
+                    throw new InvalidOperationException(
+                        $"Failed to set UDF 'U_Odoo_Delivery_ID' (value length={deliveryId.Length}): " +
+                        $"DI API error {udfErrCode}: {udfErrMsg}");
+                }
+
+                _logger.LogInformation(
+                    "✅ UDF U_Odoo_Delivery_ID set successfully (value length={Length})",
+                    deliveryId.Length);
             }
 
             _logger.LogDebug("UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header.", syncDate, SyncDirectionOdooToSap);

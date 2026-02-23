@@ -28,9 +28,12 @@ public class SalesOrdersController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] SapSalesOrderRequest request)
     {
+        var deliveryIdProvided = !string.IsNullOrEmpty(request.OdooDeliveryId);
         _logger.LogInformation(
-            "Received SO creation request — ResolvedSoId={ResolvedSoId}, CardCode={CardCode}, LineCount={LineCount}",
-            request.ResolvedSoId, request.CardCode, request.Lines.Count);
+            "Received SO creation request — ResolvedSoId={ResolvedSoId}, CardCode={CardCode}, LineCount={LineCount}, OdooDeliveryId={OdooDeliveryIdProvided} (length={OdooDeliveryIdLength})",
+            request.ResolvedSoId, request.CardCode, request.Lines.Count,
+            deliveryIdProvided ? request.OdooDeliveryId : "(not provided)",
+            request.OdooDeliveryId?.Length ?? 0);
 
         try
         {
