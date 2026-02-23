@@ -244,7 +244,6 @@ public class SalesOrdersControllerTests
         Assert.Equal("WH/OUT/00099", request.ResolvedDeliveryId);
     }
 
-
     [Fact]
     public void ResolvedDeliveryId_HeaderNameSet_ReturnsHeaderName()
     {
