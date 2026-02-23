@@ -61,6 +61,13 @@ public class SapSalesOrderLineRequest
     public double UnitPrice { get; set; }
 
     /// <summary>
+    /// Alias for <see cref="UnitPrice"/>. Accepts incoming JSON field <c>price</c> from Odoo/ICC
+    /// (Option B pricing semantics). Setting this property sets <see cref="UnitPrice"/>.
+    /// </summary>
+    [JsonPropertyName("price")]
+    public double Price { get => UnitPrice; set => UnitPrice = value; }
+
+    /// <summary>
     /// Gross buy price for the line (optional). Maps to SAP B1 line field <c>GrossBuyPr</c>.
     /// </summary>
     public double? GrossBuyPr { get; set; }
