@@ -48,6 +48,32 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         if (dbTypeRaw.StartsWith("dst_", StringComparison.OrdinalIgnoreCase))
             dbTypeRaw = dbTypeRaw.Substring(4);
 
+                var warehouseCode = ResolveWarehouseCode(line.WarehouseCode, _settings.DefaultWarehouseCode);
+                if (string.IsNullOrEmpty(line.WarehouseCode))
+                    _logger.LogInformation(
+                        "No WarehouseCode on line {LineIndex} (item {ItemCode}) for Odoo ref {SoId} — defaulting to '{DefaultWarehouse}'",
+                        i, line.ItemCode, soId, warehouseCode);
+                order.Lines.WarehouseCode = warehouseCode;
+
+                // Set line UDFs
+                if (!string.IsNullOrEmpty(line.UOdooSoLineId))
+                    TrySetLineUserField(order, "U_Odoo_SOLine_ID", line.UOdooSoLineId);
+
+                if (!string.IsNullOrEmpty(line.UOdooMoveId))
+                    TrySetLineUserField(order, "U_Odoo_Move_ID", line.UOdooMoveId);
+
+                if (!string.IsNullOrEmpty(line.UOdooDeliveryId))
+                    TrySetLineUserField(order, "U_Odoo_Delivery_ID", line.UOdooDeliveryId);
+            }
+
+            int result = order.Add();
+            if (result != 0)
+            {
+                int errCode = company.GetLastErrorCode();
+                string errMsg = company.GetLastErrorDescription();
+                _logger.LogError("SAP DI API error creating SO: {Code} - {Message}", errCode, errMsg);
+                throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+            }
         if (!Enum.TryParse($"dst_{dbTypeRaw}", true, out BoDataServerTypes dbType))
         {
             throw new InvalidOperationException(
@@ -182,6 +208,50 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             _lock.Release();
         }
+
+        _company = company;
+        _logger.LogInformation("Connected to SAP B1 DI API successfully.");
+    }
+
+    /// <summary>
+    /// Returns the warehouse code to use for a Sales Order line.
+    /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to
+    /// <paramref name="defaultCode"/>.
+    /// </summary>
+    internal static string ResolveWarehouseCode(string? requestedCode, string defaultCode) =>
+        !string.IsNullOrEmpty(requestedCode) ? requestedCode : defaultCode;
+
+    /// <summary>
+    /// Maps a string DbServerType (e.g. "dst_MSSQL2019", "MSSQL2019", "MSSQL2016") to one or
+    /// more SAPbobsCOM enum ordinal candidates. Different SAPbobsCOM versions assign different
+    /// ordinals to the same logical server type, so multiple values may be returned.
+    /// The first value is the most common mapping; subsequent values are alternatives tried
+    /// when error -119 ("Database server type not supported") is returned.
+    /// Accepts values with or without the "dst_" prefix, case-insensitive.
+    /// </summary>
+    internal static int[] MapDbServerTypeCandidates(string dbServerType)
+    {
+        // Normalize: trim, uppercase, strip "dst_" prefix if present
+        var normalized = (dbServerType ?? "").Trim().ToUpperInvariant();
+        if (normalized.StartsWith("DST_"))
+            normalized = normalized["DST_".Length..];
+
+        return normalized switch
+        {
+            "MSSQL"     => [1],
+            "MSSQL2005" => [4],
+            "MSSQL2008" => [5, 6],
+            "MSSQL2012" => [6, 7],
+            "MSSQL2014" => [7, 8],
+            "MSSQL2016" => [8, 10],
+            "MSSQL2017" => [9, 15],
+            "MSSQL2019" => [10, 16],
+            "HANADB"    => [11, 9],
+            _ => throw new InvalidOperationException(
+                $"Unrecognized DbServerType '{dbServerType}'. " +
+                $"Supported values: MSSQL, MSSQL2005, MSSQL2008, MSSQL2012, MSSQL2014, MSSQL2016, MSSQL2017, MSSQL2019, HANADB " +
+                $"(with or without 'dst_' prefix).")
+        };
     }
 
     public void Dispose()

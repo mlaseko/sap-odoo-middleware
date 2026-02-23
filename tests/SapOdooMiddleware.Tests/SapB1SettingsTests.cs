@@ -41,4 +41,20 @@ public class SapB1SettingsTests
 
         Assert.Equal("license-host:30000", settings.LicenseServer);
     }
+
+    [Fact]
+    public void DefaultWarehouseCode_DefaultValue_IsMainWHSE()
+    {
+        var settings = new SapB1Settings();
+
+        Assert.Equal("MainWHSE", settings.DefaultWarehouseCode);
+    }
+
+    [Fact]
+    public void DefaultWarehouseCode_CanBeOverridden()
+    {
+        var settings = new SapB1Settings { DefaultWarehouseCode = "WAREHOUSE2" };
+
+        Assert.Equal("WAREHOUSE2", settings.DefaultWarehouseCode);
+    }
 }
