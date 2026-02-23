@@ -14,8 +14,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     private readonly ILogger<SapB1DiApiService> _logger;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
-    private const string SyncTimestampFormat = "yyyy-MM-ddTHH:mm:ssZ";
-    private const string SyncDirectionOdooToSap = "odoo_to_sap";
+    private const string SyncDirectionOdooToSap = "O2S";
 
     private Company? _company;
     private bool _disposed;
@@ -149,10 +148,18 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (udfHeaderSet)
                 _logger.LogDebug("UDF U_Odoo_SO_ID set to '{Value}' on SO header.", request.ResolvedSoId);
 
-            var syncTimestamp = DateTime.UtcNow.ToString(SyncTimestampFormat);
-            TrySetUserField(order.UserFields, "U_Odoo_LastSync", syncTimestamp, "SO header");
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(order.UserFields, "U_Odoo_LastSync", syncDate, "SO header");
             TrySetUserField(order.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "SO header");
-            _logger.LogDebug("UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header.", syncTimestamp, SyncDirectionOdooToSap);
+
+            var deliveryId = request.Lines.FirstOrDefault(l => !string.IsNullOrEmpty(l.UOdooDeliveryId))?.UOdooDeliveryId;
+            if (!string.IsNullOrEmpty(deliveryId))
+            {
+                TrySetUserField(order.UserFields, "U_Odoo_Delivery_ID", deliveryId, "SO header");
+                _logger.LogDebug("UDF U_Odoo_Delivery_ID set to '{Value}' on SO header.", deliveryId);
+            }
+
+            _logger.LogDebug("UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header.", syncDate, SyncDirectionOdooToSap);
 
             for (int i = 0; i < request.Lines.Count; i++)
             {
@@ -180,9 +187,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                 if (!string.IsNullOrEmpty(line.UOdooMoveId))
                     TrySetUserField(order.Lines.UserFields, "U_Odoo_Move_ID", line.UOdooMoveId, $"line[{i}]");
-
-                if (!string.IsNullOrEmpty(line.UOdooDeliveryId))
-                    TrySetUserField(order.Lines.UserFields, "U_Odoo_Delivery_ID", line.UOdooDeliveryId, $"line[{i}]");
             }
 
             int result = order.Add();
@@ -302,12 +306,20 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             TrySetUserField(order.UserFields, "U_Odoo_SO_ID", request.ResolvedSoId, "SO header update");
 
-            var syncTimestamp = DateTime.UtcNow.ToString(SyncTimestampFormat);
-            TrySetUserField(order.UserFields, "U_Odoo_LastSync", syncTimestamp, "SO header update");
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(order.UserFields, "U_Odoo_LastSync", syncDate, "SO header update");
             TrySetUserField(order.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "SO header update");
+
+            var deliveryId = request.Lines.FirstOrDefault(l => !string.IsNullOrEmpty(l.UOdooDeliveryId))?.UOdooDeliveryId;
+            if (!string.IsNullOrEmpty(deliveryId))
+            {
+                TrySetUserField(order.UserFields, "U_Odoo_Delivery_ID", deliveryId, "SO header update");
+                _logger.LogDebug("UDF U_Odoo_Delivery_ID set to '{Value}' on SO header update.", deliveryId);
+            }
+
             _logger.LogDebug(
                 "UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header update.",
-                syncTimestamp, SyncDirectionOdooToSap);
+                syncDate, SyncDirectionOdooToSap);
 
             int result = order.Update();
 
@@ -384,7 +396,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// Logs a warning (instead of throwing) when the field does not exist in the SAP B1 schema.
     /// </summary>
     /// <returns><c>true</c> if the field was set successfully; <c>false</c> otherwise.</returns>
-    private bool TrySetUserField(UserFields userFields, string fieldName, string value, string context)
+    private bool TrySetUserField(UserFields userFields, string fieldName, object value, string context)
     {
         try
         {
