@@ -48,4 +48,32 @@ public class SalesOrdersController : ControllerBase
             return StatusCode(500, ApiResponse<SapSalesOrderResponse>.Fail(ex.Message));
         }
     }
+
+    /// <summary>
+    /// PUT /api/sales-orders/{docEntry}
+    /// Updates an existing Sales Order in SAP B1, refreshing sync UDFs.
+    /// </summary>
+    [HttpPut("{docEntry:int}")]
+    public async Task<IActionResult> Update(int docEntry, [FromBody] SapSalesOrderRequest request)
+    {
+        _logger.LogInformation(
+            "Received SO update request — DocEntry={DocEntry}, ResolvedSoId={ResolvedSoId}, CardCode={CardCode}",
+            docEntry, request.ResolvedSoId, request.CardCode);
+
+        try
+        {
+            var result = await _sapService.UpdateSalesOrderAsync(docEntry, request);
+
+            _logger.LogInformation(
+                "SAP SO updated: DocEntry={DocEntry}, DocNum={DocNum}",
+                result.DocEntry, result.DocNum);
+
+            return Ok(ApiResponse<SapSalesOrderResponse>.Ok(result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update SAP Sales Order DocEntry={DocEntry}", docEntry);
+            return StatusCode(500, ApiResponse<SapSalesOrderResponse>.Fail(ex.Message));
+        }
+    }
 }
