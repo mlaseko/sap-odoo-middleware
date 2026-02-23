@@ -25,6 +25,9 @@ x86/
 *.swp
 *~
 
+## Test results
+**/TestResults/
+
 ## OS
 .DS_Store
 Thumbs.db

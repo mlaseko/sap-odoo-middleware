@@ -38,12 +38,29 @@ public class SapSalesOrderRequest
     public List<SapSalesOrderLineRequest> Lines { get; set; } = [];
 
     /// <summary>
+    /// Odoo delivery note reference (stock.picking name, e.g. <c>WH/OUT/00011</c>).
+    /// Stored in SAP B1 header UDF <c>U_Odoo_Delivery_ID</c>.
+    /// Maps to JSON field <c>name</c>.
+    /// </summary>
+    public string? Name { get; set; }
+
+    /// <summary>
     /// Returns the effective Odoo SO identifier: <c>UOdooSoId</c> if set,
     /// otherwise falls back to the deprecated <c>OdooSoRef</c>.
     /// </summary>
     [JsonIgnore]
     public string ResolvedSoId =>
         !string.IsNullOrEmpty(UOdooSoId) ? UOdooSoId : (OdooSoRef ?? string.Empty);
+
+    /// <summary>
+    /// Returns the effective Odoo delivery note reference: header-level <c>Name</c> if set,
+    /// otherwise falls back to the first non-empty line-level <c>UOdooDeliveryId</c>.
+    /// </summary>
+    [JsonIgnore]
+    public string? ResolvedDeliveryId =>
+        !string.IsNullOrEmpty(Name)
+            ? Name
+            : Lines.FirstOrDefault(l => !string.IsNullOrEmpty(l.UOdooDeliveryId))?.UOdooDeliveryId;
 }
 
 public class SapSalesOrderLineRequest
