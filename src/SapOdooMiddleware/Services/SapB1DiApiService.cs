@@ -80,8 +80,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 if (line.GrossBuyPr.HasValue)
                     order.Lines.GrossBuyPr = line.GrossBuyPr.Value;
 
-                if (!string.IsNullOrEmpty(line.WarehouseCode))
-                    order.Lines.WarehouseCode = line.WarehouseCode;
+                var warehouseCode = ResolveWarehouseCode(line.WarehouseCode, _settings.DefaultWarehouseCode);
+                if (string.IsNullOrEmpty(line.WarehouseCode))
+                    _logger.LogInformation(
+                        "No WarehouseCode on line {LineIndex} (item {ItemCode}) for Odoo ref {SoId} — defaulting to '{DefaultWarehouse}'",
+                        i, line.ItemCode, soId, warehouseCode);
+                order.Lines.WarehouseCode = warehouseCode;
 
                 // Set line UDFs
                 if (!string.IsNullOrEmpty(line.UOdooSoLineId))
@@ -351,6 +355,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         _company = company;
         _logger.LogInformation("Connected to SAP B1 DI API successfully.");
     }
+
+    /// <summary>
+    /// Returns the warehouse code to use for a Sales Order line.
+    /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to
+    /// <paramref name="defaultCode"/>.
+    /// </summary>
+    internal static string ResolveWarehouseCode(string? requestedCode, string defaultCode) =>
+        !string.IsNullOrEmpty(requestedCode) ? requestedCode : defaultCode;
 
     /// <summary>
     /// Maps a string DbServerType (e.g. "dst_MSSQL2019", "MSSQL2019", "MSSQL2016") to one or

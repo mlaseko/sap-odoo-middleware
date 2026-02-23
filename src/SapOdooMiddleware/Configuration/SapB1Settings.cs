@@ -30,4 +30,11 @@ public class SapB1Settings
 
     /// <summary>Whether to auto-create a pick list after SO creation.</summary>
     public bool AutoCreatePickList { get; set; } = true;
+
+    /// <summary>
+    /// Default warehouse code applied to Sales Order lines when Odoo does not supply one.
+    /// Corresponds to SAP B1 DI API field <c>WarehouseCode</c> on each order line.
+    /// Override via <c>SapB1:DefaultWarehouseCode</c> in appsettings.
+    /// </summary>
+    public string DefaultWarehouseCode { get; set; } = "MainWHSE";
 }

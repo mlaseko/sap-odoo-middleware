@@ -87,4 +87,18 @@ public class SapB1DiApiServiceTests
 
         Assert.Contains("Unrecognized DbServerType", ex.Message);
     }
+
+    [Theory]
+    [InlineData("WH01", "MainWHSE", "WH01")]
+    [InlineData("", "MainWHSE", "MainWHSE")]
+    [InlineData(null, "MainWHSE", "MainWHSE")]
+    [InlineData("CUSTOM", "MainWHSE", "CUSTOM")]
+    [InlineData(null, "FALLBACK", "FALLBACK")]
+    public void ResolveWarehouseCode_ReturnsRequestedCodeOrDefault(
+        string? requestedCode, string defaultCode, string expected)
+    {
+        var result = SapB1DiApiService.ResolveWarehouseCode(requestedCode, defaultCode);
+
+        Assert.Equal(expected, result);
+    }
 }
