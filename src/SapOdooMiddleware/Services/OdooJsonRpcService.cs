@@ -33,7 +33,8 @@ public class OdooJsonRpcService : IOdooService
 
     public async Task<DeliveryUpdateResponse> ConfirmDeliveryAsync(DeliveryUpdateRequest request)
     {
-        await EnsureAuthenticatedAsync();
+        if (!_settings.UseBearerAuth)
+            await EnsureAuthenticatedAsync();
 
         var soId = request.ResolvedSoId;
 
@@ -120,7 +121,31 @@ public class OdooJsonRpcService : IOdooService
 
     public async Task<OdooPingResponse> PingAsync()
     {
-        // Force re-authentication to actually test the connection
+        if (_settings.UseBearerAuth)
+        {
+            // Test connectivity with a safe no-op call using the /json/2/ API
+            await SendJson2Async("res.partner", "search_read", new JsonObject
+            {
+                ["domain"] = new JsonArray
+                {
+                    new JsonArray { JsonValue.Create("id"), JsonValue.Create("="), JsonValue.Create(0) }
+                },
+                ["fields"] = new JsonArray { JsonValue.Create("id") },
+                ["limit"] = 1
+            });
+
+            return new OdooPingResponse
+            {
+                Connected = true,
+                Uid = 0,
+                Database = _settings.Database,
+                ServerVersion = null,
+                BaseUrl = _settings.BaseUrl,
+                UserName = _settings.UserName
+            };
+        }
+
+        // Classic session auth mode
         _uid = null;
         await EnsureAuthenticatedAsync();
 
@@ -166,23 +191,47 @@ public class OdooJsonRpcService : IOdooService
 
     private async Task<List<int>> SearchAsync(string model, JsonArray domain)
     {
-        var result = await CallObjectMethodAsync(model, "search", new JsonArray { domain });
-        return result?.AsArray().Select(n => n!.GetValue<int>()).ToList() ?? [];
+        if (_settings.UseBearerAuth)
+        {
+            var result = await SendJson2Async(model, "search", new JsonObject { ["domain"] = domain });
+            return result?.AsArray().Select(n => n!.GetValue<int>()).ToList() ?? [];
+        }
+
+        var classicResult = await CallObjectMethodAsync(model, "search", new JsonArray { domain });
+        return classicResult?.AsArray().Select(n => n!.GetValue<int>()).ToList() ?? [];
     }
 
     private async Task ExecuteMethodAsync(string model, string method, JsonArray ids)
     {
+        if (_settings.UseBearerAuth)
+        {
+            await SendJson2Async(model, method, new JsonObject { ["ids"] = ids });
+            return;
+        }
+
         await CallObjectMethodAsync(model, method, new JsonArray { ids });
     }
 
     private async Task ExecuteMethodWithContextAsync(string model, string method, JsonArray ids, JsonObject context)
     {
+        if (_settings.UseBearerAuth)
+        {
+            await SendJson2Async(model, method, new JsonObject { ["ids"] = ids, ["context"] = context });
+            return;
+        }
+
         var kwargs = new JsonObject { ["context"] = context };
         await CallObjectMethodAsync(model, method, new JsonArray { ids }, kwargs);
     }
 
     private async Task WriteAsync(string model, int id, JsonObject values)
     {
+        if (_settings.UseBearerAuth)
+        {
+            await SendJson2Async(model, "write", new JsonObject { ["ids"] = new JsonArray { id }, ["values"] = values });
+            return;
+        }
+
         await CallObjectMethodAsync(model, "write", new JsonArray
         {
             new JsonArray { id },
@@ -192,13 +241,19 @@ public class OdooJsonRpcService : IOdooService
 
     private async Task<JsonObject?> ReadAsync(string model, int id, JsonArray fields)
     {
-        var result = await CallObjectMethodAsync(model, "read", new JsonArray
+        if (_settings.UseBearerAuth)
+        {
+            var result = await SendJson2Async(model, "read", new JsonObject { ["ids"] = new JsonArray { id }, ["fields"] = fields });
+            return result?.AsArray().FirstOrDefault()?.AsObject();
+        }
+
+        var classicResult = await CallObjectMethodAsync(model, "read", new JsonArray
         {
             new JsonArray { id },
             fields
         });
 
-        return result?.AsArray().FirstOrDefault()?.AsObject();
+        return classicResult?.AsArray().FirstOrDefault()?.AsObject();
     }
 
     private async Task<JsonNode?> CallObjectMethodAsync(
@@ -249,6 +304,37 @@ public class OdooJsonRpcService : IOdooService
         };
 
         return await SendRpcAsync(path, payload);
+    }
+
+    private async Task<JsonNode?> SendJson2Async(string model, string method, JsonObject body)
+    {
+        var url = _settings.BaseUrl.TrimEnd('/') + $"/json/2/{model}/{method}";
+        var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Add("Authorization", $"Bearer {_settings.EffectiveApiKey}");
+        request.Headers.Add("X-Odoo-Database", _settings.Database);
+        request.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+
+        var response = await _httpClient.SendAsync(request);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            string errorMessage;
+            try
+            {
+                var errorJson = JsonNode.Parse(responseBody);
+                errorMessage = errorJson?["error"]?["message"]?.GetValue<string>()
+                    ?? errorJson?["error"]?.GetValue<string>()
+                    ?? $"HTTP {(int)response.StatusCode}";
+            }
+            catch (JsonException)
+            {
+                errorMessage = $"HTTP {(int)response.StatusCode}";
+            }
+            throw new InvalidOperationException($"Odoo API error: {errorMessage}");
+        }
+
+        return JsonNode.Parse(responseBody);
     }
 
     private async Task<JsonNode?> SendRpcAsync(string path, JsonObject payload)
