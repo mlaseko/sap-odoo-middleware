@@ -51,6 +51,13 @@ public class WebhookQueueProcessor : BackgroundService
             {
                 await ProcessBatchAsync(settings, stoppingToken);
             }
+            catch (SqlException ex)
+            {
+                _logger.LogError(ex,
+                    "WebhookQueueProcessor: SQL error during polling cycle (Number={SqlErrorNumber}). " +
+                    "Check the ConnectionString and that ODOO_WEBHOOK_QUEUE exists.",
+                    ex.Number);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "WebhookQueueProcessor: Unhandled error during polling cycle.");
@@ -157,17 +164,32 @@ public class WebhookQueueProcessor : BackgroundService
             await MarkDoneAsync(connection, entry.Id, responseBody, stoppingToken);
 
             _logger.LogInformation(
-                "WebhookQueueProcessor: Entry Id={Id} confirmed successfully.", entry.Id);
+                "WebhookQueueProcessor: Odoo delivery confirmed for queue entry Id={Id}. " +
+                "OdooSoId={OdooSoId}, PickingId={PickingId}, PickingName={PickingName}, " +
+                "State={State}, SapDeliveryNo={SapDeliveryNo}.",
+                entry.Id, response.UOdooSoId, response.PickingId, response.PickingName,
+                response.State, response.SapDeliveryNo);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex,
-                "WebhookQueueProcessor: Failed to process entry Id={Id}. RetryCount={RetryCount}.",
-                entry.Id, entry.RetryCount);
-
             int newRetryCount = entry.RetryCount + 1;
             bool maxRetriesReached = newRetryCount >= settings.MaxRetries;
             string newStatus = maxRetriesReached ? "failed" : "pending";
+
+            if (maxRetriesReached)
+            {
+                _logger.LogError(ex,
+                    "WebhookQueueProcessor: Entry Id={Id} (OdooSoId={OdooSoId}, DocEntry={DocEntry}) " +
+                    "permanently failed after {MaxRetries} retries. Marking as failed. Error: {ErrorMessage}",
+                    entry.Id, entry.OdooSoId, entry.DocEntry, settings.MaxRetries, ex.Message);
+            }
+            else
+            {
+                _logger.LogWarning(ex,
+                    "WebhookQueueProcessor: Entry Id={Id} (OdooSoId={OdooSoId}, DocEntry={DocEntry}) " +
+                    "failed (attempt {Attempt}/{MaxRetries}). Will retry. Error: {ErrorMessage}",
+                    entry.Id, entry.OdooSoId, entry.DocEntry, newRetryCount, settings.MaxRetries, ex.Message);
+            }
 
             await MarkFailedAsync(connection, entry.Id, newRetryCount, newStatus, ex.Message, stoppingToken);
         }
