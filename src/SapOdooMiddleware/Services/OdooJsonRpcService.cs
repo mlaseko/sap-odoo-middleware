@@ -118,6 +118,35 @@ public class OdooJsonRpcService : IOdooService
 
     // ── Odoo JSON-RPC helpers ────────────────────────────────────────
 
+    public async Task<OdooPingResponse> PingAsync()
+    {
+        // Force re-authentication to actually test the connection
+        _uid = null;
+        await EnsureAuthenticatedAsync();
+
+        // Optionally get server version via /web/session/get_session_info
+        string? serverVersion = null;
+        try
+        {
+            var versionResult = await CallJsonRpcAsync("/web/session/get_session_info", new JsonObject());
+            serverVersion = versionResult?["server_version"]?.GetValue<string>();
+        }
+        catch
+        {
+            // Version info is optional — don't fail the ping
+        }
+
+        return new OdooPingResponse
+        {
+            Connected = _uid.HasValue,
+            Uid = _uid ?? 0,
+            Database = _settings.Database,
+            ServerVersion = serverVersion,
+            BaseUrl = _settings.BaseUrl,
+            UserName = _settings.UserName
+        };
+    }
+
     private async Task EnsureAuthenticatedAsync()
     {
         if (_uid.HasValue) return;
