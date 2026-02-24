@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 using SapOdooMiddleware.Configuration;
@@ -146,6 +147,22 @@ public class WebhookQueueProcessor : BackgroundService
 
         await SetStatusAsync(connection, entry.Id, "processing", stoppingToken);
 
+        var stopwatch = Stopwatch.StartNew();
+
+        // Notify monitor: processing
+        using var monitorScope = _scopeFactory.CreateScope();
+        var monitor = monitorScope.ServiceProvider.GetRequiredService<IDeliveryMonitorService>();
+        await monitor.NotifyAsync(new DeliveryMonitorPayload
+        {
+            Source = "queue",
+            OdooSoId = entry.OdooSoId,
+            SapDeliveryNo = entry.DocEntry.ToString(),
+            DeliveryDate = entry.DeliveryDate?.ToString("yyyy-MM-dd HH:mm:ss"),
+            QueueEntryId = entry.Id,
+            State = "processing",
+            RetryCount = entry.RetryCount,
+        });
+
         try
         {
             var request = new DeliveryUpdateRequest
@@ -160,6 +177,8 @@ public class WebhookQueueProcessor : BackgroundService
             var odooService = scope.ServiceProvider.GetRequiredService<IOdooService>();
             var response = await odooService.ConfirmDeliveryAsync(request);
 
+            stopwatch.Stop();
+
             string responseBody = System.Text.Json.JsonSerializer.Serialize(response);
             await MarkDoneAsync(connection, entry.Id, responseBody, stoppingToken);
 
@@ -169,9 +188,27 @@ public class WebhookQueueProcessor : BackgroundService
                 "State={State}, SapDeliveryNo={SapDeliveryNo}.",
                 entry.Id, response.UOdooSoId, response.PickingId, response.PickingName,
                 response.State, response.SapDeliveryNo);
+
+            // Notify monitor: done
+            await monitor.NotifyAsync(new DeliveryMonitorPayload
+            {
+                Source = "queue",
+                OdooSoId = entry.OdooSoId,
+                SapDeliveryNo = entry.DocEntry.ToString(),
+                DeliveryDate = entry.DeliveryDate?.ToString("yyyy-MM-dd HH:mm:ss"),
+                QueueEntryId = entry.Id,
+                State = "done",
+                PickingId = response.PickingId,
+                PickingName = response.PickingName,
+                PickingState = response.State,
+                ProcessedAt = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+                Duration = stopwatch.Elapsed.TotalSeconds,
+            });
         }
         catch (Exception ex)
         {
+            stopwatch.Stop();
+
             int newRetryCount = entry.RetryCount + 1;
             bool maxRetriesReached = newRetryCount >= settings.MaxRetries;
             string newStatus = maxRetriesReached ? "failed" : "pending";
@@ -192,6 +229,21 @@ public class WebhookQueueProcessor : BackgroundService
             }
 
             await MarkFailedAsync(connection, entry.Id, newRetryCount, newStatus, ex.Message, stoppingToken);
+
+            // Notify monitor: failed
+            await monitor.NotifyAsync(new DeliveryMonitorPayload
+            {
+                Source = "queue",
+                OdooSoId = entry.OdooSoId,
+                SapDeliveryNo = entry.DocEntry.ToString(),
+                DeliveryDate = entry.DeliveryDate?.ToString("yyyy-MM-dd HH:mm:ss"),
+                QueueEntryId = entry.Id,
+                State = "failed",
+                ErrorMessage = ex.Message,
+                RetryCount = newRetryCount,
+                ProcessedAt = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+                Duration = stopwatch.Elapsed.TotalSeconds,
+            });
         }
     }
 

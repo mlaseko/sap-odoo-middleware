@@ -12,6 +12,7 @@ builder.Services.Configure<SapB1Settings>(builder.Configuration.GetSection(SapB1
 builder.Services.Configure<OdooSettings>(builder.Configuration.GetSection(OdooSettings.SectionName));
 builder.Services.Configure<ApiKeySettings>(builder.Configuration.GetSection(ApiKeySettings.SectionName));
 builder.Services.Configure<WebhookQueueSettings>(builder.Configuration.GetSection(WebhookQueueSettings.SectionName));
+builder.Services.Configure<MonitorSettings>(builder.Configuration.GetSection(MonitorSettings.SectionName));
 
 // --- Services ---
 #if WINDOWS_BUILD
@@ -20,6 +21,7 @@ builder.Services.AddSingleton<ISapB1Service, SapB1DiApiService>();
 builder.Services.AddSingleton<ISapB1Service, SapB1DiApiServiceStub>();
 #endif
 builder.Services.AddHttpClient<IOdooService, OdooJsonRpcService>();
+builder.Services.AddHttpClient<IDeliveryMonitorService, DeliveryMonitorService>();
 builder.Services.AddHostedService<WebhookQueueProcessor>();
 
 // --- Controllers ---
