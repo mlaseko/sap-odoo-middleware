@@ -205,6 +205,40 @@ Verifies connectivity to the SAP B1 DI API and returns non-secret connection det
 }
 ```
 
+### Odoo Connectivity Check
+
+```
+GET /api/odoo/ping
+X-Api-Key: YOUR_KEY
+```
+
+Verifies connectivity to the Odoo JSON-RPC API by authenticating and returning session information. Does not modify any data.
+
+**Response (200 — connected):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "connected": true,
+    "uid": 2,
+    "database": "mlaseko-molas-lubes",
+    "server_version": "18.0",
+    "base_url": "https://mlaseko-molas-lubes.odoo.com",
+    "user_name": "admin@company.com"
+  }
+}
+```
+
+**Response (500 — connection failed):**
+
+```json
+{
+  "success": false,
+  "errors": ["Odoo authentication failed — uid is null."]
+}
+```
+
 ### Create Sales Order (Odoo → SAP B1)
 
 ```

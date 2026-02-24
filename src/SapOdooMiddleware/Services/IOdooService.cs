@@ -12,4 +12,10 @@ public interface IOdooService
     /// sets quantities, validates, and writes the SAP delivery reference.
     /// </summary>
     Task<DeliveryUpdateResponse> ConfirmDeliveryAsync(DeliveryUpdateRequest request);
+
+    /// <summary>
+    /// Verifies Odoo JSON-RPC connectivity by authenticating and returning session info.
+    /// Does not modify any data in Odoo.
+    /// </summary>
+    Task<OdooPingResponse> PingAsync();
 }
