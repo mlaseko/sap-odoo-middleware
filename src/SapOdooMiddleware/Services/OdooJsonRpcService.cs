@@ -205,7 +205,7 @@ public class OdooJsonRpcService : IOdooService
     {
         if (_settings.UseBearerAuth)
         {
-            await SendJson2Async(model, method, new JsonObject { ["ids"] = ids });
+            await CallKwWithBearerAsync(model, method, new JsonArray { ids.DeepClone() });
             return;
         }
 
@@ -216,12 +216,13 @@ public class OdooJsonRpcService : IOdooService
     {
         if (_settings.UseBearerAuth)
         {
-            await SendJson2Async(model, method, new JsonObject { ["ids"] = ids, ["context"] = context });
+            var kwargs = new JsonObject { ["context"] = context };
+            await CallKwWithBearerAsync(model, method, new JsonArray { ids.DeepClone() }, kwargs);
             return;
         }
 
-        var kwargs = new JsonObject { ["context"] = context };
-        await CallObjectMethodAsync(model, method, new JsonArray { ids }, kwargs);
+        var classicKwargs = new JsonObject { ["context"] = context };
+        await CallObjectMethodAsync(model, method, new JsonArray { ids }, classicKwargs);
     }
 
     private async Task WriteAsync(string model, int id, JsonObject values)
@@ -254,6 +255,62 @@ public class OdooJsonRpcService : IOdooService
         });
 
         return classicResult?.AsArray().FirstOrDefault()?.AsObject();
+    }
+
+    private async Task<JsonNode?> CallKwWithBearerAsync(string model, string method, JsonArray args, JsonObject? kwargs = null)
+    {
+        var url = _settings.BaseUrl.TrimEnd('/') + "/web/dataset/call_kw";
+        var payload = new JsonObject
+        {
+            ["jsonrpc"] = "2.0",
+            ["method"] = "call",
+            ["id"] = Interlocked.Increment(ref _rpcId),
+            ["params"] = new JsonObject
+            {
+                ["model"] = model,
+                ["method"] = method,
+                ["args"] = args,
+                ["kwargs"] = kwargs ?? new JsonObject()
+            }
+        };
+
+        var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Add("Authorization", $"Bearer {_settings.EffectiveApiKey}");
+        request.Headers.Add("X-Odoo-Database", _settings.Database);
+        request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+
+        var response = await _httpClient.SendAsync(request);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            string errorMessage;
+            try
+            {
+                var errorJson = JsonNode.Parse(responseBody);
+                errorMessage = errorJson?["error"]?["data"]?["message"]?.GetValue<string>()
+                    ?? errorJson?["error"]?["message"]?.GetValue<string>()
+                    ?? $"HTTP {(int)response.StatusCode}";
+            }
+            catch (JsonException)
+            {
+                errorMessage = $"HTTP {(int)response.StatusCode}";
+            }
+            throw new InvalidOperationException($"Odoo RPC error: {errorMessage}");
+        }
+
+        var json = JsonNode.Parse(responseBody);
+
+        var error = json?["error"];
+        if (error != null)
+        {
+            var errMsg = error["data"]?["message"]?.GetValue<string>()
+                ?? error["message"]?.GetValue<string>()
+                ?? "Unknown Odoo RPC error";
+            throw new InvalidOperationException($"Odoo RPC error: {errMsg}");
+        }
+
+        return json?["result"];
     }
 
     private async Task<JsonNode?> CallObjectMethodAsync(
