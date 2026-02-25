@@ -520,21 +520,24 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
         int invoiceDocEntry = int.Parse(_company!.GetNewObjectKey());
 
-        // Retrieve the created invoice to get DocNum
+        // Retrieve the created invoice to get DocNum and line-level data
         invoice.GetByKey(invoiceDocEntry);
         int invoiceDocNum = invoice.DocNum;
+
+        var lineResponses = ReadInvoiceLines(invoice);
 
         Marshal.ReleaseComObject(invoice);
 
         _logger.LogInformation(
             "AR Invoice created successfully (copy-from-delivery): DocEntry={DocEntry}, DocNum={DocNum}, " +
             "ExternalInvoiceId={ExternalInvoiceId}, BaseDeliveryDocEntry={BaseDeliveryDocEntry}, " +
-            "BaseSalesOrderDocEntry={BaseSalesOrderDocEntry}",
+            "BaseSalesOrderDocEntry={BaseSalesOrderDocEntry}, LineCount={LineCount}",
             invoiceDocEntry,
             invoiceDocNum,
             request.ExternalInvoiceId,
             deliveryDocEntry,
-            baseSoDocEntry);
+            baseSoDocEntry,
+            lineResponses.Count);
 
         return new SapInvoiceResponse
         {
@@ -542,7 +545,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             DocNum = invoiceDocNum,
             ExternalInvoiceId = request.ExternalInvoiceId,
             BaseDeliveryDocEntry = deliveryDocEntry,
-            BaseSalesOrderDocEntry = baseSoDocEntry
+            BaseSalesOrderDocEntry = baseSoDocEntry,
+            Lines = lineResponses
         };
     }
 
@@ -645,22 +649,58 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         invoice.GetByKey(invoiceDocEntry);
         int invoiceDocNum = invoice.DocNum;
 
+        var lineResponses = ReadInvoiceLines(invoice);
+
         Marshal.ReleaseComObject(invoice);
 
         _logger.LogInformation(
             "AR Invoice created successfully (manual): DocEntry={DocEntry}, DocNum={DocNum}, " +
-            "ExternalInvoiceId={ExternalInvoiceId}",
+            "ExternalInvoiceId={ExternalInvoiceId}, LineCount={LineCount}",
             invoiceDocEntry,
             invoiceDocNum,
-            request.ExternalInvoiceId);
+            request.ExternalInvoiceId,
+            lineResponses.Count);
 
         return new SapInvoiceResponse
         {
             DocEntry = invoiceDocEntry,
             DocNum = invoiceDocNum,
             ExternalInvoiceId = request.ExternalInvoiceId,
-            BaseSalesOrderDocEntry = request.SapSalesOrderDocEntry
+            BaseSalesOrderDocEntry = request.SapSalesOrderDocEntry,
+            Lines = lineResponses
         };
+    }
+
+    /// <summary>
+    /// Reads all lines from a loaded SAP Invoice (OINV → INV1) and returns
+    /// line-level data including LineNum and GrossBuyPrice for COGS tracking.
+    /// Must be called while the Documents COM object is still loaded (before ReleaseComObject).
+    /// </summary>
+    private List<SapInvoiceLineResponse> ReadInvoiceLines(Documents invoice)
+    {
+        var lines = new List<SapInvoiceLineResponse>();
+        int lineCount = invoice.Lines.Count;
+
+        for (int i = 0; i < lineCount; i++)
+        {
+            invoice.Lines.SetCurrentLine(i);
+
+            var lineResponse = new SapInvoiceLineResponse
+            {
+                LineNum = invoice.Lines.LineNum,
+                ItemCode = invoice.Lines.ItemCode,
+                Quantity = invoice.Lines.Quantity,
+                GrossBuyPrice = invoice.Lines.GrossBuyPrice
+            };
+
+            lines.Add(lineResponse);
+
+            _logger.LogDebug(
+                "Invoice Line[{Index}]: LineNum={LineNum}, ItemCode={ItemCode}, Qty={Qty}, GrossBuyPrice={GrossBuyPrice}",
+                i, lineResponse.LineNum, lineResponse.ItemCode, lineResponse.Quantity, lineResponse.GrossBuyPrice);
+        }
+
+        return lines;
     }
 
     /// <summary>

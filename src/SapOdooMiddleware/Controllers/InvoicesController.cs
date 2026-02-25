@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Models.Api;
+using SapOdooMiddleware.Models.Odoo;
 using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services;
 
@@ -7,19 +8,24 @@ namespace SapOdooMiddleware.Controllers;
 
 /// <summary>
 /// Receives AR Invoice requests from Odoo and creates them in SAP B1 via DI API.
-/// Invoices are preferably created by copying from the related Delivery Note (ODLN),
-/// which maintains the Sales Order → Delivery → Invoice document chain.
+/// After successful creation, writes SAP DocEntry and per-line data (LineNum, GrossBuyPrice)
+/// back to the Odoo invoice when <c>odoo_invoice_id</c> is provided in the request.
 /// </summary>
 [ApiController]
 [Route("api/invoices")]
 public class InvoicesController : ControllerBase
 {
     private readonly ISapB1Service _sapService;
+    private readonly IOdooService _odooService;
     private readonly ILogger<InvoicesController> _logger;
 
-    public InvoicesController(ISapB1Service sapService, ILogger<InvoicesController> logger)
+    public InvoicesController(
+        ISapB1Service sapService,
+        IOdooService odooService,
+        ILogger<InvoicesController> logger)
     {
         _sapService = sapService;
+        _odooService = odooService;
         _logger = logger;
     }
 
@@ -31,6 +37,10 @@ public class InvoicesController : ControllerBase
     /// by copying from the Delivery Note, preserving the SO → Delivery → Invoice chain.
     ///
     /// Fallback: provide <c>lines</c> array for manual invoice creation.
+    ///
+    /// When <c>odoo_invoice_id</c> is provided, the middleware writes back to Odoo:
+    /// - <c>x_sap_invoice_docentry</c> on the account.move header
+    /// - <c>x_sap_invoice_linenum</c> and <c>x_sap_gross_buy_price</c> on each invoice line
     /// </summary>
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] SapInvoiceRequest request)
@@ -39,27 +49,41 @@ public class InvoicesController : ControllerBase
             "Received AR Invoice creation request — ExternalInvoiceId={ExternalInvoiceId}, " +
             "CustomerCode={CustomerCode}, CopyFromDelivery={CopyFromDelivery}, " +
             "SapDeliveryDocEntry={SapDeliveryDocEntry}, SapSalesOrderDocEntry={SapSalesOrderDocEntry}, " +
-            "LineCount={LineCount}",
+            "OdooInvoiceId={OdooInvoiceId}, LineCount={LineCount}",
             request.ExternalInvoiceId,
             request.CustomerCode,
             request.CopyFromDelivery,
             request.SapDeliveryDocEntry,
             request.SapSalesOrderDocEntry,
+            request.OdooInvoiceId,
             request.Lines.Count);
 
         try
         {
+            // Step 1: Create the AR Invoice in SAP B1
             var result = await _sapService.CreateInvoiceAsync(request);
 
             _logger.LogInformation(
                 "SAP AR Invoice created: DocEntry={DocEntry}, DocNum={DocNum}, " +
                 "ExternalInvoiceId={ExternalInvoiceId}, BaseDeliveryDocEntry={BaseDeliveryDocEntry}, " +
-                "BaseSalesOrderDocEntry={BaseSalesOrderDocEntry}",
+                "BaseSalesOrderDocEntry={BaseSalesOrderDocEntry}, LineCount={LineCount}",
                 result.DocEntry,
                 result.DocNum,
                 result.ExternalInvoiceId,
                 result.BaseDeliveryDocEntry,
-                result.BaseSalesOrderDocEntry);
+                result.BaseSalesOrderDocEntry,
+                result.Lines.Count);
+
+            // Step 2: Write back SAP fields to Odoo (when OdooInvoiceId is provided)
+            if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)
+            {
+                await WriteBackToOdoo(request.OdooInvoiceId.Value, result);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Skipping Odoo write-back — OdooInvoiceId not provided in request.");
+            }
 
             return Ok(ApiResponse<SapInvoiceResponse>.Ok(result));
         }
@@ -72,6 +96,52 @@ public class InvoicesController : ControllerBase
                 request.SapDeliveryDocEntry);
 
             return StatusCode(500, ApiResponse<SapInvoiceResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Writes SAP invoice DocEntry + per-line data back to Odoo.
+    /// Failures are logged and attached to the response but do NOT fail the overall request
+    /// (the SAP invoice was already created successfully).
+    /// </summary>
+    private async Task WriteBackToOdoo(int odooInvoiceId, SapInvoiceResponse result)
+    {
+        try
+        {
+            _logger.LogInformation(
+                "Starting Odoo write-back — OdooInvoiceId={OdooInvoiceId}, SapDocEntry={SapDocEntry}, SapLineCount={LineCount}",
+                odooInvoiceId, result.DocEntry, result.Lines.Count);
+
+            var writeBackRequest = new InvoiceWriteBackRequest
+            {
+                OdooInvoiceId = odooInvoiceId,
+                SapDocEntry = result.DocEntry,
+                Lines = result.Lines.Select(l => new InvoiceLineWriteBack
+                {
+                    SapLineNum = l.LineNum,
+                    GrossBuyPrice = l.GrossBuyPrice
+                }).ToList()
+            };
+
+            var writeBackResult = await _odooService.UpdateInvoiceSapFieldsAsync(writeBackRequest);
+
+            result.OdooWriteBackSuccess = writeBackResult.Success;
+
+            _logger.LogInformation(
+                "Odoo write-back completed — OdooInvoiceId={OdooInvoiceId}, LinesUpdated={LinesUpdated}, Success={Success}",
+                writeBackResult.OdooInvoiceId,
+                writeBackResult.LinesUpdated,
+                writeBackResult.Success);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Odoo write-back failed for OdooInvoiceId={OdooInvoiceId}, SapDocEntry={SapDocEntry}. " +
+                "SAP invoice was created successfully — manual reconciliation may be needed.",
+                odooInvoiceId, result.DocEntry);
+
+            result.OdooWriteBackSuccess = false;
+            result.OdooWriteBackError = ex.Message;
         }
     }
 }

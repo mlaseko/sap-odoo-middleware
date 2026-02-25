@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using SapOdooMiddleware.Controllers;
 using SapOdooMiddleware.Models.Api;
+using SapOdooMiddleware.Models.Odoo;
 using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services;
 
@@ -11,12 +12,16 @@ namespace SapOdooMiddleware.Tests;
 public class InvoicesControllerTests
 {
     private readonly Mock<ISapB1Service> _sapServiceMock = new();
+    private readonly Mock<IOdooService> _odooServiceMock = new();
     private readonly Mock<ILogger<InvoicesController>> _loggerMock = new();
     private readonly InvoicesController _controller;
 
     public InvoicesControllerTests()
     {
-        _controller = new InvoicesController(_sapServiceMock.Object, _loggerMock.Object);
+        _controller = new InvoicesController(
+            _sapServiceMock.Object,
+            _odooServiceMock.Object,
+            _loggerMock.Object);
     }
 
     [Fact]
@@ -40,7 +45,12 @@ public class InvoicesControllerTests
             DocNum = 800,
             ExternalInvoiceId = "INV/2026/00001",
             BaseDeliveryDocEntry = 500,
-            BaseSalesOrderDocEntry = 100
+            BaseSalesOrderDocEntry = 100,
+            Lines =
+            [
+                new SapInvoiceLineResponse { LineNum = 0, ItemCode = "ITEM001", Quantity = 5, GrossBuyPrice = 80.0 },
+                new SapInvoiceLineResponse { LineNum = 1, ItemCode = "ITEM002", Quantity = 3, GrossBuyPrice = 40.0 }
+            ]
         };
 
         _sapServiceMock
@@ -59,6 +69,9 @@ public class InvoicesControllerTests
         Assert.Equal("INV/2026/00001", response.Data.ExternalInvoiceId);
         Assert.Equal(500, response.Data.BaseDeliveryDocEntry);
         Assert.Equal(100, response.Data.BaseSalesOrderDocEntry);
+        Assert.Equal(2, response.Data.Lines.Count);
+        Assert.Equal(0, response.Data.Lines[0].LineNum);
+        Assert.Equal(80.0, response.Data.Lines[0].GrossBuyPrice);
     }
 
     [Fact]
@@ -222,5 +235,167 @@ public class InvoicesControllerTests
         Assert.Equal(500, line.BaseDeliveryDocEntry);
         Assert.Equal(0, line.BaseDeliveryLineNum);
         Assert.Equal("400000", line.AccountCode);
+    }
+
+    // ── Write-back tests ──────────────────────────────────────────────
+
+    [Fact]
+    public async Task Create_WithOdooInvoiceId_TriggersWriteBack()
+    {
+        // Arrange: request includes OdooInvoiceId for write-back
+        var request = new SapInvoiceRequest
+        {
+            ExternalInvoiceId = "INV/2026/00010",
+            CustomerCode = "C10000",
+            SapDeliveryDocEntry = 500,
+            OdooInvoiceId = 42
+        };
+
+        var sapResponse = new SapInvoiceResponse
+        {
+            DocEntry = 700,
+            DocNum = 800,
+            ExternalInvoiceId = "INV/2026/00010",
+            BaseDeliveryDocEntry = 500,
+            Lines =
+            [
+                new SapInvoiceLineResponse { LineNum = 0, ItemCode = "ITEM001", Quantity = 5, GrossBuyPrice = 80.0 },
+                new SapInvoiceLineResponse { LineNum = 1, ItemCode = "ITEM002", Quantity = 3, GrossBuyPrice = 40.0 }
+            ]
+        };
+
+        _sapServiceMock
+            .Setup(s => s.CreateInvoiceAsync(request))
+            .ReturnsAsync(sapResponse);
+
+        _odooServiceMock
+            .Setup(o => o.UpdateInvoiceSapFieldsAsync(It.Is<InvoiceWriteBackRequest>(r =>
+                r.OdooInvoiceId == 42 &&
+                r.SapDocEntry == 700 &&
+                r.Lines.Count == 2 &&
+                r.Lines[0].SapLineNum == 0 &&
+                r.Lines[0].GrossBuyPrice == 80.0 &&
+                r.Lines[1].SapLineNum == 1 &&
+                r.Lines[1].GrossBuyPrice == 40.0)))
+            .ReturnsAsync(new InvoiceWriteBackResponse
+            {
+                OdooInvoiceId = 42,
+                SapDocEntry = 700,
+                LinesUpdated = 2,
+                Success = true
+            });
+
+        // Act
+        var result = await _controller.Create(request);
+
+        // Assert
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        var response = Assert.IsType<ApiResponse<SapInvoiceResponse>>(okResult.Value);
+        Assert.True(response.Success);
+        Assert.True(response.Data!.OdooWriteBackSuccess);
+        Assert.Null(response.Data.OdooWriteBackError);
+
+        _odooServiceMock.Verify(
+            o => o.UpdateInvoiceSapFieldsAsync(It.IsAny<InvoiceWriteBackRequest>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task Create_WithoutOdooInvoiceId_SkipsWriteBack()
+    {
+        // Arrange: no OdooInvoiceId — write-back should be skipped
+        var request = new SapInvoiceRequest
+        {
+            ExternalInvoiceId = "INV/2026/00011",
+            CustomerCode = "C10000",
+            SapDeliveryDocEntry = 500
+        };
+
+        var sapResponse = new SapInvoiceResponse
+        {
+            DocEntry = 701,
+            DocNum = 801,
+            ExternalInvoiceId = "INV/2026/00011",
+            BaseDeliveryDocEntry = 500
+        };
+
+        _sapServiceMock
+            .Setup(s => s.CreateInvoiceAsync(request))
+            .ReturnsAsync(sapResponse);
+
+        // Act
+        var result = await _controller.Create(request);
+
+        // Assert
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        var response = Assert.IsType<ApiResponse<SapInvoiceResponse>>(okResult.Value);
+        Assert.True(response.Success);
+        Assert.Null(response.Data!.OdooWriteBackSuccess);
+
+        _odooServiceMock.Verify(
+            o => o.UpdateInvoiceSapFieldsAsync(It.IsAny<InvoiceWriteBackRequest>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task Create_WriteBackFails_StillReturnsOkWithError()
+    {
+        // Arrange: SAP succeeds but Odoo write-back throws
+        var request = new SapInvoiceRequest
+        {
+            ExternalInvoiceId = "INV/2026/00012",
+            CustomerCode = "C10000",
+            SapDeliveryDocEntry = 500,
+            OdooInvoiceId = 99
+        };
+
+        var sapResponse = new SapInvoiceResponse
+        {
+            DocEntry = 702,
+            DocNum = 802,
+            ExternalInvoiceId = "INV/2026/00012",
+            Lines =
+            [
+                new SapInvoiceLineResponse { LineNum = 0, ItemCode = "ITEM001", Quantity = 5, GrossBuyPrice = 80.0 }
+            ]
+        };
+
+        _sapServiceMock
+            .Setup(s => s.CreateInvoiceAsync(request))
+            .ReturnsAsync(sapResponse);
+
+        _odooServiceMock
+            .Setup(o => o.UpdateInvoiceSapFieldsAsync(It.IsAny<InvoiceWriteBackRequest>()))
+            .ThrowsAsync(new InvalidOperationException("Odoo RPC error: Access Denied"));
+
+        // Act
+        var result = await _controller.Create(request);
+
+        // Assert: overall request still succeeds (SAP invoice was created)
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        var response = Assert.IsType<ApiResponse<SapInvoiceResponse>>(okResult.Value);
+        Assert.True(response.Success);
+        Assert.Equal(702, response.Data!.DocEntry);
+
+        // But write-back is flagged as failed
+        Assert.False(response.Data.OdooWriteBackSuccess);
+        Assert.Contains("Access Denied", response.Data.OdooWriteBackError);
+    }
+
+    [Fact]
+    public void LineResponse_MapsGrossBuyPrice()
+    {
+        var line = new SapInvoiceLineResponse
+        {
+            LineNum = 0,
+            ItemCode = "LUBE-5W30",
+            Quantity = 10,
+            GrossBuyPrice = 125.50
+        };
+
+        Assert.Equal(0, line.LineNum);
+        Assert.Equal("LUBE-5W30", line.ItemCode);
+        Assert.Equal(10, line.Quantity);
+        Assert.Equal(125.50, line.GrossBuyPrice);
     }
 }

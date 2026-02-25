@@ -72,6 +72,15 @@ public class SapInvoiceRequest
     public string? UOdooSoId { get; set; }
 
     /// <summary>
+    /// Odoo database record ID of the account.move (invoice) being synced.
+    /// Used by the write-back step to update SAP fields on the correct Odoo invoice
+    /// after the AR Invoice is created in SAP B1.
+    /// When provided, the middleware writes <c>x_sap_invoice_docentry</c> and
+    /// per-line <c>x_sap_invoice_linenum</c> / <c>x_sap_gross_buy_price</c> back to Odoo.
+    /// </summary>
+    public int? OdooInvoiceId { get; set; }
+
+    /// <summary>
     /// Invoice lines. Required when <see cref="SapDeliveryDocEntry"/> is not provided
     /// (manual invoice creation without copy-from-delivery).
     /// When copying from delivery, lines are automatically populated from the delivery note.
