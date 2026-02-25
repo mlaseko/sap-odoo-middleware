@@ -144,6 +144,82 @@ public class OdooJsonRpcService : IOdooService
         };
     }
 
+    public async Task<InvoiceWriteBackResponse> UpdateInvoiceSapFieldsAsync(InvoiceWriteBackRequest request)
+    {
+        if (!_settings.UseBearerAuth)
+            await EnsureAuthenticatedAsync();
+
+        int invoiceId = request.OdooInvoiceId;
+
+        _logger.LogInformation(
+            "Writing SAP invoice fields back to Odoo — OdooInvoiceId={OdooInvoiceId}, SapDocEntry={SapDocEntry}, LineCount={LineCount}",
+            invoiceId, request.SapDocEntry, request.Lines.Count);
+
+        // 1. Write x_sap_invoice_docentry on the account.move header
+        await WriteAsync("account.move", invoiceId, new JsonObject
+        {
+            ["x_sap_invoice_docentry"] = request.SapDocEntry
+        });
+
+        _logger.LogInformation(
+            "Wrote x_sap_invoice_docentry={SapDocEntry} on account.move id={InvoiceId}",
+            request.SapDocEntry, invoiceId);
+
+        // 2. Read the invoice line IDs (account.move.line) for this invoice,
+        //    filtering to product lines only (exclude tax/rounding lines).
+        var lineIds = await SearchAsync("account.move.line", new JsonArray
+        {
+            new JsonArray { JsonValue.Create("move_id"), JsonValue.Create("="), JsonValue.Create(invoiceId) },
+            new JsonArray { JsonValue.Create("display_type"), JsonValue.Create("="), JsonValue.Create("product") }
+        });
+
+        _logger.LogInformation(
+            "Found {Count} product line(s) on Odoo invoice id={InvoiceId}",
+            lineIds.Count, invoiceId);
+
+        // 3. Write x_sap_invoice_linenum and x_sap_gross_buy_price on each line by position.
+        //    Odoo lines are matched to SAP lines by order (first → 0, second → 1, …).
+        int linesUpdated = 0;
+
+        for (int i = 0; i < Math.Min(lineIds.Count, request.Lines.Count); i++)
+        {
+            int odooLineId = lineIds[i];
+            var sapLine = request.Lines[i];
+
+            await WriteAsync("account.move.line", odooLineId, new JsonObject
+            {
+                ["x_sap_invoice_linenum"] = sapLine.SapLineNum,
+                ["x_sap_gross_buy_price"] = sapLine.GrossBuyPrice
+            });
+
+            _logger.LogDebug(
+                "Odoo line id={OdooLineId}: x_sap_invoice_linenum={LineNum}, x_sap_gross_buy_price={GrossBuyPrice}",
+                odooLineId, sapLine.SapLineNum, sapLine.GrossBuyPrice);
+
+            linesUpdated++;
+        }
+
+        if (lineIds.Count != request.Lines.Count)
+        {
+            _logger.LogWarning(
+                "Line count mismatch: Odoo has {OdooCount} product lines, SAP returned {SapCount} lines. " +
+                "Updated {Updated} lines by position.",
+                lineIds.Count, request.Lines.Count, linesUpdated);
+        }
+
+        _logger.LogInformation(
+            "Invoice write-back complete — OdooInvoiceId={OdooInvoiceId}, LinesUpdated={LinesUpdated}",
+            invoiceId, linesUpdated);
+
+        return new InvoiceWriteBackResponse
+        {
+            OdooInvoiceId = invoiceId,
+            SapDocEntry = request.SapDocEntry,
+            LinesUpdated = linesUpdated,
+            Success = true
+        };
+    }
+
     // ── Odoo JSON-RPC helpers ────────────────────────────────────────
 
     public async Task<OdooPingResponse> PingAsync()
