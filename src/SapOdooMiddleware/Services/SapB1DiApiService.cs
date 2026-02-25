@@ -370,6 +370,299 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    // ================================
+    // AR INVOICE (copy from Delivery)
+    // ================================
+    public async Task<SapInvoiceResponse> CreateInvoiceAsync(SapInvoiceRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Received AR Invoice creation request — ExternalInvoiceId={ExternalInvoiceId}, CustomerCode={CustomerCode}, " +
+                "CopyFromDelivery={CopyFromDelivery}, SapDeliveryDocEntry={SapDeliveryDocEntry}, SapSalesOrderDocEntry={SapSalesOrderDocEntry}, " +
+                "LineCount={LineCount}",
+                request.ExternalInvoiceId,
+                request.CustomerCode,
+                request.CopyFromDelivery,
+                request.SapDeliveryDocEntry,
+                request.SapSalesOrderDocEntry,
+                request.Lines.Count);
+
+            var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+
+            if (request.CopyFromDelivery)
+            {
+                return CreateInvoiceCopyFromDelivery(invoice, request);
+            }
+            else
+            {
+                return CreateInvoiceManual(invoice, request);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Creates an AR Invoice by copying from a Delivery Note (ODLN).
+    /// This preserves the full document chain: Sales Order → Delivery → Invoice.
+    /// SAP B1 uses BaseType / BaseEntry / BaseLine on each invoice line to link back
+    /// to the originating delivery line.
+    /// </summary>
+    private SapInvoiceResponse CreateInvoiceCopyFromDelivery(Documents invoice, SapInvoiceRequest request)
+    {
+        int deliveryDocEntry = request.SapDeliveryDocEntry!.Value;
+
+        _logger.LogInformation(
+            "Creating AR Invoice by copying from Delivery DocEntry={DeliveryDocEntry}",
+            deliveryDocEntry);
+
+        // Load the source delivery to read its lines
+        var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+
+        if (!delivery.GetByKey(deliveryDocEntry))
+        {
+            Marshal.ReleaseComObject(delivery);
+            Marshal.ReleaseComObject(invoice);
+            throw new InvalidOperationException(
+                $"SAP B1 Delivery Note with DocEntry={deliveryDocEntry} not found. " +
+                "Cannot create invoice by copy-from-delivery.");
+        }
+
+        _logger.LogInformation(
+            "Loaded source Delivery: DocEntry={DocEntry}, DocNum={DocNum}, CardCode={CardCode}, LineCount={LineCount}",
+            delivery.DocEntry,
+            delivery.DocNum,
+            delivery.CardCode,
+            delivery.Lines.Count);
+
+        // Set invoice header fields
+        invoice.CardCode = !string.IsNullOrEmpty(request.CustomerCode)
+            ? request.CustomerCode
+            : delivery.CardCode;
+
+        invoice.NumAtCard = request.ExternalInvoiceId;
+
+        if (request.DocDate.HasValue)
+            invoice.DocDate = request.DocDate.Value;
+
+        if (request.DueDate.HasValue)
+            invoice.DocDueDate = request.DueDate.Value;
+
+        if (!string.IsNullOrEmpty(request.Currency))
+            invoice.DocCurrency = request.Currency;
+
+        // Set header UDFs for Odoo traceability
+        TrySetUserField(invoice.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Invoice header");
+
+        if (!string.IsNullOrEmpty(request.UOdooSoId))
+            TrySetUserField(invoice.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Invoice header");
+
+        var syncDate = DateTime.UtcNow.Date;
+        TrySetUserField(invoice.UserFields, "U_Odoo_LastSync", syncDate, "Invoice header");
+        TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
+
+        // Copy lines from the delivery document
+        // Each invoice line references its source delivery line via BaseType/BaseEntry/BaseLine
+        int deliveryLineCount = delivery.Lines.Count;
+
+        _logger.LogInformation(
+            "Copying {DeliveryLineCount} line(s) from Delivery DocEntry={DeliveryDocEntry} to Invoice",
+            deliveryLineCount, deliveryDocEntry);
+
+        for (int i = 0; i < deliveryLineCount; i++)
+        {
+            delivery.Lines.SetCurrentLine(i);
+
+            if (i > 0)
+                invoice.Lines.Add();
+
+            // Set base document reference (copy-from link)
+            invoice.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
+            invoice.Lines.BaseEntry = deliveryDocEntry;
+            invoice.Lines.BaseLine = delivery.Lines.LineNum;
+
+            _logger.LogDebug(
+                "Invoice Line[{Index}]: BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}, " +
+                "ItemCode={ItemCode}, Qty={Qty}",
+                i,
+                deliveryDocEntry,
+                delivery.Lines.LineNum,
+                delivery.Lines.ItemCode,
+                delivery.Lines.Quantity);
+        }
+
+        // Capture the originating Sales Order DocEntry from the delivery for the response
+        int? baseSoDocEntry = request.SapSalesOrderDocEntry;
+
+        Marshal.ReleaseComObject(delivery);
+
+        // Add the invoice
+        int result = invoice.Add();
+
+        if (result != 0)
+        {
+            _company!.GetLastError(out int errCode, out string errMsg);
+            Marshal.ReleaseComObject(invoice);
+
+            _logger.LogError(
+                "Failed to create AR Invoice from Delivery DocEntry={DeliveryDocEntry}: DI API error {ErrCode}: {ErrMsg}",
+                deliveryDocEntry, errCode, errMsg);
+
+            throw new InvalidOperationException(
+                $"SAP DI API error {errCode}: {errMsg}");
+        }
+
+        int invoiceDocEntry = int.Parse(_company!.GetNewObjectKey());
+
+        // Retrieve the created invoice to get DocNum
+        invoice.GetByKey(invoiceDocEntry);
+        int invoiceDocNum = invoice.DocNum;
+
+        Marshal.ReleaseComObject(invoice);
+
+        _logger.LogInformation(
+            "AR Invoice created successfully (copy-from-delivery): DocEntry={DocEntry}, DocNum={DocNum}, " +
+            "ExternalInvoiceId={ExternalInvoiceId}, BaseDeliveryDocEntry={BaseDeliveryDocEntry}, " +
+            "BaseSalesOrderDocEntry={BaseSalesOrderDocEntry}",
+            invoiceDocEntry,
+            invoiceDocNum,
+            request.ExternalInvoiceId,
+            deliveryDocEntry,
+            baseSoDocEntry);
+
+        return new SapInvoiceResponse
+        {
+            DocEntry = invoiceDocEntry,
+            DocNum = invoiceDocNum,
+            ExternalInvoiceId = request.ExternalInvoiceId,
+            BaseDeliveryDocEntry = deliveryDocEntry,
+            BaseSalesOrderDocEntry = baseSoDocEntry
+        };
+    }
+
+    /// <summary>
+    /// Creates an AR Invoice manually from the provided line items
+    /// (fallback when no delivery DocEntry is supplied).
+    /// </summary>
+    private SapInvoiceResponse CreateInvoiceManual(Documents invoice, SapInvoiceRequest request)
+    {
+        _logger.LogInformation(
+            "Creating AR Invoice manually (no copy-from-delivery) — ExternalInvoiceId={ExternalInvoiceId}, LineCount={LineCount}",
+            request.ExternalInvoiceId,
+            request.Lines.Count);
+
+        if (request.Lines.Count == 0)
+        {
+            Marshal.ReleaseComObject(invoice);
+            throw new InvalidOperationException(
+                "Invoice lines are required when SapDeliveryDocEntry is not provided.");
+        }
+
+        // Set header
+        invoice.CardCode = request.CustomerCode;
+        invoice.NumAtCard = request.ExternalInvoiceId;
+
+        if (request.DocDate.HasValue)
+            invoice.DocDate = request.DocDate.Value;
+
+        if (request.DueDate.HasValue)
+            invoice.DocDueDate = request.DueDate.Value;
+
+        if (!string.IsNullOrEmpty(request.Currency))
+            invoice.DocCurrency = request.Currency;
+
+        // Header UDFs
+        TrySetUserField(invoice.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Invoice header");
+
+        if (!string.IsNullOrEmpty(request.UOdooSoId))
+            TrySetUserField(invoice.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Invoice header");
+
+        var syncDate = DateTime.UtcNow.Date;
+        TrySetUserField(invoice.UserFields, "U_Odoo_LastSync", syncDate, "Invoice header");
+        TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
+
+        // Set lines
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            if (i > 0)
+                invoice.Lines.Add();
+
+            var line = request.Lines[i];
+
+            invoice.Lines.ItemCode = line.ItemCode;
+            invoice.Lines.Quantity = line.Quantity;
+            invoice.Lines.UnitPrice = line.Price;
+
+            if (line.DiscountPercent.HasValue)
+                invoice.Lines.DiscountPercent = line.DiscountPercent.Value;
+
+            if (!string.IsNullOrEmpty(line.WarehouseCode))
+                invoice.Lines.WarehouseCode = line.WarehouseCode;
+
+            if (!string.IsNullOrEmpty(line.AccountCode))
+                invoice.Lines.AccountCode = line.AccountCode;
+
+            // If a base delivery reference is provided at line level, set it
+            if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
+            {
+                invoice.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
+                invoice.Lines.BaseEntry = line.BaseDeliveryDocEntry.Value;
+                invoice.Lines.BaseLine = line.BaseDeliveryLineNum.Value;
+
+                _logger.LogDebug(
+                    "Manual Invoice Line[{Index}]: BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                    i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
+            }
+
+            _logger.LogDebug(
+                "Manual Invoice Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Discount={Discount}",
+                i, line.ItemCode, line.Quantity, line.Price, line.DiscountPercent);
+        }
+
+        int result = invoice.Add();
+
+        if (result != 0)
+        {
+            _company!.GetLastError(out int errCode, out string errMsg);
+            Marshal.ReleaseComObject(invoice);
+
+            _logger.LogError(
+                "Failed to create AR Invoice manually: DI API error {ErrCode}: {ErrMsg}",
+                errCode, errMsg);
+
+            throw new InvalidOperationException(
+                $"SAP DI API error {errCode}: {errMsg}");
+        }
+
+        int invoiceDocEntry = int.Parse(_company!.GetNewObjectKey());
+
+        invoice.GetByKey(invoiceDocEntry);
+        int invoiceDocNum = invoice.DocNum;
+
+        Marshal.ReleaseComObject(invoice);
+
+        _logger.LogInformation(
+            "AR Invoice created successfully (manual): DocEntry={DocEntry}, DocNum={DocNum}, " +
+            "ExternalInvoiceId={ExternalInvoiceId}",
+            invoiceDocEntry,
+            invoiceDocNum,
+            request.ExternalInvoiceId);
+
+        return new SapInvoiceResponse
+        {
+            DocEntry = invoiceDocEntry,
+            DocNum = invoiceDocNum,
+            ExternalInvoiceId = request.ExternalInvoiceId,
+            BaseSalesOrderDocEntry = request.SapSalesOrderDocEntry
+        };
+    }
+
     /// <summary>
     /// Returns the warehouse code to use for a Sales Order line.
     /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to
