@@ -69,9 +69,36 @@ public class OdooJsonRpcService : IOdooService
         await ExecuteMethodAsync("stock.picking", "action_assign", new JsonArray { pickingId });
         _logger.LogInformation("Reserved stock for picking id={PickingId}", pickingId);
 
-        // 4. action_set_quantities_to_reservation() — set qty_done = demand/reserved
-        await ExecuteMethodAsync("stock.picking", "action_set_quantities_to_reservation", new JsonArray { pickingId });
-        _logger.LogInformation("Set quantities to reservation for picking id={PickingId}", pickingId);
+        // 4. Set qty_done = quantity (demand) on each move line
+        //    In Odoo 18, action_set_quantities_to_reservation does not exist.
+        //    Instead, we read each stock.move.line, get its 'quantity' (demand),
+        //    and write it to 'qty_done', plus set 'picked' = true.
+        var moveLineIds = await SearchAsync("stock.move.line", new JsonArray
+        {
+            new JsonArray { JsonValue.Create("picking_id"), JsonValue.Create("="), JsonValue.Create(pickingId) }
+        });
+
+        if (moveLineIds.Count > 0)
+        {
+            foreach (var mlId in moveLineIds)
+            {
+                // Read the demand quantity
+                var mlData = await ReadAsync("stock.move.line", mlId, new JsonArray
+                {
+                    JsonValue.Create("quantity")
+                });
+
+                var demandQty = mlData?["quantity"]?.GetValue<double>() ?? 0;
+
+                // Write qty_done = demand quantity, picked = true
+                await WriteAsync("stock.move.line", mlId, new JsonObject
+                {
+                    ["qty_done"] = demandQty,
+                    ["picked"] = true
+                });
+            }
+        }
+        _logger.LogInformation("Set qty_done on {Count} move lines for picking id={PickingId}", moveLineIds.Count, pickingId);
 
         // 5. button_validate() — with context to skip backorder/immediate-transfer wizards
         await ExecuteMethodWithContextAsync("stock.picking", "button_validate", new JsonArray { pickingId },
