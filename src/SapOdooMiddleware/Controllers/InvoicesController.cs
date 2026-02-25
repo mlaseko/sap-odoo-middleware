@@ -10,6 +10,7 @@ namespace SapOdooMiddleware.Controllers;
 /// Receives AR Invoice requests from Odoo and creates them in SAP B1 via DI API.
 /// After successful creation, writes SAP DocEntry and per-line data (LineNum, GrossBuyPrice)
 /// back to the Odoo invoice when <c>odoo_invoice_id</c> is provided in the request.
+/// Then automatically creates the COGS journal entry using the same cost data.
 /// </summary>
 [ApiController]
 [Route("api/invoices")]
@@ -78,11 +79,14 @@ public class InvoicesController : ControllerBase
             if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)
             {
                 await WriteBackToOdoo(request.OdooInvoiceId.Value, result);
+
+                // Step 3: Create COGS journal entry using the same cost data
+                await CreateCogsJournal(result);
             }
             else
             {
                 _logger.LogInformation(
-                    "Skipping Odoo write-back — OdooInvoiceId not provided in request.");
+                    "Skipping Odoo write-back and COGS — OdooInvoiceId not provided in request.");
             }
 
             return Ok(ApiResponse<SapInvoiceResponse>.Ok(result));
@@ -142,6 +146,62 @@ public class InvoicesController : ControllerBase
 
             result.OdooWriteBackSuccess = false;
             result.OdooWriteBackError = ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Creates the COGS journal entry in Odoo using cost data from the SAP invoice response.
+    /// Converts GrossBuyPrice per line into UnitCost for the COGS request.
+    /// Failures are logged but do NOT fail the overall request.
+    /// </summary>
+    private async Task CreateCogsJournal(SapInvoiceResponse result)
+    {
+        if (result.Lines.Count == 0)
+        {
+            _logger.LogInformation(
+                "Skipping COGS journal — no lines with cost data in SAP response for DocEntry={DocEntry}",
+                result.DocEntry);
+            return;
+        }
+
+        try
+        {
+            _logger.LogInformation(
+                "Starting COGS journal creation — SapDocEntry={SapDocEntry}, LineCount={LineCount}",
+                result.DocEntry, result.Lines.Count);
+
+            var cogsRequest = new CogsJournalRequest
+            {
+                DocEntry = result.DocEntry,
+                DocNum = result.DocNum,
+                Lines = result.Lines.Select(l => new CogsJournalLineRequest
+                {
+                    LineNum = l.LineNum,
+                    ItemCode = l.ItemCode,
+                    Quantity = l.Quantity,
+                    UnitCost = l.GrossBuyPrice
+                }).ToList()
+            };
+
+            var cogsResult = await _odooService.CreateOrUpdateCogsJournalAsync(cogsRequest);
+
+            result.CogsJournalAction = cogsResult.Action;
+            result.CogsJournalEntryId = cogsResult.CogsJournalEntryId;
+
+            _logger.LogInformation(
+                "COGS journal {Action} — JeId={JeId}, TotalCogs={TotalCogs}, Hash={Hash}",
+                cogsResult.Action, cogsResult.CogsJournalEntryId,
+                cogsResult.TotalCogs, cogsResult.Hash);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "COGS journal creation failed for SapDocEntry={SapDocEntry}. " +
+                "Invoice and write-back succeeded — use POST /api/cogs-journals to retry.",
+                result.DocEntry);
+
+            result.CogsJournalAction = "failed";
+            result.CogsJournalError = ex.Message;
         }
     }
 }

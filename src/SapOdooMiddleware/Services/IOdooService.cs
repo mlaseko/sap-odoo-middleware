@@ -3,8 +3,8 @@ using SapOdooMiddleware.Models.Odoo;
 namespace SapOdooMiddleware.Services;
 
 /// <summary>
-/// Abstraction over the Odoo JSON-RPC API for delivery-confirmation
-/// and invoice write-back operations.
+/// Abstraction over the Odoo JSON-RPC API for delivery-confirmation,
+/// invoice write-back, and COGS journal entry operations.
 /// </summary>
 public interface IOdooService
 {
@@ -20,6 +20,13 @@ public interface IOdooService
     /// <c>x_sap_invoice_linenum</c> / <c>x_sap_gross_buy_price</c> on each invoice line.
     /// </summary>
     Task<InvoiceWriteBackResponse> UpdateInvoiceSapFieldsAsync(InvoiceWriteBackRequest request);
+
+    /// <summary>
+    /// Creates or updates a COGS journal entry in Odoo for a given SAP AR Invoice.
+    /// Implements the full flow: find invoice → match lines → compute COGS →
+    /// build JE → hash check → create/update → post.
+    /// </summary>
+    Task<CogsJournalResponse> CreateOrUpdateCogsJournalAsync(CogsJournalRequest request);
 
     /// <summary>
     /// Verifies Odoo JSON-RPC connectivity by authenticating and returning session info.

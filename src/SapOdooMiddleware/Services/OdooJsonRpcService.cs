@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -220,6 +221,439 @@ public class OdooJsonRpcService : IOdooService
         };
     }
 
+    // ── COGS Journal Entry automation (Step 4) ─────────────────────
+
+    public async Task<CogsJournalResponse> CreateOrUpdateCogsJournalAsync(CogsJournalRequest request)
+    {
+        if (!_settings.UseBearerAuth)
+            await EnsureAuthenticatedAsync();
+
+        // 4.2 — Find the Odoo invoice by x_sap_invoice_docentry
+        var invoiceRecords = await SearchReadAsync("account.move", new JsonArray
+        {
+            new JsonArray { JsonValue.Create("move_type"), JsonValue.Create("in"), new JsonArray { JsonValue.Create("out_invoice"), JsonValue.Create("out_refund") } },
+            new JsonArray { JsonValue.Create("x_sap_invoice_docentry"), JsonValue.Create("="), JsonValue.Create(request.DocEntry) }
+        }, new JsonArray
+        {
+            JsonValue.Create("id"),
+            JsonValue.Create("name"),
+            JsonValue.Create("invoice_date")
+        });
+
+        if (invoiceRecords.Count == 0)
+            throw new InvalidOperationException(
+                $"Odoo invoice not found for SAP DocEntry={request.DocEntry}. " +
+                "Ensure x_sap_invoice_docentry has been written back to Odoo.");
+
+        var invoice = invoiceRecords[0];
+        int invoiceId = invoice["id"]!.GetValue<int>();
+        string invoiceName = invoice["name"]?.GetValue<string>() ?? "";
+        string invoiceDate = invoice["invoice_date"]?.GetValue<string>()
+            ?? request.DocDate?.ToString("yyyy-MM-dd")
+            ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
+
+        _logger.LogInformation(
+            "Found Odoo invoice id={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}",
+            invoiceId, invoiceName, request.DocEntry);
+
+        // 4.3 — Match SAP lines to Odoo invoice lines
+        var odooLines = await SearchReadAsync("account.move.line", new JsonArray
+        {
+            new JsonArray { JsonValue.Create("move_id"), JsonValue.Create("="), JsonValue.Create(invoiceId) },
+            new JsonArray { JsonValue.Create("display_type"), JsonValue.Create("="), JsonValue.Create("product") }
+        }, new JsonArray
+        {
+            JsonValue.Create("id"),
+            JsonValue.Create("product_id"),
+            JsonValue.Create("quantity"),
+            JsonValue.Create("analytic_distribution"),
+            JsonValue.Create("x_sap_invoice_linenum"),
+            JsonValue.Create("x_sap_item_code")
+        });
+
+        _logger.LogInformation(
+            "Found {Count} product line(s) on Odoo invoice id={InvoiceId}",
+            odooLines.Count, invoiceId);
+
+        var matchedLines = MatchLinesToOdoo(request.Lines, odooLines);
+
+        // 4.1 — Compute line COGS
+        var cogsLines = new List<(double LineCogs, string ItemCode, int? SapLineNum, JsonNode? AnalyticDistribution, string ProductName)>();
+        double totalCogs = 0;
+
+        foreach (var (sapLine, odooLine) in matchedLines)
+        {
+            double lineCogs;
+            if (sapLine.StockSum.HasValue)
+                lineCogs = sapLine.StockSum.Value;
+            else if (sapLine.UnitCost.HasValue)
+                lineCogs = sapLine.UnitCost.Value * sapLine.Quantity;
+            else
+                throw new InvalidOperationException(
+                    $"SAP line ItemCode={sapLine.ItemCode} has neither UnitCost nor StockSum.");
+
+            var analyticDist = odooLine?["analytic_distribution"];
+            string productName = "";
+            if (odooLine?["product_id"] is JsonArray productArr && productArr.Count >= 2)
+                productName = productArr[1]?.GetValue<string>() ?? sapLine.ItemCode;
+            else
+                productName = sapLine.ItemCode;
+
+            cogsLines.Add((lineCogs, sapLine.ItemCode, sapLine.LineNum, analyticDist, productName));
+            totalCogs += lineCogs;
+        }
+
+        if (totalCogs == 0)
+        {
+            _logger.LogWarning("Total COGS is zero for SAP DocEntry={DocEntry}. Skipping JE creation.", request.DocEntry);
+            return new CogsJournalResponse
+            {
+                SapDocEntry = request.DocEntry,
+                OdooInvoiceId = invoiceId,
+                OdooInvoiceName = invoiceName,
+                Action = "skipped",
+                TotalCogs = 0
+            };
+        }
+
+        // 4.7 — Generate hash
+        string hash = ComputeCogsHash(request);
+
+        // 4.5 — Idempotency check
+        var existingJeIds = await SearchAsync("account.move", new JsonArray
+        {
+            new JsonArray { JsonValue.Create("journal_id"), JsonValue.Create("="), JsonValue.Create(_settings.CogsJournalId) },
+            new JsonArray { JsonValue.Create("x_cogs_for_invoice_id"), JsonValue.Create("="), JsonValue.Create(invoiceId) }
+        });
+
+        string action;
+        int cogsJeId;
+
+        if (existingJeIds.Count > 0)
+        {
+            cogsJeId = existingJeIds[0];
+
+            // Read existing hash
+            var existingJe = await ReadAsync("account.move", cogsJeId, new JsonArray
+            {
+                JsonValue.Create("x_cogs_import_hash"),
+                JsonValue.Create("state")
+            });
+
+            string existingHash = existingJe?["x_cogs_import_hash"]?.GetValue<string>() ?? "";
+
+            if (existingHash == hash)
+            {
+                _logger.LogInformation(
+                    "COGS JE id={JeId} already exists with same hash — skipping. DocEntry={DocEntry}",
+                    cogsJeId, request.DocEntry);
+
+                return new CogsJournalResponse
+                {
+                    SapDocEntry = request.DocEntry,
+                    OdooInvoiceId = invoiceId,
+                    OdooInvoiceName = invoiceName,
+                    CogsJournalEntryId = cogsJeId,
+                    Action = "skipped",
+                    Hash = hash,
+                    DebitLineCount = cogsLines.Count,
+                    TotalCogs = totalCogs
+                };
+            }
+
+            // Hash differs — update: Policy A (draft → replace lines → repost)
+            _logger.LogInformation(
+                "COGS JE id={JeId} exists but hash differs — updating. DocEntry={DocEntry}",
+                cogsJeId, request.DocEntry);
+
+            string state = existingJe?["state"]?.GetValue<string>() ?? "";
+            if (state == "posted")
+            {
+                await ExecuteMethodAsync("account.move", "button_draft", new JsonArray { cogsJeId });
+                _logger.LogDebug("Reset COGS JE id={JeId} to draft for update", cogsJeId);
+            }
+
+            // Delete existing lines
+            var existingLineIds = await SearchAsync("account.move.line", new JsonArray
+            {
+                new JsonArray { JsonValue.Create("move_id"), JsonValue.Create("="), JsonValue.Create(cogsJeId) }
+            });
+
+            // Update the JE header with new ref, date, and hash. Write new lines via line_ids.
+            var jeUpdatePayload = BuildJeWritePayload(
+                invoiceName, request.DocEntry, invoiceDate, hash, invoiceId,
+                cogsLines, existingLineIds);
+
+            await WriteAsync("account.move", cogsJeId, jeUpdatePayload);
+
+            // Post the JE
+            await ExecuteMethodAsync("account.move", "action_post", new JsonArray { cogsJeId });
+            _logger.LogInformation("Updated and posted COGS JE id={JeId}", cogsJeId);
+
+            action = "updated";
+        }
+        else
+        {
+            // 4.6 — Create new COGS JE
+            _logger.LogInformation(
+                "Creating new COGS JE for invoice id={InvoiceId} name={InvoiceName}, DocEntry={DocEntry}",
+                invoiceId, invoiceName, request.DocEntry);
+
+            var jePayload = BuildJeCreatePayload(
+                invoiceName, request.DocEntry, invoiceDate, hash, invoiceId,
+                cogsLines, totalCogs);
+
+            cogsJeId = await CreateAsync("account.move", jePayload);
+
+            // Post the JE
+            await ExecuteMethodAsync("account.move", "action_post", new JsonArray { cogsJeId });
+            _logger.LogInformation("Created and posted COGS JE id={JeId}", cogsJeId);
+
+            action = "created";
+        }
+
+        return new CogsJournalResponse
+        {
+            SapDocEntry = request.DocEntry,
+            OdooInvoiceId = invoiceId,
+            OdooInvoiceName = invoiceName,
+            CogsJournalEntryId = cogsJeId,
+            Action = action,
+            Hash = hash,
+            DebitLineCount = cogsLines.Count,
+            TotalCogs = totalCogs
+        };
+    }
+
+    // ── COGS line matching (4.3) ─────────────────────────────────────
+
+    private List<(CogsJournalLineRequest SapLine, JsonObject? OdooLine)> MatchLinesToOdoo(
+        List<CogsJournalLineRequest> sapLines, List<JsonObject> odooLines)
+    {
+        var result = new List<(CogsJournalLineRequest, JsonObject?)>();
+        var usedOdooIndices = new HashSet<int>();
+
+        foreach (var sapLine in sapLines)
+        {
+            JsonObject? matched = null;
+
+            // Best match: by x_sap_invoice_linenum (when LineNum is available)
+            if (sapLine.LineNum.HasValue)
+            {
+                for (int i = 0; i < odooLines.Count; i++)
+                {
+                    if (usedOdooIndices.Contains(i)) continue;
+                    var lineNum = odooLines[i]["x_sap_invoice_linenum"];
+                    if (lineNum != null && lineNum.GetValue<int>() == sapLine.LineNum.Value)
+                    {
+                        matched = odooLines[i];
+                        usedOdooIndices.Add(i);
+                        break;
+                    }
+                }
+            }
+
+            // Fallback: match by ItemCode + Quantity
+            if (matched == null)
+            {
+                for (int i = 0; i < odooLines.Count; i++)
+                {
+                    if (usedOdooIndices.Contains(i)) continue;
+
+                    // Check item code via x_sap_item_code field
+                    string odooItemCode = odooLines[i]["x_sap_item_code"]?.GetValue<string>() ?? "";
+                    double odooQty = odooLines[i]["quantity"]?.GetValue<double>() ?? 0;
+
+                    if (string.Equals(odooItemCode, sapLine.ItemCode, StringComparison.OrdinalIgnoreCase)
+                        && Math.Abs(odooQty - sapLine.Quantity) < 0.001)
+                    {
+                        matched = odooLines[i];
+                        usedOdooIndices.Add(i);
+                        break;
+                    }
+                }
+            }
+
+            // Last resort: first unused line (consume by sequence order)
+            if (matched == null)
+            {
+                for (int i = 0; i < odooLines.Count; i++)
+                {
+                    if (usedOdooIndices.Contains(i)) continue;
+                    matched = odooLines[i];
+                    usedOdooIndices.Add(i);
+                    _logger.LogWarning(
+                        "COGS fallback: matched SAP line ItemCode={ItemCode} to Odoo line id={OdooLineId} by sequence order",
+                        sapLine.ItemCode, odooLines[i]["id"]?.GetValue<int>());
+                    break;
+                }
+            }
+
+            if (matched == null)
+            {
+                _logger.LogWarning(
+                    "No Odoo line match for SAP line ItemCode={ItemCode}, Qty={Qty}. " +
+                    "COGS debit will have no analytic distribution.",
+                    sapLine.ItemCode, sapLine.Quantity);
+            }
+
+            result.Add((sapLine, matched));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Returns true if the analytic_distribution JSON is a non-null, non-false value.
+    /// Odoo returns false (as a JSON boolean/string) when no analytics are set.
+    /// </summary>
+    private static bool IsValidAnalyticDistribution(JsonNode? analyticDist)
+    {
+        if (analyticDist == null) return false;
+        if (analyticDist is JsonValue jv)
+        {
+            var raw = jv.ToString();
+            return raw != "false" && raw != "False" && raw != "";
+        }
+        // JsonObject with actual distribution data
+        return true;
+    }
+
+    // ── COGS hash generation (4.7) ───────────────────────────────────
+
+    internal static string ComputeCogsHash(CogsJournalRequest request)
+    {
+        // Sort lines by LineNum if available, then by ItemCode for stability
+        var sortedLines = request.Lines
+            .OrderBy(l => l.LineNum ?? int.MaxValue)
+            .ThenBy(l => l.ItemCode)
+            .ToList();
+
+        var sb = new StringBuilder();
+        sb.Append(request.DocEntry);
+
+        foreach (var line in sortedLines)
+        {
+            double lineCogs = line.StockSum ?? (line.UnitCost ?? 0) * line.Quantity;
+            sb.Append('|');
+            sb.Append(line.ItemCode);
+            sb.Append(':');
+            sb.Append(line.Quantity.ToString("F4"));
+            sb.Append(':');
+            sb.Append(lineCogs.ToString("F4"));
+        }
+
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
+        return Convert.ToHexStringLower(bytes);
+    }
+
+    // ── JE payload builders (4.6) ────────────────────────────────────
+
+    private JsonObject BuildJeCreatePayload(
+        string invoiceName, int docEntry, string date, string hash, int invoiceId,
+        List<(double LineCogs, string ItemCode, int? SapLineNum, JsonNode? AnalyticDistribution, string ProductName)> cogsLines,
+        double totalCogs)
+    {
+        var lineCommands = new JsonArray();
+
+        // Debit lines (one per invoice line)
+        foreach (var (lineCogs, itemCode, sapLineNum, analyticDist, productName) in cogsLines)
+        {
+            var lineNumLabel = sapLineNum.HasValue ? sapLineNum.Value.ToString() : "?";
+            var debitLine = new JsonObject
+            {
+                ["account_id"] = _settings.CogsAccountId,
+                ["debit"] = lineCogs,
+                ["credit"] = 0,
+                ["name"] = $"COGS | {productName} | INV {invoiceName} | SAP line {lineNumLabel}"
+            };
+
+            // 4.4 — Apply analytic distribution from the invoice line
+            if (IsValidAnalyticDistribution(analyticDist))
+            {
+                debitLine["analytic_distribution"] = analyticDist!.DeepClone();
+            }
+
+            // Command (0, 0, vals) = create new line
+            lineCommands.Add(new JsonArray { 0, 0, debitLine });
+        }
+
+        // One credit line (COGS Clearing)
+        var creditLine = new JsonObject
+        {
+            ["account_id"] = _settings.CogsClearingAccountId,
+            ["debit"] = 0,
+            ["credit"] = totalCogs,
+            ["name"] = $"COGS Clearing | INV {invoiceName}"
+        };
+        lineCommands.Add(new JsonArray { 0, 0, creditLine });
+
+        return new JsonObject
+        {
+            ["move_type"] = "entry",
+            ["journal_id"] = _settings.CogsJournalId,
+            ["date"] = date,
+            ["ref"] = $"COGS | {invoiceName} | SAP DocEntry {docEntry}",
+            ["x_cogs_for_invoice_id"] = invoiceId,
+            ["x_cogs_import_hash"] = hash,
+            ["line_ids"] = lineCommands
+        };
+    }
+
+    private JsonObject BuildJeWritePayload(
+        string invoiceName, int docEntry, string date, string hash, int invoiceId,
+        List<(double LineCogs, string ItemCode, int? SapLineNum, JsonNode? AnalyticDistribution, string ProductName)> cogsLines,
+        List<int> existingLineIds)
+    {
+        var lineCommands = new JsonArray();
+
+        // Delete existing lines: (2, id, 0) = delete
+        foreach (int lineId in existingLineIds)
+        {
+            lineCommands.Add(new JsonArray { 2, lineId, 0 });
+        }
+
+        // Recreate debit lines
+        double totalCogs = 0;
+        foreach (var (lineCogs, itemCode, sapLineNum, analyticDist, productName) in cogsLines)
+        {
+            totalCogs += lineCogs;
+            var lineNumLabel = sapLineNum.HasValue ? sapLineNum.Value.ToString() : "?";
+            var debitLine = new JsonObject
+            {
+                ["account_id"] = _settings.CogsAccountId,
+                ["debit"] = lineCogs,
+                ["credit"] = 0,
+                ["name"] = $"COGS | {productName} | INV {invoiceName} | SAP line {lineNumLabel}"
+            };
+
+            if (IsValidAnalyticDistribution(analyticDist))
+            {
+                debitLine["analytic_distribution"] = analyticDist!.DeepClone();
+            }
+
+            lineCommands.Add(new JsonArray { 0, 0, debitLine });
+        }
+
+        // Recreate credit line
+        var creditLine = new JsonObject
+        {
+            ["account_id"] = _settings.CogsClearingAccountId,
+            ["debit"] = 0,
+            ["credit"] = totalCogs,
+            ["name"] = $"COGS Clearing | INV {invoiceName}"
+        };
+        lineCommands.Add(new JsonArray { 0, 0, creditLine });
+
+        return new JsonObject
+        {
+            ["date"] = date,
+            ["ref"] = $"COGS | {invoiceName} | SAP DocEntry {docEntry}",
+            ["x_cogs_import_hash"] = hash,
+            ["line_ids"] = lineCommands
+        };
+    }
+
     // ── Odoo JSON-RPC helpers ────────────────────────────────────────
 
     public async Task<OdooPingResponse> PingAsync()
@@ -357,6 +791,38 @@ public class OdooJsonRpcService : IOdooService
         });
 
         return classicResult?.AsArray().FirstOrDefault()?.AsObject();
+    }
+
+    private async Task<List<JsonObject>> SearchReadAsync(string model, JsonArray domain, JsonArray fields)
+    {
+        if (_settings.UseBearerAuth)
+        {
+            var result = await SendJson2Async(model, "search_read", new JsonObject
+            {
+                ["domain"] = domain,
+                ["fields"] = fields
+            });
+            return result?.AsArray().Select(n => n!.AsObject()).ToList() ?? [];
+        }
+
+        var classicResult = await CallObjectMethodAsync(model, "search_read", new JsonArray
+        {
+            domain,
+            fields
+        });
+        return classicResult?.AsArray().Select(n => n!.AsObject()).ToList() ?? [];
+    }
+
+    private async Task<int> CreateAsync(string model, JsonObject values)
+    {
+        if (_settings.UseBearerAuth)
+        {
+            var result = await SendJson2Async(model, "create", new JsonObject { ["vals"] = values });
+            return result?.GetValue<int>() ?? throw new InvalidOperationException($"Odoo create on {model} returned null.");
+        }
+
+        var classicResult = await CallObjectMethodAsync(model, "create", new JsonArray { values });
+        return classicResult?.GetValue<int>() ?? throw new InvalidOperationException($"Odoo create on {model} returned null.");
     }
 
     private async Task<JsonNode?> CallObjectMethodAsync(

@@ -43,6 +43,22 @@ public class SapInvoiceResponse
     /// Error message if the Odoo write-back failed. Null on success or when not attempted.
     /// </summary>
     public string? OdooWriteBackError { get; set; }
+
+    /// <summary>
+    /// COGS journal entry action: "created", "updated", "skipped", or "failed".
+    /// Null when COGS was not attempted (no OdooInvoiceId or no lines).
+    /// </summary>
+    public string? CogsJournalAction { get; set; }
+
+    /// <summary>
+    /// Odoo account.move ID of the COGS journal entry (when created/updated).
+    /// </summary>
+    public int? CogsJournalEntryId { get; set; }
+
+    /// <summary>
+    /// Error message if the COGS journal creation failed. Null on success.
+    /// </summary>
+    public string? CogsJournalError { get; set; }
 }
 
 /// <summary>

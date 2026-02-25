@@ -35,4 +35,23 @@ public class OdooSettings
     /// Automatically true when ApiKey is configured.
     /// </summary>
     public bool UseBearerAuth => !string.IsNullOrWhiteSpace(ApiKey);
+
+    // ── COGS Journal Entry settings ──────────────────────────────────
+
+    /// <summary>
+    /// Odoo journal ID (account.journal) used for COGS Import entries.
+    /// The middleware creates COGS journal entries in this journal.
+    /// </summary>
+    public int CogsJournalId { get; set; }
+
+    /// <summary>
+    /// Odoo GL account ID (account.account) for COGS expense (debit side).
+    /// Typically account code 500000 or similar.
+    /// </summary>
+    public int CogsAccountId { get; set; }
+
+    /// <summary>
+    /// Odoo GL account ID (account.account) for COGS Clearing (credit side).
+    /// </summary>
+    public int CogsClearingAccountId { get; set; }
 }
