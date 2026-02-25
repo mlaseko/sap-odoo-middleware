@@ -544,7 +544,7 @@ public class OdooJsonRpcService : IOdooService
         }
 
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
-        return Convert.ToHexStringLower(bytes);
+        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
     // ── JE payload builders (4.6) ────────────────────────────────────
