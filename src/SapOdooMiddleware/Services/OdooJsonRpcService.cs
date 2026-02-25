@@ -255,7 +255,7 @@ public class OdooJsonRpcService : IOdooService
     {
         if (_settings.UseBearerAuth)
         {
-            await SendJson2Async(model, "write", new JsonObject { ["ids"] = new JsonArray { id }, ["values"] = values });
+            await SendJson2Async(model, "write", new JsonObject { ["ids"] = new JsonArray { id }, ["vals"] = values });
             return;
         }
 
