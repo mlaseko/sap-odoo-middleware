@@ -19,6 +19,12 @@ public interface ISapB1Service
     Task<SapSalesOrderResponse> UpdateSalesOrderAsync(int docEntry, SapSalesOrderRequest request);
 
     /// <summary>
+    /// Creates an AR Invoice in SAP B1 via DI API, optionally by copying from
+    /// a Delivery Note (ODLN) to maintain the SO → Delivery → Invoice chain.
+    /// </summary>
+    Task<SapInvoiceResponse> CreateInvoiceAsync(SapInvoiceRequest request);
+
+    /// <summary>
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();
