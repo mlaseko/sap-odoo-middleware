@@ -25,6 +25,13 @@ public interface ISapB1Service
     Task<SapInvoiceResponse> CreateInvoiceAsync(SapInvoiceRequest request);
 
     /// <summary>
+    /// Creates an Incoming Payment (ORCT) in SAP B1 via DI API.
+    /// Supports cash and bank payments, full and partial allocations across one or more AR Invoices,
+    /// and multi-currency handling via a Forex transfer account when required.
+    /// </summary>
+    Task<SapIncomingPaymentResponse> CreateIncomingPaymentAsync(SapIncomingPaymentRequest request);
+
+    /// <summary>
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();

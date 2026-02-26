@@ -26,4 +26,8 @@ internal sealed class SapB1DiApiServiceStub : ISapB1Service
     public Task<SapInvoiceResponse> CreateInvoiceAsync(SapInvoiceRequest request) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<SapIncomingPaymentResponse> CreateIncomingPaymentAsync(SapIncomingPaymentRequest request) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 }
