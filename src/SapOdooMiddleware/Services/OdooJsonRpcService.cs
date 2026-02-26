@@ -267,13 +267,56 @@ public class OdooJsonRpcService : IOdooService
             JsonValue.Create("product_id"),
             JsonValue.Create("quantity"),
             JsonValue.Create("analytic_distribution"),
-            JsonValue.Create("x_sap_invoice_linenum"),
-            JsonValue.Create("x_sap_item_code")
+            JsonValue.Create("x_sap_invoice_linenum")
         });
 
         _logger.LogInformation(
             "Found {Count} product line(s) on Odoo invoice id={InvoiceId}",
             odooLines.Count, invoiceId);
+
+        // Resolve x_sap_item_code from product.product (the field lives on the
+        // product variant, not on account.move.line).
+        var productIds = odooLines
+            .Select(l => l["product_id"] is JsonArray arr && arr.Count >= 1
+                ? arr[0]?.GetValue<int>() : (int?)null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .Distinct()
+            .ToList();
+
+        var productItemCodes = new Dictionary<int, string>();
+        if (productIds.Count > 0)
+        {
+            var domainArray = new JsonArray();
+            var idsArray = new JsonArray();
+            foreach (var pid in productIds)
+                idsArray.Add(JsonValue.Create(pid));
+            domainArray.Add(new JsonArray { JsonValue.Create("id"), JsonValue.Create("in"), idsArray });
+
+            var products = await SearchReadAsync("product.product", domainArray, new JsonArray
+            {
+                JsonValue.Create("id"),
+                JsonValue.Create("x_sap_item_code")
+            });
+
+            foreach (var p in products)
+            {
+                int pid = p["id"]!.GetValue<int>();
+                string itemCode = p["x_sap_item_code"]?.GetValue<string>() ?? "";
+                productItemCodes[pid] = itemCode;
+            }
+        }
+
+        // Inject resolved item codes into odoo line objects for matching
+        foreach (var line in odooLines)
+        {
+            if (line["product_id"] is JsonArray productArr && productArr.Count >= 1)
+            {
+                int pid = productArr[0]!.GetValue<int>();
+                line["x_sap_item_code"] = JsonValue.Create(
+                    productItemCodes.GetValueOrDefault(pid, ""));
+            }
+        }
 
         var matchedLines = MatchLinesToOdoo(request.Lines, odooLines);
 
