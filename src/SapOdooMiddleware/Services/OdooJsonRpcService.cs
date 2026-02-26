@@ -236,15 +236,15 @@ public class OdooJsonRpcService : IOdooService
             "SapDocEntry={SapDocEntry}, SapDocNum={SapDocNum}",
             paymentId, request.SapDocEntry, request.SapDocNum);
 
-        await WriteAsync("account.move", paymentId, new JsonObject
+        await WriteAsync("account.payment", paymentId, new JsonObject
         {
-            ["x_sap_incoming_payment_docentry"] = request.SapDocEntry,
-            ["x_sap_incoming_payment_docnum"] = request.SapDocNum
+            ["x_sap_inpay_docentry"] = request.SapDocEntry,
+            ["x_sap_inpay_docnum"] = request.SapDocNum
         });
 
         _logger.LogInformation(
             "Incoming Payment write-back complete — OdooPaymentId={OdooPaymentId}, " +
-            "x_sap_incoming_payment_docentry={SapDocEntry}, x_sap_incoming_payment_docnum={SapDocNum}",
+            "x_sap_inpay_docentry={SapDocEntry}, x_sap_inpay_docnum={SapDocNum}",
             paymentId, request.SapDocEntry, request.SapDocNum);
     }
 
