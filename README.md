@@ -492,9 +492,9 @@ for payment in records:
 
     try:
         resp = requests.post(
-            "https://<middleware-host>/api/incoming-payments",
+            "https://your-middleware-host.com/api/incoming-payments",
             json=payload,
-            headers={"X-Api-Key": "<YOUR_API_KEY>", "Content-Type": "application/json"},
+            headers={"X-Api-Key": "YOUR_API_KEY", "Content-Type": "application/json"},
             timeout=30,
         )
         resp.raise_for_status()
@@ -503,7 +503,7 @@ for payment in records:
         log("Payment %s sync failed: %s" % (payment.name, e), level="error")
 ```
 
-> **Important:** Replace `<middleware-host>` and `<YOUR_API_KEY>` with your actual middleware
+> **Important:** Replace `your-middleware-host.com` and `YOUR_API_KEY` with your actual middleware
 > hostname and API key. Ensure the Odoo custom fields (`x_sap_card_code`,
 > `x_sap_gl_account`, `x_sap_invoice_docentry`, `x_sap_incoming_payment_docentry`,
 > `x_sap_incoming_payment_docnum`) are created on the respective Odoo models.
