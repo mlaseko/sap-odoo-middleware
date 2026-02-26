@@ -802,6 +802,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     if (totalDue > 0)
                         payment.Invoices.DiscountPercent = (line.DiscountAmount.Value / totalDue) * 100;
                 }
+                if (line.DiscountAmount.HasValue)
+                    payment.Invoices.TotalDiscount = line.DiscountAmount.Value;
 
                 _logger.LogDebug(
                     "Payment allocation Line[{Index}]: SapInvoiceDocEntry={DocEntry}, " +

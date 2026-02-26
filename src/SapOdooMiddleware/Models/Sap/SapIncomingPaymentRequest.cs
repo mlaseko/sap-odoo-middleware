@@ -112,6 +112,7 @@ public class SapIncomingPaymentLineRequest
     /// <summary>
     /// Discount amount granted on this invoice allocation (optional).
     /// Converted to <c>DiscountPercent</c> on the DI API Payments_Invoices object.
+    /// Maps to RCT2 TotalDiscount field.
     /// </summary>
     public double? DiscountAmount { get; set; }
 
