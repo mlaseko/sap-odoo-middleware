@@ -12,10 +12,21 @@ public class SapIncomingPaymentResponse
     public int DocNum { get; set; }
 
     /// <summary>
+    /// Odoo payment reference (account.payment name, e.g. "BNK1/2026/00001").
+    /// Echoed back from the request for end-to-end traceability.
+    /// </summary>
+    public string? ExternalPaymentId { get; set; }
+
+    /// <summary>
     /// Odoo database record ID of the payment that was synced.
     /// Echoed back from the request for correlation.
     /// </summary>
     public int? OdooPaymentId { get; set; }
+
+    /// <summary>
+    /// Total amount applied across all invoice allocations (sum of SumApplied on RCT2 lines).
+    /// </summary>
+    public double TotalApplied { get; set; }
 
     /// <summary>
     /// Whether the Odoo write-back (x_sap_incoming_payment_docentry + x_sap_incoming_payment_docnum) succeeded.

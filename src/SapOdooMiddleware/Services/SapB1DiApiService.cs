@@ -852,7 +852,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             {
                 DocEntry = docEntry,
                 DocNum = docNum,
-                OdooPaymentId = request.OdooPaymentId
+                ExternalPaymentId = request.ExternalPaymentId,
+                OdooPaymentId = request.OdooPaymentId,
+                TotalApplied = request.Lines.Sum(l => l.AppliedAmount)
             };
         }
         finally

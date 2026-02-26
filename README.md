@@ -401,7 +401,9 @@ Content-Type: application/json
   "data": {
     "doc_entry": 1001,
     "doc_num": 2001,
+    "external_payment_id": "BNK1/2026/00001",
     "odoo_payment_id": 55,
+    "total_applied": 500000.0,
     "odoo_write_back_success": true,
     "odoo_write_back_error": null
   }

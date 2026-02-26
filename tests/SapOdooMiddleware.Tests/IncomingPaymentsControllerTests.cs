@@ -53,7 +53,9 @@ public class IncomingPaymentsControllerTests
         var expected = new SapIncomingPaymentResponse
         {
             DocEntry = 1001,
-            DocNum = 2001
+            DocNum = 2001,
+            ExternalPaymentId = "BNK1/2026/00001",
+            TotalApplied = 500000.0
         };
 
         _sapServiceMock
@@ -69,6 +71,8 @@ public class IncomingPaymentsControllerTests
         Assert.True(response.Success);
         Assert.Equal(1001, response.Data!.DocEntry);
         Assert.Equal(2001, response.Data.DocNum);
+        Assert.Equal("BNK1/2026/00001", response.Data.ExternalPaymentId);
+        Assert.Equal(500000.0, response.Data.TotalApplied);
         Assert.Null(response.Data.OdooWriteBackSuccess);
     }
 
@@ -202,7 +206,9 @@ public class IncomingPaymentsControllerTests
         {
             DocEntry = 1010,
             DocNum = 2010,
-            OdooPaymentId = 55
+            ExternalPaymentId = "BNK1/2026/00010",
+            OdooPaymentId = 55,
+            TotalApplied = 750000.0
         };
 
         _sapServiceMock
@@ -383,6 +389,8 @@ public class IncomingPaymentsControllerTests
         Assert.Null(response.OdooWriteBackSuccess);
         Assert.Null(response.OdooWriteBackError);
         Assert.Null(response.OdooPaymentId);
+        Assert.Null(response.ExternalPaymentId);
+        Assert.Equal(0.0, response.TotalApplied);
     }
 
     [Fact]
