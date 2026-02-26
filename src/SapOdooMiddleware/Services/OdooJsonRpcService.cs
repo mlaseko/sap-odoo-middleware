@@ -178,8 +178,10 @@ public class OdooJsonRpcService : IOdooService
             "Found {Count} product line(s) on Odoo invoice id={InvoiceId}",
             lineIds.Count, invoiceId);
 
-        // 3. Write x_sap_invoice_linenum and x_sap_gross_buy_price on each line by position.
+        // 3. Write x_sap_invoice_linenum on each line by position.
         //    Odoo lines are matched to SAP lines by order (first → 0, second → 1, …).
+        //    NOTE: GrossBuyPrice is NOT stored on invoice lines — it flows through
+        //    the COGS journal entry (CreateOrUpdateCogsJournalAsync) instead.
         int linesUpdated = 0;
 
         for (int i = 0; i < Math.Min(lineIds.Count, request.Lines.Count); i++)
@@ -189,13 +191,12 @@ public class OdooJsonRpcService : IOdooService
 
             await WriteAsync("account.move.line", odooLineId, new JsonObject
             {
-                ["x_sap_invoice_linenum"] = sapLine.SapLineNum,
-                ["x_sap_gross_buy_price"] = sapLine.GrossBuyPrice
+                ["x_sap_invoice_linenum"] = sapLine.SapLineNum
             });
 
             _logger.LogDebug(
-                "Odoo line id={OdooLineId}: x_sap_invoice_linenum={LineNum}, x_sap_gross_buy_price={GrossBuyPrice}",
-                odooLineId, sapLine.SapLineNum, sapLine.GrossBuyPrice);
+                "Odoo line id={OdooLineId}: x_sap_invoice_linenum={LineNum}",
+                odooLineId, sapLine.SapLineNum);
 
             linesUpdated++;
         }
@@ -860,8 +861,18 @@ public class OdooJsonRpcService : IOdooService
     {
         if (_settings.UseBearerAuth)
         {
-            var result = await SendJson2Async(model, "create", new JsonObject { ["vals"] = values });
-            return result?.GetValue<int>() ?? throw new InvalidOperationException($"Odoo create on {model} returned null.");
+            // JSON2 API binds kwargs to method signature: create(self, vals_list)
+            // vals_list must be a JSON array of record dicts.
+            var result = await SendJson2Async(model, "create", new JsonObject
+            {
+                ["vals_list"] = new JsonArray { values }
+            });
+
+            // create() may return a single ID or an array of IDs via JSON2
+            if (result is JsonArray arr && arr.Count > 0)
+                return arr[0]!.GetValue<int>();
+            return result?.GetValue<int>()
+                ?? throw new InvalidOperationException($"Odoo create on {model} returned null.");
         }
 
         var classicResult = await CallObjectMethodAsync(model, "create", new JsonArray { values });
