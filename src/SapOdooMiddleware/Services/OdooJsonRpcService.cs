@@ -236,7 +236,7 @@ public class OdooJsonRpcService : IOdooService
             "SapDocEntry={SapDocEntry}, SapDocNum={SapDocNum}",
             paymentId, request.SapDocEntry, request.SapDocNum);
 
-        await WriteAsync("account.move", paymentId, new JsonObject
+        await WriteAsync("account.payment", paymentId, new JsonObject
         {
             ["x_sap_incoming_payment_docentry"] = request.SapDocEntry,
             ["x_sap_incoming_payment_docnum"] = request.SapDocNum

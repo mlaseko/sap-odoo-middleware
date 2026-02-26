@@ -1,12 +1,16 @@
 # SAP-Odoo Middleware
 
-ASP.NET Core Web API middleware that integrates **Odoo** and **SAP Business One** via the SAP DI API. It handles two integration flows:
+ASP.NET Core Web API middleware that integrates **Odoo** and **SAP Business One** via the SAP DI API. It handles the following integration flows:
 
 | Flow | Direction | Endpoint |
 |------|-----------|----------|
 | SAP B1 connectivity check | Middleware → SAP B1 | `GET /api/sapb1/ping` |
+| Odoo connectivity check | Middleware → Odoo | `GET /api/odoo/ping` |
 | Sales Order creation | Odoo → SAP B1 | `POST /api/sales-orders` |
+| AR Invoice creation | Odoo → SAP B1 | `POST /api/invoices` |
+| Incoming Payment creation | Odoo → SAP B1 | `POST /api/incoming-payments` |
 | Delivery confirmation | SAP B1 → Odoo | `POST /api/deliveries` |
+| COGS Journal Entry | Middleware → Odoo | `POST /api/cogs-journals` |
 
 ## Prerequisites
 
@@ -339,6 +343,71 @@ Content-Type: application/json
 }
 ```
 
+### Create Incoming Payment (Odoo → SAP B1)
+
+```
+POST /api/incoming-payments
+X-Api-Key: YOUR_KEY
+Content-Type: application/json
+
+{
+  "external_payment_id": "BNK1/2026/00001",
+  "customer_code": "C10000",
+  "doc_date": "2026-02-25",
+  "currency": "TZS",
+  "payment_total": 500000.0,
+  "is_partial": false,
+  "journal_code": "NMB TZS",
+  "bank_or_cash_account_code": "1026217",
+  "is_cash_payment": false,
+  "odoo_payment_id": 55,
+  "lines": [
+    {
+      "sap_invoice_doc_entry": 700,
+      "applied_amount": 500000.0,
+      "discount_amount": null,
+      "odoo_invoice_id": 42
+    }
+  ]
+}
+```
+
+**Field mapping (SAP B1):**
+
+| JSON field | SAP B1 field | Required |
+|---|---|---|
+| `external_payment_id` | `CounterReference` | ✅ |
+| `customer_code` | `CardCode` | ✅ |
+| `doc_date` | `DocDate` | No |
+| `currency` | `DocCurrency` | No |
+| `payment_total` | `CashSum` or `TransferSum` (see `is_cash_payment`) | Yes |
+| `is_cash_payment` | Determines Cash vs Bank posting | Yes |
+| `bank_or_cash_account_code` | `CashAccount` or `TransferAccount` | No |
+| `forex_account_code` | `TransferAccount` (cross-currency) | No |
+| `odoo_payment_id` | *(write-back only)* Odoo `account.payment` ID | No |
+| `lines[].sap_invoice_doc_entry` | `Invoices.DocEntry` (RCT2) | ✅ |
+| `lines[].applied_amount` | `Invoices.SumApplied` | Yes |
+| `lines[].discount_amount` | Converted to `Invoices.DiscountPercent` | No |
+
+> When `odoo_payment_id` is provided, the middleware writes `x_sap_incoming_payment_docentry`
+> and `x_sap_incoming_payment_docnum` back to the Odoo `account.payment` record after
+> the SAP Incoming Payment is created successfully.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "doc_entry": 1001,
+    "doc_num": 2001,
+    "odoo_payment_id": 55,
+    "odoo_write_back_success": true,
+    "odoo_write_back_error": null
+  }
+}
+```
+
 ## Process Flows
 
 ### SO Integration (Odoo → SAP B1)
@@ -361,6 +430,83 @@ Content-Type: application/json
    - `action_set_quantities_to_reservation()` — set qty_done = demand
    - `button_validate()` — with context to skip backorder/immediate-transfer wizards
 6. Writes SAP delivery number/date onto the picking
+
+### Incoming Payment (Odoo → SAP B1)
+
+1. Payment is confirmed/posted in Odoo
+2. An Odoo **Automated Action** (base.automation) triggers on `account.payment` when the state changes to `posted`
+3. The automated action sends a POST request to the middleware's `/api/incoming-payments` endpoint with the payment details
+4. Middleware creates an Incoming Payment (ORCT) in SAP B1 via DI API
+5. Middleware writes SAP DocEntry and DocNum back to the Odoo `account.payment` record (fields `x_sap_incoming_payment_docentry` and `x_sap_incoming_payment_docnum`)
+
+#### Odoo Automated Action Setup
+
+To trigger incoming payment sync, create an **Automated Action** in Odoo:
+
+1. Go to **Settings → Technical → Automation → Automated Actions**
+2. Create a new automated action with:
+   - **Model**: `account.payment` (`account.payment`)
+   - **Trigger**: On Update
+   - **When Updated**: `state` (set to `posted`)
+   - **Action**: Execute Python Code
+3. The Python code should build the payment payload and POST it to the middleware's `/api/incoming-payments` endpoint
+
+Example Python code for the automated action:
+
+```python
+import json
+import requests
+
+for payment in records:
+    if payment.state != 'posted' or payment.payment_type != 'inbound':
+        continue
+
+    # Build invoice allocations from reconciled move lines
+    lines = []
+    for partial in payment.move_id.line_ids.matched_debit_ids:
+        invoice_move = partial.debit_move_id.move_id
+        sap_docentry = invoice_move.x_sap_invoice_docentry
+        if sap_docentry:
+            lines.append({
+                "sap_invoice_doc_entry": sap_docentry,
+                "applied_amount": partial.amount,
+                "odoo_invoice_id": invoice_move.id,
+            })
+
+    if not lines:
+        continue
+
+    payload = {
+        "external_payment_id": payment.name,
+        "customer_code": payment.partner_id.x_sap_card_code or payment.partner_id.ref or "",
+        "doc_date": str(payment.date),
+        "currency": payment.currency_id.name,
+        "payment_total": payment.amount,
+        "is_partial": payment.amount < sum(l["applied_amount"] for l in lines),
+        "journal_code": payment.journal_id.name,
+        "bank_or_cash_account_code": payment.journal_id.x_sap_gl_account or "",
+        "is_cash_payment": payment.journal_id.type == "cash",
+        "odoo_payment_id": payment.id,
+        "lines": lines,
+    }
+
+    try:
+        resp = requests.post(
+            "https://<middleware-host>/api/incoming-payments",
+            json=payload,
+            headers={"X-Api-Key": "<YOUR_API_KEY>", "Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        log("Payment %s synced to SAP: %s" % (payment.name, resp.text), level="info")
+    except Exception as e:
+        log("Payment %s sync failed: %s" % (payment.name, e), level="error")
+```
+
+> **Important:** Replace `<middleware-host>` and `<YOUR_API_KEY>` with your actual middleware
+> hostname and API key. Ensure the Odoo custom fields (`x_sap_card_code`,
+> `x_sap_gl_account`, `x_sap_invoice_docentry`, `x_sap_incoming_payment_docentry`,
+> `x_sap_incoming_payment_docnum`) are created on the respective Odoo models.
 
 ## Tests
 
