@@ -10,7 +10,7 @@ public class SapIncomingPaymentRequest
 {
     /// <summary>
     /// Odoo payment reference (account.payment name, e.g. "BNK1/2026/00001").
-    /// Stored as <c>NumAtCard</c> on the SAP Incoming Payment.
+    /// Stored as <c>CounterReference</c> on the SAP Incoming Payment.
     /// </summary>
     [Required]
     public string ExternalPaymentId { get; set; } = string.Empty;
@@ -111,7 +111,7 @@ public class SapIncomingPaymentLineRequest
 
     /// <summary>
     /// Discount amount granted on this invoice allocation (optional).
-    /// Maps to RCT2.DiscountAmount.
+    /// Converted to <c>DiscountPercent</c> on the DI API Payments_Invoices object.
     /// </summary>
     public double? DiscountAmount { get; set; }
 
