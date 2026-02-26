@@ -796,6 +796,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 payment.Invoices.InvoiceType = BoRcptInvTypes.it_Invoice;
                 payment.Invoices.SumApplied = line.AppliedAmount;
 
+                if (line.DiscountAmount.HasValue && line.DiscountAmount.Value != 0)
+                {
+                    double totalDue = line.AppliedAmount + line.DiscountAmount.Value;
+                    if (totalDue > 0)
+                        payment.Invoices.DiscountPercent = (line.DiscountAmount.Value / totalDue) * 100;
+                }
                 if (line.DiscountAmount.HasValue)
                     payment.Invoices.TotalDiscount = line.DiscountAmount.Value;
 
