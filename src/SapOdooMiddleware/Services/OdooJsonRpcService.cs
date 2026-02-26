@@ -224,6 +224,30 @@ public class OdooJsonRpcService : IOdooService
 
     // ── COGS Journal Entry automation (Step 4) ─────────────────────
 
+    public async Task UpdateIncomingPaymentAsync(IncomingPaymentWriteBackRequest request)
+    {
+        if (!_settings.UseBearerAuth)
+            await EnsureAuthenticatedAsync();
+
+        int paymentId = request.OdooPaymentId;
+
+        _logger.LogInformation(
+            "Writing SAP Incoming Payment fields back to Odoo — OdooPaymentId={OdooPaymentId}, " +
+            "SapDocEntry={SapDocEntry}, SapDocNum={SapDocNum}",
+            paymentId, request.SapDocEntry, request.SapDocNum);
+
+        await WriteAsync("account.move", paymentId, new JsonObject
+        {
+            ["x_sap_incoming_payment_docentry"] = request.SapDocEntry,
+            ["x_sap_incoming_payment_docnum"] = request.SapDocNum
+        });
+
+        _logger.LogInformation(
+            "Incoming Payment write-back complete — OdooPaymentId={OdooPaymentId}, " +
+            "x_sap_incoming_payment_docentry={SapDocEntry}, x_sap_incoming_payment_docnum={SapDocNum}",
+            paymentId, request.SapDocEntry, request.SapDocNum);
+    }
+
     public async Task<CogsJournalResponse> CreateOrUpdateCogsJournalAsync(CogsJournalRequest request)
     {
         if (!_settings.UseBearerAuth)

@@ -22,6 +22,13 @@ public interface IOdooService
     Task<InvoiceWriteBackResponse> UpdateInvoiceSapFieldsAsync(InvoiceWriteBackRequest request);
 
     /// <summary>
+    /// Writes SAP Incoming Payment data back to Odoo after creation in SAP B1.
+    /// Updates <c>x_sap_incoming_payment_docentry</c> and <c>x_sap_incoming_payment_docnum</c>
+    /// on the Odoo payment record (account.move).
+    /// </summary>
+    Task UpdateIncomingPaymentAsync(IncomingPaymentWriteBackRequest request);
+
+    /// <summary>
     /// Creates or updates a COGS journal entry in Odoo for a given SAP AR Invoice.
     /// Implements the full flow: find invoice → match lines → compute COGS →
     /// build JE → hash check → create/update → post.

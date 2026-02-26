@@ -703,6 +703,160 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         return lines;
     }
 
+    // ================================
+    // INCOMING PAYMENT (ORCT)
+    // ================================
+    public async Task<SapIncomingPaymentResponse> CreateIncomingPaymentAsync(SapIncomingPaymentRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Received Incoming Payment creation request — ExternalPaymentId={ExternalPaymentId}, " +
+                "CustomerCode={CustomerCode}, DocDate={DocDate}, Currency={Currency}, " +
+                "PaymentTotal={PaymentTotal}, IsPartial={IsPartial}, JournalCode={JournalCode}, " +
+                "BankOrCashAccountCode={BankOrCashAccountCode}, IsCashPayment={IsCashPayment}, " +
+                "OdooPaymentId={OdooPaymentId}, LineCount={LineCount}",
+                request.ExternalPaymentId,
+                request.CustomerCode,
+                request.DocDate,
+                request.Currency,
+                request.PaymentTotal,
+                request.IsPartial,
+                request.JournalCode,
+                request.BankOrCashAccountCode,
+                request.IsCashPayment,
+                request.OdooPaymentId,
+                request.Lines.Count);
+
+            var payment = (Payments)_company!.GetBusinessObject(BoObjectTypes.oIncomingPayments);
+
+            // Header fields
+            payment.CardCode = request.CustomerCode;
+            payment.NumAtCard = request.ExternalPaymentId;
+
+            if (request.DocDate.HasValue)
+                payment.DocDate = request.DocDate.Value;
+
+            if (!string.IsNullOrEmpty(request.Currency))
+                payment.DocCurrency = request.Currency;
+
+            if (!string.IsNullOrEmpty(request.JournalRemarks))
+                payment.JournalRemarks = request.JournalRemarks;
+
+            // Cash vs bank/transfer account
+            if (request.IsCashPayment)
+            {
+                if (!string.IsNullOrEmpty(request.BankOrCashAccountCode))
+                    payment.CashAccount = request.BankOrCashAccountCode;
+
+                payment.CashSum = request.PaymentTotal;
+
+                _logger.LogInformation(
+                    "Cash payment — CashAccount={CashAccount}, CashSum={CashSum}",
+                    request.BankOrCashAccountCode,
+                    request.PaymentTotal);
+            }
+            else
+            {
+                // Bank / mobile money transfer
+                // When a Forex transfer account is specified, use it as the primary transfer account
+                // (cross-currency payments route through account 1026216).
+                string transferAccount = !string.IsNullOrEmpty(request.ForexAccountCode)
+                    ? request.ForexAccountCode
+                    : request.BankOrCashAccountCode ?? string.Empty;
+
+                if (!string.IsNullOrEmpty(transferAccount))
+                    payment.TransferAccount = transferAccount;
+
+                payment.TransferSum = request.PaymentTotal;
+
+                if (request.DocDate.HasValue)
+                    payment.TransferDate = request.DocDate.Value;
+
+                _logger.LogInformation(
+                    "Bank/transfer payment — TransferAccount={TransferAccount}, TransferSum={TransferSum}, " +
+                    "ForexAccountCode={ForexAccountCode}",
+                    transferAccount,
+                    request.PaymentTotal,
+                    request.ForexAccountCode);
+            }
+
+            // Invoice allocations (RCT2)
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                if (i > 0)
+                    payment.Invoices.Add();
+
+                var line = request.Lines[i];
+
+                payment.Invoices.DocEntry = line.SapInvoiceDocEntry;
+                payment.Invoices.InvoiceType = BoRcptInvTypes.it_Invoice;
+                payment.Invoices.SumApplied = line.AppliedAmount;
+
+                if (line.DiscountAmount.HasValue)
+                    payment.Invoices.DiscountAmount = line.DiscountAmount.Value;
+
+                _logger.LogDebug(
+                    "Payment allocation Line[{Index}]: SapInvoiceDocEntry={DocEntry}, " +
+                    "AppliedAmount={AppliedAmount}, DiscountAmount={DiscountAmount}, OdooInvoiceId={OdooInvoiceId}",
+                    i,
+                    line.SapInvoiceDocEntry,
+                    line.AppliedAmount,
+                    line.DiscountAmount,
+                    line.OdooInvoiceId);
+            }
+
+            int result = payment.Add();
+
+            if (result != 0)
+            {
+                _company!.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(payment);
+
+                _logger.LogError(
+                    "Failed to create Incoming Payment for ExternalPaymentId={ExternalPaymentId}: " +
+                    "DI API error {ErrCode}: {ErrMsg}",
+                    request.ExternalPaymentId, errCode, errMsg);
+
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            int docEntry = int.Parse(_company!.GetNewObjectKey());
+
+            // Retrieve created payment to get DocNum
+            payment.GetByKey(docEntry);
+            int docNum = payment.DocNum;
+
+            Marshal.ReleaseComObject(payment);
+
+            _logger.LogInformation(
+                "✅ Incoming Payment created successfully — DocEntry={DocEntry}, DocNum={DocNum}, " +
+                "ExternalPaymentId={ExternalPaymentId}, CustomerCode={CustomerCode}, " +
+                "PaymentTotal={PaymentTotal}, LineCount={LineCount}",
+                docEntry,
+                docNum,
+                request.ExternalPaymentId,
+                request.CustomerCode,
+                request.PaymentTotal,
+                request.Lines.Count);
+
+            return new SapIncomingPaymentResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                OdooPaymentId = request.OdooPaymentId
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <summary>
     /// Returns the warehouse code to use for a Sales Order line.
     /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to
