@@ -735,7 +735,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             // Header fields
             payment.CardCode = request.CustomerCode;
-            payment.NumAtCard = request.ExternalPaymentId;
+            payment.CounterReference = request.ExternalPaymentId;
 
             if (request.DocDate.HasValue)
                 payment.DocDate = request.DocDate.Value;
@@ -797,7 +797,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 payment.Invoices.SumApplied = line.AppliedAmount;
 
                 if (line.DiscountAmount.HasValue)
-                    payment.Invoices.DiscountAmount = line.DiscountAmount.Value;
+                    payment.Invoices.TotalDiscount = line.DiscountAmount.Value;
 
                 _logger.LogDebug(
                     "Payment allocation Line[{Index}]: SapInvoiceDocEntry={DocEntry}, " +
