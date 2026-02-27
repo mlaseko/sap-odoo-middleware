@@ -16,6 +16,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
     private const string SyncDirectionOdooToSap = "O2S";
 
+    // SAP B1 DI API error codes
+    private const int ErrorDbServerTypeNotSupported = -119;
+    private const int ErrorSboAuthentication = -132;
+
     private Company? _company;
     private bool _disposed;
 
@@ -27,11 +31,13 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         _logger = logger;
 
         _logger.LogInformation(
-            "🔧 SAP DI API config loaded | Server={Server} | CompanyDB={CompanyDB} | User={User} | DbType={DbType}",
+            "🔧 SAP DI API config loaded | Server={Server} | CompanyDB={CompanyDB} | User={User} | DbType={DbType} | LicenseServer={LicenseServer} | SLDServer={SLDServer}",
             _settings.Server,
             _settings.CompanyDb,
             _settings.UserName,
-            _settings.DbServerType);
+            _settings.DbServerType,
+            _settings.LicenseServer,
+            _settings.SLDServer);
     }
 
     // ================================
@@ -42,19 +48,28 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         if (_company != null && _company.Connected)
             return;
 
-        _company?.Disconnect();
-        _company = null;
-
-        var dbTypeRaw = _settings.DbServerType?.Trim() ?? "";
-
-        if (dbTypeRaw.StartsWith("dst_", StringComparison.OrdinalIgnoreCase))
-            dbTypeRaw = dbTypeRaw.Substring(4);
-
-        if (!Enum.TryParse($"dst_{dbTypeRaw}", true, out BoDataServerTypes dbType))
+        if (_company != null)
         {
-            throw new InvalidOperationException(
-                $"Invalid DbServerType '{_settings.DbServerType}'. Example: MSSQL2016");
+            try { _company.Disconnect(); } catch { /* ignored */ }
+            try { Marshal.ReleaseComObject(_company); } catch { /* ignored */ }
+            _company = null;
         }
+
+        // --- Pre-connection diagnostics ---
+        if (string.IsNullOrWhiteSpace(_settings.LicenseServer))
+            _logger.LogWarning(
+                "SapB1:LicenseServer is not configured. " +
+                "A license server (e.g. \"hostname:30000\") is required by the SAP B1 DI API. " +
+                "Connection will likely fail with error -132.");
+
+        _logger.LogInformation(
+            "Connecting to SAP B1 DI API — Server={Server}, CompanyDb={CompanyDb}, " +
+            "LicenseServer={LicenseServer}, DbServerType={DbServerType}, SLDServer={SLDServer}, UserName={UserName}",
+            _settings.Server, _settings.CompanyDb,
+            string.IsNullOrWhiteSpace(_settings.LicenseServer) ? "(empty)" : _settings.LicenseServer,
+            _settings.DbServerType,
+            string.IsNullOrWhiteSpace(_settings.SLDServer) ? "(not set)" : _settings.SLDServer,
+            _settings.UserName);
 
         var company = new Company
         {
@@ -63,32 +78,68 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             UserName = _settings.UserName,
             Password = _settings.Password,
             LicenseServer = _settings.LicenseServer,
-            SLDServer = _settings.SLDServer,
             UseTrusted = false,
-            language = BoSuppLangs.ln_English,
-            DbServerType = dbType
+            language = BoSuppLangs.ln_English
         };
 
-        _logger.LogInformation(
-            "Connecting to SAP B1 DI API — Server={Server}, DB={CompanyDb}, Type={DbType}",
-            _settings.Server,
-            _settings.CompanyDb,
-            dbType);
-
-        int result = company.Connect();
-
-        if (result != 0)
+        if (!string.IsNullOrEmpty(_settings.SLDServer))
         {
-            company.GetLastError(out int errCode, out string errMsg);
+            try
+            {
+                company.SLDServer = _settings.SLDServer;
+            }
+            catch (COMException ex)
+            {
+                _logger.LogWarning(ex, "SLDServer property not supported by this version of SAPbobsCOM; skipping.");
+            }
+        }
 
+        // Try each candidate enum value for DbServerType; different SAPbobsCOM
+        // versions use different ordinals for the same logical server type.
+        int[] candidates = MapDbServerTypeCandidates(_settings.DbServerType);
+        int connectResult = -1;
+        int errCode = 0;
+        string errMsg = string.Empty;
+
+        for (int i = 0; i < candidates.Length; i++)
+        {
+            company.DbServerType = (BoDataServerTypes)candidates[i];
+            _logger.LogInformation(
+                "Attempting SAP B1 DI API connection with DbServerType ordinal {Ordinal} (attempt {Attempt}/{Total})",
+                candidates[i], i + 1, candidates.Length);
+
+            connectResult = company.Connect();
+            if (connectResult == 0)
+                break;
+
+            company.GetLastError(out errCode, out errMsg);
+
+            if (errCode == ErrorDbServerTypeNotSupported && i < candidates.Length - 1)
+            {
+                _logger.LogWarning(
+                    "SAP B1 DI API connection failed with DbServerType ordinal {Ordinal} (error {Code}: {Message}). " +
+                    "Retrying with next candidate ordinal {NextOrdinal}.",
+                    candidates[i], errCode, errMsg, candidates[i + 1]);
+                continue;
+            }
+        }
+
+        if (connectResult != 0)
+        {
             Marshal.ReleaseComObject(company);
 
+            var hint = errCode == ErrorSboAuthentication
+                ? " Hint for error -132 (SBO user authentication): verify that (1) LicenseServer is set correctly, " +
+                  "(2) the installed DI API version matches the SAP B1 server patch level exactly, " +
+                  "(3) UserName/Password are valid SAP B1 application credentials (not SQL credentials), " +
+                  "and (4) the DI API bitness (x86/x64) matches this application's target platform."
+                : string.Empty;
+
             throw new InvalidOperationException(
-                $"SAP B1 DI API connection failed ({errCode}): {errMsg}");
+                $"SAP B1 DI API connection failed ({errCode}): {errMsg}.{hint}");
         }
 
         _company = company;
-
         _logger.LogInformation("✅ SAP B1 DI API connected successfully.");
     }
 
