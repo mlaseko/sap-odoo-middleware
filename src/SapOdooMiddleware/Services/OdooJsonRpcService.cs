@@ -837,10 +837,11 @@ public class OdooJsonRpcService : IOdooService
             return;
         }
 
+        // execute_kw args must be [[id], vals] as a single positional
+        // parameter so Odoo unpacks it as write(self, vals) — not as **kwargs.
         await CallObjectMethodAsync(model, "write", new JsonArray
         {
-            new JsonArray { id },
-            values
+            new JsonArray { new JsonArray { id }, values }
         });
     }
 
