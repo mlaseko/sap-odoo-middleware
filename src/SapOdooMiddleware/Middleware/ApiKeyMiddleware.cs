@@ -6,8 +6,8 @@ using SapOdooMiddleware.Models.Api;
 namespace SapOdooMiddleware.Middleware;
 
 /// <summary>
-/// Validates X-Api-Key header on all requests except the health endpoint.
-/// Logs every incoming request for observability.
+/// Validates X-Api-Key header on all requests except the health and Swagger endpoints.
+/// Logs authenticated API requests for observability.
 /// </summary>
 public class ApiKeyMiddleware
 {
@@ -23,14 +23,7 @@ public class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context, IOptions<ApiKeySettings> settings)
     {
-        var method = context.Request.Method;
-        var path = context.Request.Path;
-
-        _logger.LogInformation(
-            "Incoming request: {Method} {Path} from {RemoteIp}",
-            method, path, context.Connection.RemoteIpAddress);
-
-        // Skip auth for health and Swagger endpoints
+        // Skip auth for health and Swagger endpoints — no logging needed for these
         if (context.Request.Path.StartsWithSegments("/health")
             || context.Request.Path.StartsWithSegments("/swagger"))
         {
@@ -38,20 +31,43 @@ public class ApiKeyMiddleware
             return;
         }
 
-        if (!context.Request.Headers.TryGetValue(ApiKeyHeader, out var extractedApiKey)
-            || string.IsNullOrEmpty(settings.Value.Key)
-            || !string.Equals(extractedApiKey, settings.Value.Key, StringComparison.Ordinal))
+        var method = context.Request.Method;
+        var path = context.Request.Path;
+
+        _logger.LogInformation(
+            "Incoming request: {Method} {Path} from {RemoteIp}",
+            method, path, context.Connection.RemoteIpAddress);
+
+        if (string.IsNullOrEmpty(settings.Value.Key))
         {
-            _logger.LogWarning(
-                "Unauthorized request: {Method} {Path} — missing or invalid API key from {RemoteIp}",
+            _logger.LogError(
+                "API key is not configured on the server (ApiKey:Key setting is empty). " +
+                "All API requests will be rejected until a key is configured. " +
+                "Request: {Method} {Path} from {RemoteIp}",
                 method, path, context.Connection.RemoteIpAddress);
 
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            context.Response.ContentType = "application/json";
+            await WriteUnauthorizedResponse(context, "API key is not configured on the server. Contact the administrator.");
+            return;
+        }
 
-            var response = ApiResponse<object>.Fail("Invalid or missing API key.");
-            var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
-            await context.Response.WriteAsJsonAsync(response, options);
+        if (!context.Request.Headers.TryGetValue(ApiKeyHeader, out var extractedApiKey)
+            || string.IsNullOrEmpty(extractedApiKey))
+        {
+            _logger.LogWarning(
+                "Unauthorized request: {Method} {Path} — missing X-Api-Key header from {RemoteIp}",
+                method, path, context.Connection.RemoteIpAddress);
+
+            await WriteUnauthorizedResponse(context, "Missing X-Api-Key header. Include a valid API key in the X-Api-Key request header.");
+            return;
+        }
+
+        if (!string.Equals(extractedApiKey, settings.Value.Key, StringComparison.Ordinal))
+        {
+            _logger.LogWarning(
+                "Unauthorized request: {Method} {Path} — invalid API key from {RemoteIp}",
+                method, path, context.Connection.RemoteIpAddress);
+
+            await WriteUnauthorizedResponse(context, "Invalid API key.");
             return;
         }
 
@@ -60,5 +76,15 @@ public class ApiKeyMiddleware
             method, path);
 
         await _next(context);
+    }
+
+    private static async Task WriteUnauthorizedResponse(HttpContext context, string message)
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        context.Response.ContentType = "application/json";
+
+        var response = ApiResponse<object>.Fail(message);
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
+        await context.Response.WriteAsJsonAsync(response, options);
     }
 }
