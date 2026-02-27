@@ -6,7 +6,8 @@ using SapOdooMiddleware.Models.Api;
 namespace SapOdooMiddleware.Middleware;
 
 /// <summary>
-/// Validates X-Api-Key header on all requests except the health and Swagger endpoints.
+/// Validates X-Api-Key header on /api/* requests only.
+/// All other paths (health, Swagger, favicon, unknown) skip authentication.
 /// Logs authenticated API requests for observability.
 /// </summary>
 public class ApiKeyMiddleware
@@ -23,10 +24,10 @@ public class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context, IOptions<ApiKeySettings> settings)
     {
-        // Skip auth for health, Swagger, and favicon endpoints — no logging needed for these
-        if (context.Request.Path.StartsWithSegments("/health")
-            || context.Request.Path.StartsWithSegments("/swagger")
-            || context.Request.Path.Equals("/favicon.ico"))
+        // Only enforce API key auth on /api/* routes.
+        // Everything else (health, Swagger, favicon, bot probes, etc.) passes through
+        // and will naturally 404 if no matching endpoint exists.
+        if (!context.Request.Path.StartsWithSegments("/api"))
         {
             await _next(context);
             return;
