@@ -104,6 +104,40 @@ public class InvoicesController : ControllerBase
     }
 
     /// <summary>
+    /// PUT /api/invoices/{docEntry}
+    /// Updates UDF fields on an existing AR Invoice in SAP B1 (re-sync).
+    /// </summary>
+    [HttpPut("{docEntry:int}")]
+    public async Task<IActionResult> Update(int docEntry, [FromBody] SapInvoiceRequest request)
+    {
+        _logger.LogInformation(
+            "Received AR Invoice update request — DocEntry={DocEntry}, ExternalInvoiceId={ExternalInvoiceId}",
+            docEntry, request.ExternalInvoiceId);
+
+        try
+        {
+            var result = await _sapService.UpdateInvoiceAsync(docEntry, request);
+
+            _logger.LogInformation(
+                "SAP AR Invoice updated: DocEntry={DocEntry}, DocNum={DocNum}",
+                result.DocEntry, result.DocNum);
+
+            // Write back to Odoo if OdooInvoiceId is provided
+            if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)
+            {
+                await WriteBackToOdoo(request.OdooInvoiceId.Value, result);
+            }
+
+            return Ok(ApiResponse<SapInvoiceResponse>.Ok(result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update SAP AR Invoice DocEntry={DocEntry}", docEntry);
+            return StatusCode(500, ApiResponse<SapInvoiceResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// Writes SAP invoice DocEntry + per-line data back to Odoo.
     /// Failures are logged and attached to the response but do NOT fail the overall request
     /// (the SAP invoice was already created successfully).

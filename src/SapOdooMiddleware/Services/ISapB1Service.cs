@@ -32,6 +32,18 @@ public interface ISapB1Service
     Task<SapIncomingPaymentResponse> CreateIncomingPaymentAsync(SapIncomingPaymentRequest request);
 
     /// <summary>
+    /// Updates UDF fields on an existing AR Invoice (OINV) in SAP B1 by DocEntry.
+    /// Used to re-sync Odoo traceability fields that were missed during the initial creation.
+    /// </summary>
+    Task<SapInvoiceResponse> UpdateInvoiceAsync(int docEntry, SapInvoiceRequest request);
+
+    /// <summary>
+    /// Updates UDF fields on an existing Incoming Payment (ORCT) in SAP B1 by DocEntry.
+    /// Used to re-sync Odoo traceability fields that were missed during the initial creation.
+    /// </summary>
+    Task<SapIncomingPaymentResponse> UpdateIncomingPaymentAsync(int docEntry, SapIncomingPaymentRequest request);
+
+    /// <summary>
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();
