@@ -797,6 +797,17 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (!string.IsNullOrEmpty(request.JournalRemarks))
                 payment.JournalRemarks = request.JournalRemarks;
 
+            // UDF fields — store Odoo identifiers on the SAP payment for traceability
+            TrySetUserField(payment.UserFields, "U_Odoo_Payment_ID", request.ExternalPaymentId, "Payment header");
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(payment.UserFields, "U_Odoo_LastSync", syncDate, "Payment header");
+            TrySetUserField(payment.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Payment header");
+
+            _logger.LogDebug(
+                "UDF U_Odoo_Payment_ID set to '{Value}', U_Odoo_LastSync={SyncDate}, U_Odoo_SyncDir={SyncDir} on Payment header.",
+                request.ExternalPaymentId, syncDate, SyncDirectionOdooToSap);
+
             // Cash vs bank/transfer account
             if (request.IsCashPayment)
             {
