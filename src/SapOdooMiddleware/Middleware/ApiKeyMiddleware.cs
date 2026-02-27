@@ -7,19 +7,29 @@ namespace SapOdooMiddleware.Middleware;
 
 /// <summary>
 /// Validates X-Api-Key header on all requests except the health endpoint.
+/// Logs every incoming request for observability.
 /// </summary>
 public class ApiKeyMiddleware
 {
     private const string ApiKeyHeader = "X-Api-Key";
     private readonly RequestDelegate _next;
+    private readonly ILogger<ApiKeyMiddleware> _logger;
 
-    public ApiKeyMiddleware(RequestDelegate next)
+    public ApiKeyMiddleware(RequestDelegate next, ILogger<ApiKeyMiddleware> logger)
     {
         _next = next;
+        _logger = logger;
     }
 
     public async Task InvokeAsync(HttpContext context, IOptions<ApiKeySettings> settings)
     {
+        var method = context.Request.Method;
+        var path = context.Request.Path;
+
+        _logger.LogInformation(
+            "Incoming request: {Method} {Path} from {RemoteIp}",
+            method, path, context.Connection.RemoteIpAddress);
+
         // Skip auth for health and Swagger endpoints
         if (context.Request.Path.StartsWithSegments("/health")
             || context.Request.Path.StartsWithSegments("/swagger"))
@@ -32,6 +42,10 @@ public class ApiKeyMiddleware
             || string.IsNullOrEmpty(settings.Value.Key)
             || !string.Equals(extractedApiKey, settings.Value.Key, StringComparison.Ordinal))
         {
+            _logger.LogWarning(
+                "Unauthorized request: {Method} {Path} — missing or invalid API key from {RemoteIp}",
+                method, path, context.Connection.RemoteIpAddress);
+
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             context.Response.ContentType = "application/json";
 
@@ -40,6 +54,10 @@ public class ApiKeyMiddleware
             await context.Response.WriteAsJsonAsync(response, options);
             return;
         }
+
+        _logger.LogInformation(
+            "Authenticated request: {Method} {Path}",
+            method, path);
 
         await _next(context);
     }

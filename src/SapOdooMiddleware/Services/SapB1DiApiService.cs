@@ -802,8 +802,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     if (totalDue > 0)
                         payment.Invoices.DiscountPercent = (line.DiscountAmount.Value / totalDue) * 100;
                 }
-                if (line.DiscountAmount.HasValue)
-                    payment.Invoices.TotalDiscount = line.DiscountAmount.Value;
 
                 _logger.LogDebug(
                     "Payment allocation Line[{Index}]: SapInvoiceDocEntry={DocEntry}, " +
@@ -854,7 +852,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             {
                 DocEntry = docEntry,
                 DocNum = docNum,
-                OdooPaymentId = request.OdooPaymentId
+                ExternalPaymentId = request.ExternalPaymentId,
+                OdooPaymentId = request.OdooPaymentId,
+                TotalApplied = request.Lines.Sum(l => l.AppliedAmount)
             };
         }
         finally

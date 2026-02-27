@@ -62,11 +62,14 @@ public class IncomingPaymentsController : ControllerBase
 
             _logger.LogInformation(
                 "SAP Incoming Payment created: DocEntry={DocEntry}, DocNum={DocNum}, " +
-                "ExternalPaymentId={ExternalPaymentId}, OdooPaymentId={OdooPaymentId}",
+                "ExternalPaymentId={ExternalPaymentId}, OdooPaymentId={OdooPaymentId}, " +
+                "TotalApplied={TotalApplied}, LineCount={LineCount}",
                 result.DocEntry,
                 result.DocNum,
-                request.ExternalPaymentId,
-                result.OdooPaymentId);
+                result.ExternalPaymentId,
+                result.OdooPaymentId,
+                result.TotalApplied,
+                request.Lines.Count);
 
             // Step 2: Write back SAP fields to Odoo (when OdooPaymentId is provided)
             if (request.OdooPaymentId.HasValue && request.OdooPaymentId.Value > 0)

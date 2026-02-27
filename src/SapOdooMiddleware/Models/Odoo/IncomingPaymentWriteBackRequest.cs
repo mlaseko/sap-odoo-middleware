@@ -2,6 +2,7 @@ namespace SapOdooMiddleware.Models.Odoo;
 
 /// <summary>
 /// Request to write SAP Incoming Payment data back to Odoo after creation in SAP B1.
+/// Updates <c>x_sap_incoming_payment_docentry</c> and <c>x_sap_incoming_payment_docnum</c>
 /// Updates <c>x_sap_inpay_docentry</c> and <c>x_sap_inpay_docnum</c>
 /// on the Odoo payment record (account.payment).
 /// </summary>
