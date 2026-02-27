@@ -79,6 +79,40 @@ public class WebhookQueueController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/webhook-queue/failed
+    /// Returns only failed entries — the ones that exhausted all retries.
+    /// Shows the error message, retry count, and timestamps for diagnosis.
+    /// </summary>
+    [HttpGet("failed")]
+    public async Task<IActionResult> Failed()
+    {
+        using var connection = await OpenConnectionAsync();
+
+        const string sql = """
+            SELECT [Id], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
+                   [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt]
+            FROM [dbo].[ODOO_WEBHOOK_QUEUE]
+            WHERE [Status] = 'failed'
+            ORDER BY [CreatedAt] DESC
+            """;
+
+        using var cmd = new SqlCommand(sql, connection);
+        var entries = new List<WebhookQueueEntryDto>();
+        using var reader = await cmd.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            entries.Add(MapEntry(reader));
+        }
+
+        _logger.LogInformation("WebhookQueue failed: returned {Count} failed entries.", entries.Count);
+
+        return Ok(ApiResponse<List<WebhookQueueEntryDto>>.Ok(
+            entries,
+            new Dictionary<string, object> { ["total_failed"] = entries.Count }));
+    }
+
+    /// <summary>
     /// POST /api/webhook-queue/{id}/retry
     /// Resets a single failed entry back to 'pending' with RetryCount = 0
     /// so the WebhookQueueProcessor picks it up again.
