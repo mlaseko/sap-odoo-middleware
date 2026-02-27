@@ -925,6 +925,132 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    // ------------------------------------------------------------------
+    // Update (re-sync) methods — refresh UDFs on existing SAP documents
+    // ------------------------------------------------------------------
+
+    public async Task<SapInvoiceResponse> UpdateInvoiceAsync(int docEntry, SapInvoiceRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Updating SAP AR Invoice — DocEntry={DocEntry}, ExternalInvoiceId={ExternalInvoiceId}",
+                docEntry, request.ExternalInvoiceId);
+
+            var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+
+            if (!invoice.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(invoice);
+                throw new InvalidOperationException(
+                    $"SAP B1 AR Invoice with DocEntry={docEntry} not found.");
+            }
+
+            int docNum = invoice.DocNum;
+
+            // Refresh UDFs
+            TrySetUserField(invoice.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Invoice update");
+
+            if (!string.IsNullOrEmpty(request.UOdooSoId))
+                TrySetUserField(invoice.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Invoice update");
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(invoice.UserFields, "U_Odoo_LastSync", syncDate, "Invoice update");
+            TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice update");
+
+            int result = invoice.Update();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(invoice);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            var lineResponses = ReadInvoiceLines(invoice);
+            Marshal.ReleaseComObject(invoice);
+
+            _logger.LogInformation(
+                "✅ SAP AR Invoice updated: DocEntry={DocEntry}, DocNum={DocNum}",
+                docEntry, docNum);
+
+            return new SapInvoiceResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                ExternalInvoiceId = request.ExternalInvoiceId,
+                Lines = lineResponses
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<SapIncomingPaymentResponse> UpdateIncomingPaymentAsync(int docEntry, SapIncomingPaymentRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Updating SAP Incoming Payment — DocEntry={DocEntry}, ExternalPaymentId={ExternalPaymentId}",
+                docEntry, request.ExternalPaymentId);
+
+            var payment = (Payments)_company!.GetBusinessObject(BoObjectTypes.oIncomingPayments);
+
+            if (!payment.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(payment);
+                throw new InvalidOperationException(
+                    $"SAP B1 Incoming Payment with DocEntry={docEntry} not found.");
+            }
+
+            int docNum = payment.DocNum;
+
+            // Refresh UDFs
+            TrySetUserField(payment.UserFields, "U_Odoo_Payment_ID", request.ExternalPaymentId, "Payment update");
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(payment.UserFields, "U_Odoo_LastSync", syncDate, "Payment update");
+            TrySetUserField(payment.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Payment update");
+
+            int result = payment.Update();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(payment);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            Marshal.ReleaseComObject(payment);
+
+            _logger.LogInformation(
+                "✅ SAP Incoming Payment updated: DocEntry={DocEntry}, DocNum={DocNum}",
+                docEntry, docNum);
+
+            return new SapIncomingPaymentResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                ExternalPaymentId = request.ExternalPaymentId,
+                OdooPaymentId = request.OdooPaymentId
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <summary>
     /// Returns the warehouse code to use for a Sales Order line.
     /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to

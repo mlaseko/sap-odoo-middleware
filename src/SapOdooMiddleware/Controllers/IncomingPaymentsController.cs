@@ -97,6 +97,40 @@ public class IncomingPaymentsController : ControllerBase
     }
 
     /// <summary>
+    /// PUT /api/incoming-payments/{docEntry}
+    /// Updates UDF fields on an existing Incoming Payment in SAP B1 (re-sync).
+    /// </summary>
+    [HttpPut("{docEntry:int}")]
+    public async Task<IActionResult> Update(int docEntry, [FromBody] SapIncomingPaymentRequest request)
+    {
+        _logger.LogInformation(
+            "Received Incoming Payment update request — DocEntry={DocEntry}, ExternalPaymentId={ExternalPaymentId}",
+            docEntry, request.ExternalPaymentId);
+
+        try
+        {
+            var result = await _sapService.UpdateIncomingPaymentAsync(docEntry, request);
+
+            _logger.LogInformation(
+                "SAP Incoming Payment updated: DocEntry={DocEntry}, DocNum={DocNum}",
+                result.DocEntry, result.DocNum);
+
+            // Write back to Odoo if OdooPaymentId is provided
+            if (request.OdooPaymentId.HasValue && request.OdooPaymentId.Value > 0)
+            {
+                await WriteBackToOdoo(request.OdooPaymentId.Value, result);
+            }
+
+            return Ok(ApiResponse<SapIncomingPaymentResponse>.Ok(result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update SAP Incoming Payment DocEntry={DocEntry}", docEntry);
+            return StatusCode(500, ApiResponse<SapIncomingPaymentResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// Writes SAP Incoming Payment DocEntry and DocNum back to Odoo.
     /// Failures are logged and attached to the response but do NOT fail the overall request
     /// (the SAP Incoming Payment was already created successfully).
