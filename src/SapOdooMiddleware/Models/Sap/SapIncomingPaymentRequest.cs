@@ -73,8 +73,8 @@ public class SapIncomingPaymentRequest
     /// Odoo database record ID of the account.payment being synced.
     /// Used by the write-back step to update SAP fields on the correct Odoo payment record
     /// after the Incoming Payment is created in SAP B1.
-    /// When provided, the middleware writes <c>x_sap_incoming_payment_docentry</c> and
-    /// <c>x_sap_incoming_payment_docnum</c> back to Odoo.
+    /// When provided, the middleware writes <c>x_sap_inpay_docentry</c> and
+    /// <c>x_sap_inpay_docnum</c> back to Odoo.
     /// </summary>
     public int? OdooPaymentId { get; set; }
 

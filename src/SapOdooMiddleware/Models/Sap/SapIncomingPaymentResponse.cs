@@ -30,6 +30,7 @@ public class SapIncomingPaymentResponse
 
     /// <summary>
     /// Whether the Odoo write-back (x_sap_incoming_payment_docentry + x_sap_incoming_payment_docnum) succeeded.
+    /// Whether the Odoo write-back (x_sap_inpay_docentry + x_sap_inpay_docnum) succeeded.
     /// Null when write-back was not attempted (no OdooPaymentId provided).
     /// </summary>
     public bool? OdooWriteBackSuccess { get; set; }
