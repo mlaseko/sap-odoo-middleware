@@ -84,6 +84,26 @@ public class SapIncomingPaymentRequest
     public string? JournalRemarks { get; set; }
 
     /// <summary>
+    /// Odoo Sales Order name (e.g. "S00027") from the originating SO → Invoice → Payment chain.
+    /// Written to UDF <c>U_Odoo_SO_ID</c> on the SAP Incoming Payment header for
+    /// end-to-end document trail traceability.
+    /// </summary>
+    public string? UOdooSoId { get; set; }
+
+    /// <summary>
+    /// Odoo AR Invoice reference (e.g. "INV/2026/00001") from the primary invoice
+    /// this payment is allocated against.
+    /// Written to UDF <c>U_Odoo_Invoice_ID</c> on the SAP Incoming Payment header.
+    /// </summary>
+    public string? ExternalInvoiceId { get; set; }
+
+    /// <summary>
+    /// SAP AR Invoice DocEntry of the primary invoice this payment is allocated against.
+    /// Used for cross-referencing the payment back to its source invoice in SAP B1.
+    /// </summary>
+    public int? SapInvoiceDocEntry { get; set; }
+
+    /// <summary>
     /// Invoice allocations for this payment.
     /// Each entry links the payment to one SAP AR Invoice (OINV.DocEntry) with an applied amount.
     /// </summary>

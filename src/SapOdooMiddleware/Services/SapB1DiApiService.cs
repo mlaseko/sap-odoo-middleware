@@ -800,13 +800,22 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             // UDF fields — store Odoo identifiers on the SAP payment for traceability
             TrySetUserField(payment.UserFields, "U_Odoo_Payment_ID", request.ExternalPaymentId, "Payment header");
 
+            // Document trail: link payment back to the originating SO and invoice
+            if (!string.IsNullOrEmpty(request.UOdooSoId))
+                TrySetUserField(payment.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Payment header");
+
+            if (!string.IsNullOrEmpty(request.ExternalInvoiceId))
+                TrySetUserField(payment.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Payment header");
+
             var syncDate = DateTime.UtcNow.Date;
             TrySetUserField(payment.UserFields, "U_Odoo_LastSync", syncDate, "Payment header");
             TrySetUserField(payment.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Payment header");
 
             _logger.LogDebug(
-                "UDF U_Odoo_Payment_ID set to '{Value}', U_Odoo_LastSync={SyncDate}, U_Odoo_SyncDir={SyncDir} on Payment header.",
-                request.ExternalPaymentId, syncDate, SyncDirectionOdooToSap);
+                "UDFs set on Payment header: U_Odoo_Payment_ID='{PaymentId}', U_Odoo_SO_ID='{SoId}', " +
+                "U_Odoo_Invoice_ID='{InvId}', U_Odoo_LastSync={SyncDate}, U_Odoo_SyncDir={SyncDir}",
+                request.ExternalPaymentId, request.UOdooSoId, request.ExternalInvoiceId,
+                syncDate, SyncDirectionOdooToSap);
 
             // Cash vs bank/transfer account
             if (request.IsCashPayment)
@@ -1016,6 +1025,13 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             // Refresh UDFs
             TrySetUserField(payment.UserFields, "U_Odoo_Payment_ID", request.ExternalPaymentId, "Payment update");
+
+            // Document trail: link payment back to the originating SO and invoice
+            if (!string.IsNullOrEmpty(request.UOdooSoId))
+                TrySetUserField(payment.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Payment update");
+
+            if (!string.IsNullOrEmpty(request.ExternalInvoiceId))
+                TrySetUserField(payment.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Payment update");
 
             var syncDate = DateTime.UtcNow.Date;
             TrySetUserField(payment.UserFields, "U_Odoo_LastSync", syncDate, "Payment update");
