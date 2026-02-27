@@ -20,9 +20,10 @@ public class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context, IOptions<ApiKeySettings> settings)
     {
-        // Skip auth for health and Swagger endpoints
+        // Skip auth for health, Swagger, and browser-noise endpoints
         if (context.Request.Path.StartsWithSegments("/health")
-            || context.Request.Path.StartsWithSegments("/swagger"))
+            || context.Request.Path.StartsWithSegments("/swagger")
+            || context.Request.Path.StartsWithSegments("/favicon.ico"))
         {
             await _next(context);
             return;
