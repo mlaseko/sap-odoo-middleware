@@ -110,6 +110,9 @@ public class SapCreditMemoLineRequest
     /// <summary>Discount percentage (0-100). Maps to RIN1.DiscPrcnt.</summary>
     public double? DiscountPercent { get; set; }
 
+    /// <summary>SAP warehouse code for this line. Maps to RIN1.WhsCode.</summary>
+    public string? WarehouseCode { get; set; }
+
     /// <summary>
     /// Original AR Invoice DocEntry for copy-from per line.
     /// Maps to RIN1 BaseEntry with BaseType=13 (AR Invoice).

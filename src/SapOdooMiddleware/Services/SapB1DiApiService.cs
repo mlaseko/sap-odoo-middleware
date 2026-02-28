@@ -1334,6 +1334,22 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (line.DiscountPercent.HasValue)
                 creditMemo.Lines.DiscountPercent = line.DiscountPercent.Value;
 
+            // Warehouse: always set when provided; in standalone mode fall back to
+            // the configured default so SAP can resolve the item's inventory data.
+            if (!useCopyFrom)
+            {
+                var whsCode = ResolveWarehouseCode(line.WarehouseCode, _settings.DefaultWarehouseCode);
+                creditMemo.Lines.WarehouseCode = whsCode;
+
+                _logger.LogDebug(
+                    "Credit Memo Line[{Index}]: Standalone WarehouseCode={WarehouseCode}",
+                    i, whsCode);
+            }
+            else if (!string.IsNullOrEmpty(line.WarehouseCode))
+            {
+                creditMemo.Lines.WarehouseCode = line.WarehouseCode;
+            }
+
             if (useCopyFrom)
             {
                 // Copy-from AR Invoice (BaseType=13)
