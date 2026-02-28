@@ -76,9 +76,17 @@ public class ResyncController : ControllerBase
                     request.DocEntry, request.IncomingPayment
                         ?? throw new ArgumentException("incoming_payment payload is required")),
 
+                "credit_memo" => await _sapService.UpdateCreditMemoAsync(
+                    request.DocEntry, request.CreditMemo
+                        ?? throw new ArgumentException("credit_memo payload is required")),
+
+                "goods_return" => await _sapService.UpdateGoodsReturnAsync(
+                    request.DocEntry, request.GoodsReturn
+                        ?? throw new ArgumentException("goods_return payload is required")),
+
                 _ => throw new ArgumentException(
                     $"Unsupported document type: '{request.DocumentType}'. " +
-                    "Supported types: sales_order, invoice, incoming_payment")
+                    "Supported types: sales_order, invoice, incoming_payment, credit_memo, goods_return")
             };
 
             _logger.LogInformation(
@@ -131,6 +139,8 @@ public class ResyncController : ControllerBase
             "sales_order" => request.SalesOrder?.UOdooSoId ?? string.Empty,
             "invoice" => request.Invoice?.UOdooSoId ?? string.Empty,
             "incoming_payment" => request.IncomingPayment?.UOdooSoId ?? string.Empty,
+            "credit_memo" => request.CreditMemo?.UOdooSoId ?? string.Empty,
+            "goods_return" => request.GoodsReturn?.UOdooSoId ?? string.Empty,
             _ => string.Empty
         };
     }

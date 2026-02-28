@@ -30,6 +30,18 @@ public interface IOdooService
     Task UpdateIncomingPaymentAsync(IncomingPaymentWriteBackRequest request);
 
     /// <summary>
+    /// Writes SAP Credit Memo data back to Odoo after creation in SAP B1.
+    /// Updates <c>x_sap_credit_docentry</c> on the Odoo credit note (account.move).
+    /// </summary>
+    Task UpdateCreditMemoAsync(CreditMemoWriteBackRequest request);
+
+    /// <summary>
+    /// Writes SAP Goods Return data back to Odoo after creation in SAP B1.
+    /// Updates <c>x_sap_return_delivery_docentry</c> on the Odoo return picking (stock.picking).
+    /// </summary>
+    Task UpdateGoodsReturnAsync(GoodsReturnWriteBackRequest request);
+
+    /// <summary>
     /// Creates or updates a COGS journal entry in Odoo for a given SAP AR Invoice.
     /// Implements the full flow: find invoice → match lines → compute COGS →
     /// build JE → hash check → create/update → post.

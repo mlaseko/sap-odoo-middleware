@@ -1154,6 +1154,369 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         return newResponse;
     }
 
+    // ================================
+    // AR CREDIT MEMO (ORIN)
+    // ================================
+
+    public async Task<SapCreditMemoResponse> CreateCreditMemoAsync(SapCreditMemoRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Creating AR Credit Memo — ExternalCreditMemoId={ExternalCreditMemoId}, " +
+                "CustomerCode={CustomerCode}, SapBaseInvoiceDocEntry={SapBaseInvoiceDocEntry}, " +
+                "SapBaseDeliveryDocEntry={SapBaseDeliveryDocEntry}, LineCount={LineCount}",
+                request.ExternalCreditMemoId,
+                request.CustomerCode,
+                request.SapBaseInvoiceDocEntry,
+                request.SapBaseDeliveryDocEntry,
+                request.Lines.Count);
+
+            var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
+
+            // Header fields
+            creditMemo.CardCode = request.CustomerCode;
+            creditMemo.NumAtCard = request.ExternalCreditMemoId;
+
+            if (request.DocDate.HasValue)
+                creditMemo.DocDate = request.DocDate.Value;
+
+            if (request.DueDate.HasValue)
+                creditMemo.DocDueDate = request.DueDate.Value;
+
+            if (!string.IsNullOrEmpty(request.Currency))
+                creditMemo.DocCurrency = request.Currency;
+
+            // UDFs
+            TrySetUserField(creditMemo.UserFields, "U_Odoo_Invoice_ID", request.ExternalCreditMemoId, "Credit Memo header");
+
+            if (!string.IsNullOrEmpty(request.UOdooSoId))
+                TrySetUserField(creditMemo.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Credit Memo header");
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync", syncDate, "Credit Memo header");
+            TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Credit Memo header");
+
+            // Lines
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                if (i > 0)
+                    creditMemo.Lines.Add();
+
+                var line = request.Lines[i];
+
+                creditMemo.Lines.ItemCode = line.ItemCode;
+                creditMemo.Lines.Quantity = line.Quantity;
+                creditMemo.Lines.UnitPrice = line.Price;
+
+                if (line.DiscountPercent.HasValue)
+                    creditMemo.Lines.DiscountPercent = line.DiscountPercent.Value;
+
+                // Copy-from AR Invoice (BaseType=13)
+                if (line.BaseInvoiceDocEntry.HasValue && line.BaseInvoiceLineNum.HasValue)
+                {
+                    creditMemo.Lines.BaseType = (int)BoObjectTypes.oInvoices;  // 13
+                    creditMemo.Lines.BaseEntry = line.BaseInvoiceDocEntry.Value;
+                    creditMemo.Lines.BaseLine = line.BaseInvoiceLineNum.Value;
+
+                    _logger.LogDebug(
+                        "Credit Memo Line[{Index}]: BaseType=oInvoices, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                        i, line.BaseInvoiceDocEntry.Value, line.BaseInvoiceLineNum.Value);
+                }
+
+                // ActualBaseEntry/ActualBaseLine for delivery chain
+                // Required when the invoice was created via copy-from-delivery (SO → ODLN → OINV)
+                if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
+                {
+                    creditMemo.Lines.ActualBaseEntry = line.BaseDeliveryDocEntry.Value;
+                    creditMemo.Lines.ActualBaseLine = line.BaseDeliveryLineNum.Value;
+
+                    _logger.LogDebug(
+                        "Credit Memo Line[{Index}]: ActualBaseEntry={ActualBaseEntry}, ActualBaseLine={ActualBaseLine}",
+                        i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
+                }
+
+                _logger.LogDebug(
+                    "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
+                    i, line.ItemCode, line.Quantity, line.Price);
+            }
+
+            int result = creditMemo.Add();
+
+            if (result != 0)
+            {
+                _company!.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(creditMemo);
+
+                _logger.LogError(
+                    "Failed to create AR Credit Memo for {ExternalCreditMemoId}: DI API error {ErrCode}: {ErrMsg}",
+                    request.ExternalCreditMemoId, errCode, errMsg);
+
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            int docEntry = int.Parse(_company!.GetNewObjectKey());
+
+            creditMemo.GetByKey(docEntry);
+            int docNum = creditMemo.DocNum;
+
+            Marshal.ReleaseComObject(creditMemo);
+
+            _logger.LogInformation(
+                "✅ AR Credit Memo created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                "ExternalCreditMemoId={ExternalCreditMemoId}, LineCount={LineCount}",
+                docEntry, docNum, request.ExternalCreditMemoId, request.Lines.Count);
+
+            return new SapCreditMemoResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                ExternalCreditMemoId = request.ExternalCreditMemoId,
+                OdooInvoiceId = request.OdooInvoiceId
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<SapCreditMemoResponse> UpdateCreditMemoAsync(int docEntry, SapCreditMemoRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Updating SAP AR Credit Memo — DocEntry={DocEntry}, ExternalCreditMemoId={ExternalCreditMemoId}",
+                docEntry, request.ExternalCreditMemoId);
+
+            var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
+
+            if (!creditMemo.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(creditMemo);
+                throw new InvalidOperationException(
+                    $"SAP B1 AR Credit Memo with DocEntry={docEntry} not found.");
+            }
+
+            int docNum = creditMemo.DocNum;
+
+            // Refresh UDFs
+            TrySetUserField(creditMemo.UserFields, "U_Odoo_Invoice_ID", request.ExternalCreditMemoId, "Credit Memo update");
+
+            if (!string.IsNullOrEmpty(request.UOdooSoId))
+                TrySetUserField(creditMemo.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Credit Memo update");
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync", syncDate, "Credit Memo update");
+            TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Credit Memo update");
+
+            int result = creditMemo.Update();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(creditMemo);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            Marshal.ReleaseComObject(creditMemo);
+
+            _logger.LogInformation(
+                "✅ SAP AR Credit Memo updated: DocEntry={DocEntry}, DocNum={DocNum}",
+                docEntry, docNum);
+
+            return new SapCreditMemoResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                ExternalCreditMemoId = request.ExternalCreditMemoId,
+                OdooInvoiceId = request.OdooInvoiceId
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ================================
+    // GOODS RETURN (ORDN)
+    // ================================
+
+    public async Task<SapGoodsReturnResponse> CreateGoodsReturnAsync(SapGoodsReturnRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Creating Goods Return — ExternalReturnId={ExternalReturnId}, " +
+                "CustomerCode={CustomerCode}, LineCount={LineCount}",
+                request.ExternalReturnId,
+                request.CustomerCode,
+                request.Lines.Count);
+
+            var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
+
+            // Header fields
+            goodsReturn.CardCode = request.CustomerCode;
+
+            if (request.DeliveryDate.HasValue)
+                goodsReturn.DocDate = request.DeliveryDate.Value;
+
+            // UDFs
+            TrySetUserField(goodsReturn.UserFields, "U_Odoo_Delivery_ID", request.ExternalReturnId, "Goods Return header");
+
+            if (!string.IsNullOrEmpty(request.UOdooSoId))
+                TrySetUserField(goodsReturn.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Goods Return header");
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(goodsReturn.UserFields, "U_Odoo_LastSync", syncDate, "Goods Return header");
+            TrySetUserField(goodsReturn.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Goods Return header");
+
+            // Lines
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                if (i > 0)
+                    goodsReturn.Lines.Add();
+
+                var line = request.Lines[i];
+
+                goodsReturn.Lines.ItemCode = line.ItemCode;
+                goodsReturn.Lines.Quantity = line.Quantity;
+
+                if (!string.IsNullOrEmpty(line.WarehouseCode))
+                    goodsReturn.Lines.WarehouseCode = line.WarehouseCode;
+
+                // Copy-from Delivery Note (BaseType=15)
+                if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
+                {
+                    goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;  // 15
+                    goodsReturn.Lines.BaseEntry = line.BaseDeliveryDocEntry.Value;
+                    goodsReturn.Lines.BaseLine = line.BaseDeliveryLineNum.Value;
+
+                    _logger.LogDebug(
+                        "Goods Return Line[{Index}]: BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                        i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
+                }
+
+                _logger.LogDebug(
+                    "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Warehouse={Warehouse}",
+                    i, line.ItemCode, line.Quantity, line.WarehouseCode);
+            }
+
+            int result = goodsReturn.Add();
+
+            if (result != 0)
+            {
+                _company!.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(goodsReturn);
+
+                _logger.LogError(
+                    "Failed to create Goods Return for {ExternalReturnId}: DI API error {ErrCode}: {ErrMsg}",
+                    request.ExternalReturnId, errCode, errMsg);
+
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            int docEntry = int.Parse(_company!.GetNewObjectKey());
+
+            goodsReturn.GetByKey(docEntry);
+            int docNum = goodsReturn.DocNum;
+
+            Marshal.ReleaseComObject(goodsReturn);
+
+            _logger.LogInformation(
+                "✅ Goods Return created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                "ExternalReturnId={ExternalReturnId}, LineCount={LineCount}",
+                docEntry, docNum, request.ExternalReturnId, request.Lines.Count);
+
+            return new SapGoodsReturnResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                ExternalReturnId = request.ExternalReturnId,
+                OdooPickingId = request.OdooPickingId
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<SapGoodsReturnResponse> UpdateGoodsReturnAsync(int docEntry, SapGoodsReturnRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Updating SAP Goods Return — DocEntry={DocEntry}, ExternalReturnId={ExternalReturnId}",
+                docEntry, request.ExternalReturnId);
+
+            var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
+
+            if (!goodsReturn.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(goodsReturn);
+                throw new InvalidOperationException(
+                    $"SAP B1 Goods Return with DocEntry={docEntry} not found.");
+            }
+
+            int docNum = goodsReturn.DocNum;
+
+            // Refresh UDFs
+            TrySetUserField(goodsReturn.UserFields, "U_Odoo_Delivery_ID", request.ExternalReturnId, "Goods Return update");
+
+            if (!string.IsNullOrEmpty(request.UOdooSoId))
+                TrySetUserField(goodsReturn.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Goods Return update");
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(goodsReturn.UserFields, "U_Odoo_LastSync", syncDate, "Goods Return update");
+            TrySetUserField(goodsReturn.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Goods Return update");
+
+            int result = goodsReturn.Update();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(goodsReturn);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            Marshal.ReleaseComObject(goodsReturn);
+
+            _logger.LogInformation(
+                "✅ SAP Goods Return updated: DocEntry={DocEntry}, DocNum={DocNum}",
+                docEntry, docNum);
+
+            return new SapGoodsReturnResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                ExternalReturnId = request.ExternalReturnId,
+                OdooPickingId = request.OdooPickingId
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <summary>
     /// Returns the warehouse code to use for a Sales Order line.
     /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to

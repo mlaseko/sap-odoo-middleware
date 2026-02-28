@@ -248,6 +248,58 @@ public class OdooJsonRpcService : IOdooService
             paymentId, request.SapDocEntry, request.SapDocNum);
     }
 
+    // ── Credit Memo write-back ──────────────────────────────────────
+
+    public async Task UpdateCreditMemoAsync(CreditMemoWriteBackRequest request)
+    {
+        if (!_settings.UseBearerAuth)
+            await EnsureAuthenticatedAsync();
+
+        int invoiceId = request.OdooInvoiceId;
+
+        _logger.LogInformation(
+            "Writing SAP Credit Memo fields back to Odoo — OdooInvoiceId={OdooInvoiceId}, " +
+            "SapDocEntry={SapDocEntry}",
+            invoiceId, request.SapDocEntry);
+
+        await WriteAsync("account.move", invoiceId, new JsonObject
+        {
+            ["x_sap_credit_docentry"] = request.SapDocEntry
+        });
+
+        _logger.LogInformation(
+            "Credit Memo write-back complete — OdooInvoiceId={OdooInvoiceId}, " +
+            "x_sap_credit_docentry={SapDocEntry}",
+            invoiceId, request.SapDocEntry);
+    }
+
+    // ── Goods Return write-back ─────────────────────────────────────
+
+    public async Task UpdateGoodsReturnAsync(GoodsReturnWriteBackRequest request)
+    {
+        if (!_settings.UseBearerAuth)
+            await EnsureAuthenticatedAsync();
+
+        int pickingId = request.OdooPickingId;
+
+        _logger.LogInformation(
+            "Writing SAP Goods Return fields back to Odoo — OdooPickingId={OdooPickingId}, " +
+            "SapDocEntry={SapDocEntry}",
+            pickingId, request.SapDocEntry);
+
+        await WriteAsync("stock.picking", pickingId, new JsonObject
+        {
+            ["x_sap_return_delivery_docentry"] = request.SapDocEntry
+        });
+
+        _logger.LogInformation(
+            "Goods Return write-back complete — OdooPickingId={OdooPickingId}, " +
+            "x_sap_return_delivery_docentry={SapDocEntry}",
+            pickingId, request.SapDocEntry);
+    }
+
+    // ── COGS Journal Entry automation (Step 4) ─────────────────────
+
     public async Task<CogsJournalResponse> CreateOrUpdateCogsJournalAsync(CogsJournalRequest request)
     {
         if (!_settings.UseBearerAuth)
