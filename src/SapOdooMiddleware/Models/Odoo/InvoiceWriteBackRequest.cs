@@ -14,6 +14,18 @@ public class InvoiceWriteBackRequest
     public int SapDocEntry { get; set; }
 
     /// <summary>
+    /// SAP Delivery DocEntry (ODLN.DocEntry) from the originating delivery.
+    /// Written to x_sap_delivery_docentry for complete document chain traceability.
+    /// </summary>
+    public int? SapDeliveryDocEntry { get; set; }
+
+    /// <summary>
+    /// SAP Sales Order DocEntry (ORDR.DocEntry) from the originating SO.
+    /// Written to x_sap_docentry for complete document chain traceability.
+    /// </summary>
+    public int? SapSalesOrderDocEntry { get; set; }
+
+    /// <summary>
     /// Line-level data to write back. Each entry is matched to the corresponding
     /// Odoo invoice line by position (first SAP line → first Odoo line, etc.).
     /// </summary>
