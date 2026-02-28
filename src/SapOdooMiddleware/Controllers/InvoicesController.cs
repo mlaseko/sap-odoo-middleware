@@ -154,6 +154,8 @@ public class InvoicesController : ControllerBase
             {
                 OdooInvoiceId = odooInvoiceId,
                 SapDocEntry = result.DocEntry,
+                SapDeliveryDocEntry = result.BaseDeliveryDocEntry,
+                SapSalesOrderDocEntry = result.BaseSalesOrderDocEntry,
                 Lines = result.Lines.Select(l => new InvoiceLineWriteBack
                 {
                     SapLineNum = l.LineNum,

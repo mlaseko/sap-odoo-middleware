@@ -156,15 +156,22 @@ public class OdooJsonRpcService : IOdooService
             "Writing SAP invoice fields back to Odoo — OdooInvoiceId={OdooInvoiceId}, SapDocEntry={SapDocEntry}, LineCount={LineCount}",
             invoiceId, request.SapDocEntry, request.Lines.Count);
 
-        // 1. Write x_sap_invoice_docentry on the account.move header
-        await WriteAsync("account.move", invoiceId, new JsonObject
+        // 1. Write x_sap_invoice_docentry (and base document refs) on the account.move header
+        var headerValues = new JsonObject
         {
             ["x_sap_invoice_docentry"] = request.SapDocEntry
-        });
+        };
+        if (request.SapDeliveryDocEntry.HasValue && request.SapDeliveryDocEntry.Value > 0)
+            headerValues["x_sap_delivery_docentry"] = request.SapDeliveryDocEntry.Value;
+        if (request.SapSalesOrderDocEntry.HasValue && request.SapSalesOrderDocEntry.Value > 0)
+            headerValues["x_sap_docentry"] = request.SapSalesOrderDocEntry.Value;
+
+        await WriteAsync("account.move", invoiceId, headerValues);
 
         _logger.LogInformation(
-            "Wrote x_sap_invoice_docentry={SapDocEntry} on account.move id={InvoiceId}",
-            request.SapDocEntry, invoiceId);
+            "Wrote x_sap_invoice_docentry={SapDocEntry}, x_sap_delivery_docentry={DeliveryDocEntry}, " +
+            "x_sap_docentry={SoDocEntry} on account.move id={InvoiceId}",
+            request.SapDocEntry, request.SapDeliveryDocEntry, request.SapSalesOrderDocEntry, invoiceId);
 
         // 2. Read the invoice line IDs (account.move.line) for this invoice,
         //    filtering to product lines only (exclude tax/rounding lines).
@@ -262,15 +269,25 @@ public class OdooJsonRpcService : IOdooService
             "SapDocEntry={SapDocEntry}",
             invoiceId, request.SapDocEntry);
 
-        await WriteAsync("account.move", invoiceId, new JsonObject
+        var creditValues = new JsonObject
         {
             ["x_sap_credit_docentry"] = request.SapDocEntry
-        });
+        };
+        if (request.SapSalesOrderDocEntry.HasValue && request.SapSalesOrderDocEntry.Value > 0)
+            creditValues["x_sap_docentry"] = request.SapSalesOrderDocEntry.Value;
+        if (request.SapDeliveryDocEntry.HasValue && request.SapDeliveryDocEntry.Value > 0)
+            creditValues["x_sap_delivery_docentry"] = request.SapDeliveryDocEntry.Value;
+        if (request.SapBaseInvoiceDocEntry.HasValue && request.SapBaseInvoiceDocEntry.Value > 0)
+            creditValues["x_sap_invoice_docentry"] = request.SapBaseInvoiceDocEntry.Value;
+
+        await WriteAsync("account.move", invoiceId, creditValues);
 
         _logger.LogInformation(
             "Credit Memo write-back complete — OdooInvoiceId={OdooInvoiceId}, " +
-            "x_sap_credit_docentry={SapDocEntry}",
-            invoiceId, request.SapDocEntry);
+            "x_sap_credit_docentry={SapDocEntry}, x_sap_docentry={SoDocEntry}, " +
+            "x_sap_delivery_docentry={DelDocEntry}, x_sap_invoice_docentry={InvDocEntry}",
+            invoiceId, request.SapDocEntry, request.SapSalesOrderDocEntry,
+            request.SapDeliveryDocEntry, request.SapBaseInvoiceDocEntry);
     }
 
     // ── Goods Return write-back ─────────────────────────────────────

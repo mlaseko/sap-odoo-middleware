@@ -59,7 +59,7 @@ public class CreditMemosController : ControllerBase
             // Write back SAP fields to Odoo
             if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)
             {
-                await WriteBackToOdoo(request.OdooInvoiceId.Value, result);
+                await WriteBackToOdoo(request, result);
             }
 
             return Ok(ApiResponse<SapCreditMemoResponse>.Ok(result));
@@ -91,7 +91,7 @@ public class CreditMemosController : ControllerBase
 
             if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)
             {
-                await WriteBackToOdoo(request.OdooInvoiceId.Value, result);
+                await WriteBackToOdoo(request, result);
             }
 
             return Ok(ApiResponse<SapCreditMemoResponse>.Ok(result));
@@ -103,10 +103,12 @@ public class CreditMemosController : ControllerBase
         }
     }
 
-    private async Task WriteBackToOdoo(int odooInvoiceId, SapCreditMemoResponse result)
+    private async Task WriteBackToOdoo(SapCreditMemoRequest request, SapCreditMemoResponse result)
     {
         try
         {
+            int odooInvoiceId = request.OdooInvoiceId!.Value;
+
             _logger.LogInformation(
                 "Starting Odoo write-back — OdooInvoiceId={OdooInvoiceId}, SapDocEntry={SapDocEntry}",
                 odooInvoiceId, result.DocEntry);
@@ -114,7 +116,10 @@ public class CreditMemosController : ControllerBase
             await _odooService.UpdateCreditMemoAsync(new CreditMemoWriteBackRequest
             {
                 OdooInvoiceId = odooInvoiceId,
-                SapDocEntry = result.DocEntry
+                SapDocEntry = result.DocEntry,
+                SapSalesOrderDocEntry = request.SapSalesOrderDocEntry,
+                SapDeliveryDocEntry = request.SapBaseDeliveryDocEntry,
+                SapBaseInvoiceDocEntry = request.SapBaseInvoiceDocEntry
             });
 
             result.OdooWriteBackSuccess = true;
@@ -128,7 +133,7 @@ public class CreditMemosController : ControllerBase
             _logger.LogError(ex,
                 "Odoo write-back failed for OdooInvoiceId={OdooInvoiceId}. " +
                 "SAP Credit Memo was created successfully — manual update may be needed.",
-                odooInvoiceId);
+                request.OdooInvoiceId);
 
             result.OdooWriteBackSuccess = false;
             result.OdooWriteBackError = ex.Message;
