@@ -17,6 +17,13 @@ public class WebhookQueueController : ControllerBase
     private readonly IOptionsSnapshot<WebhookQueueSettings> _settings;
     private readonly ILogger<WebhookQueueController> _logger;
 
+    /// <summary>
+    /// Static flag so the EventType column migration runs at most once per
+    /// application lifetime.
+    /// </summary>
+    private static bool _schemaEnsured;
+    private static readonly object _schemaLock = new();
+
     public WebhookQueueController(
         IOptionsSnapshot<WebhookQueueSettings> settings,
         ILogger<WebhookQueueController> logger)
@@ -33,6 +40,7 @@ public class WebhookQueueController : ControllerBase
     public async Task<IActionResult> List([FromQuery] string? status = null)
     {
         using var connection = await OpenConnectionAsync();
+        await EnsureEventTypeColumnAsync(connection);
 
         string sql;
         SqlCommand cmd;
@@ -41,7 +49,8 @@ public class WebhookQueueController : ControllerBase
         {
             sql = """
                 SELECT [Id], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
-                       [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt]
+                       [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt],
+                       [EventType]
                 FROM [dbo].[ODOO_WEBHOOK_QUEUE]
                 WHERE [Status] = @Status
                 ORDER BY [CreatedAt] DESC
@@ -53,7 +62,8 @@ public class WebhookQueueController : ControllerBase
         {
             sql = """
                 SELECT [Id], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
-                       [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt]
+                       [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt],
+                       [EventType]
                 FROM [dbo].[ODOO_WEBHOOK_QUEUE]
                 ORDER BY [CreatedAt] DESC
                 """;
@@ -87,10 +97,12 @@ public class WebhookQueueController : ControllerBase
     public async Task<IActionResult> Failed()
     {
         using var connection = await OpenConnectionAsync();
+        await EnsureEventTypeColumnAsync(connection);
 
         const string sql = """
             SELECT [Id], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
-                   [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt]
+                   [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt],
+                   [EventType]
             FROM [dbo].[ODOO_WEBHOOK_QUEUE]
             WHERE [Status] = 'failed'
             ORDER BY [CreatedAt] DESC
@@ -176,7 +188,7 @@ public class WebhookQueueController : ControllerBase
 
     /// <summary>
     /// GET /api/webhook-queue/summary
-    /// Returns a count of entries grouped by status.
+    /// Returns a count of entries grouped by status, plus a total count.
     /// </summary>
     [HttpGet("summary")]
     public async Task<IActionResult> Summary()
@@ -193,10 +205,14 @@ public class WebhookQueueController : ControllerBase
         using var reader = await cmd.ExecuteReaderAsync();
 
         var summary = new Dictionary<string, int>();
+        int total = 0;
         while (await reader.ReadAsync())
         {
-            summary[reader.GetString(0)] = reader.GetInt32(1);
+            int count = reader.GetInt32(1);
+            summary[reader.GetString(0)] = count;
+            total += count;
         }
+        summary["total"] = total;
 
         return Ok(ApiResponse<Dictionary<string, int>>.Ok(summary));
     }
@@ -212,8 +228,47 @@ public class WebhookQueueController : ControllerBase
         return connection;
     }
 
+    /// <summary>
+    /// Ensures the [EventType] column exists on the ODOO_WEBHOOK_QUEUE table.
+    /// Runs at most once per application lifetime.
+    /// </summary>
+    private async Task EnsureEventTypeColumnAsync(SqlConnection connection)
+    {
+        if (_schemaEnsured)
+            return;
+
+        lock (_schemaLock)
+        {
+            if (_schemaEnsured)
+                return;
+        }
+
+        const string sql = """
+            IF NOT EXISTS (
+                SELECT 1
+                FROM sys.columns
+                WHERE object_id = OBJECT_ID(N'[dbo].[ODOO_WEBHOOK_QUEUE]')
+                  AND name = 'EventType'
+            )
+            ALTER TABLE [dbo].[ODOO_WEBHOOK_QUEUE]
+                ADD [EventType] NVARCHAR(50) NOT NULL
+                    CONSTRAINT DF_ODOO_WEBHOOK_QUEUE_EventType DEFAULT 'webhook';
+            """;
+
+        using var cmd = new SqlCommand(sql, connection);
+        await cmd.ExecuteNonQueryAsync();
+
+        lock (_schemaLock)
+        {
+            _schemaEnsured = true;
+        }
+
+        _logger.LogInformation("WebhookQueue: EventType column ensured on ODOO_WEBHOOK_QUEUE.");
+    }
+
     private static WebhookQueueEntryDto MapEntry(SqlDataReader reader)
     {
+        int eventTypeOrdinal = reader.GetOrdinal("EventType");
         return new WebhookQueueEntryDto
         {
             Id = reader.GetInt32(reader.GetOrdinal("Id")),
@@ -235,7 +290,10 @@ public class WebhookQueueController : ControllerBase
             CreatedAt = reader.GetDateTime(reader.GetOrdinal("CreatedAt")),
             ProcessedAt = reader.IsDBNull(reader.GetOrdinal("ProcessedAt"))
                 ? null
-                : reader.GetDateTime(reader.GetOrdinal("ProcessedAt"))
+                : reader.GetDateTime(reader.GetOrdinal("ProcessedAt")),
+            EventType = reader.IsDBNull(eventTypeOrdinal)
+                ? "webhook"
+                : reader.GetString(eventTypeOrdinal)
         };
     }
 }
