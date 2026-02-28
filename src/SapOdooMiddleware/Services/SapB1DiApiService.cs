@@ -817,6 +817,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 request.ExternalPaymentId, request.UOdooSoId, request.ExternalInvoiceId,
                 syncDate, SyncDirectionOdooToSap);
 
+            // DocTotal must be set explicitly so SAP posts the payment amount
+            payment.DocTotal = request.PaymentTotal;
+
             // Cash vs bank/transfer account
             if (request.IsCashPayment)
             {
@@ -826,7 +829,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 payment.CashSum = request.PaymentTotal;
 
                 _logger.LogInformation(
-                    "Cash payment — CashAccount={CashAccount}, CashSum={CashSum}",
+                    "Cash payment — DocTotal={DocTotal}, CashAccount={CashAccount}, CashSum={CashSum}",
+                    request.PaymentTotal,
                     request.BankOrCashAccountCode,
                     request.PaymentTotal);
             }
@@ -848,8 +852,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     payment.TransferDate = request.DocDate.Value;
 
                 _logger.LogInformation(
-                    "Bank/transfer payment — TransferAccount={TransferAccount}, TransferSum={TransferSum}, " +
+                    "Bank/transfer payment — DocTotal={DocTotal}, TransferAccount={TransferAccount}, TransferSum={TransferSum}, " +
                     "ForexAccountCode={ForexAccountCode}",
+                    request.PaymentTotal,
                     transferAccount,
                     request.PaymentTotal,
                     request.ForexAccountCode);
