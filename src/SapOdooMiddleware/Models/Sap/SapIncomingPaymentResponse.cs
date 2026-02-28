@@ -40,4 +40,17 @@ public class SapIncomingPaymentResponse
     /// The SAP Incoming Payment was still created successfully when this field is set.
     /// </summary>
     public string? OdooWriteBackError { get; set; }
+
+    /// <summary>
+    /// When <c>true</c>, the payment was cancelled and recreated with invoice allocations
+    /// during a re-sync operation. <see cref="DocEntry"/> and <see cref="DocNum"/> reflect
+    /// the newly created payment; <see cref="CancelledDocEntry"/> holds the original.
+    /// </summary>
+    public bool Reallocated { get; set; }
+
+    /// <summary>
+    /// The DocEntry of the original payment that was cancelled during reallocation.
+    /// Only set when <see cref="Reallocated"/> is <c>true</c>.
+    /// </summary>
+    public int? CancelledDocEntry { get; set; }
 }

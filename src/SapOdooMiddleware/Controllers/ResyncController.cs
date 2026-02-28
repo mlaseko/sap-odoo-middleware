@@ -3,6 +3,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Models.Api;
+using SapOdooMiddleware.Models.Odoo;
 using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services;
 
@@ -25,15 +26,18 @@ namespace SapOdooMiddleware.Controllers;
 public class ResyncController : ControllerBase
 {
     private readonly ISapB1Service _sapService;
+    private readonly IOdooService _odooService;
     private readonly IOptionsSnapshot<WebhookQueueSettings> _settings;
     private readonly ILogger<ResyncController> _logger;
 
     public ResyncController(
         ISapB1Service sapService,
+        IOdooService odooService,
         IOptionsSnapshot<WebhookQueueSettings> settings,
         ILogger<ResyncController> logger)
     {
         _sapService = sapService;
+        _odooService = odooService;
         _settings = settings;
         _logger = logger;
     }
@@ -80,6 +84,17 @@ public class ResyncController : ControllerBase
             _logger.LogInformation(
                 "Re-sync completed — DocumentType={DocumentType}, DocEntry={DocEntry}",
                 request.DocumentType, request.DocEntry);
+
+            // When a payment reallocation occurred (cancel + recreate), the DocEntry
+            // changed.  Write the new DocEntry/DocNum back to Odoo so the records
+            // stay in sync regardless of whether the Odoo caller processes the response.
+            if (result is SapIncomingPaymentResponse paymentResult
+                && paymentResult.Reallocated
+                && request.IncomingPayment?.OdooPaymentId is > 0)
+            {
+                await WriteBackPaymentToOdoo(
+                    request.IncomingPayment.OdooPaymentId.Value, paymentResult);
+            }
 
             string responseBody = System.Text.Json.JsonSerializer.Serialize(result);
             await MarkQueueEntryDoneAsync(queueEntryId, responseBody);
@@ -255,6 +270,47 @@ public class ResyncController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not mark resync queue entry {Id} as failed.", entryId);
+        }
+    }
+
+    /// <summary>
+    /// Writes the new SAP DocEntry/DocNum back to Odoo after a payment reallocation.
+    /// Failures are logged but do not fail the overall resync (SAP is already updated).
+    /// </summary>
+    private async Task WriteBackPaymentToOdoo(
+        int odooPaymentId, SapIncomingPaymentResponse result)
+    {
+        try
+        {
+            _logger.LogInformation(
+                "Writing reallocated payment back to Odoo — OdooPaymentId={OdooPaymentId}, " +
+                "OldDocEntry={OldDocEntry}, NewDocEntry={NewDocEntry}, NewDocNum={NewDocNum}",
+                odooPaymentId, result.CancelledDocEntry, result.DocEntry, result.DocNum);
+
+            await _odooService.UpdateIncomingPaymentAsync(new IncomingPaymentWriteBackRequest
+            {
+                OdooPaymentId = odooPaymentId,
+                SapDocEntry = result.DocEntry,
+                SapDocNum = result.DocNum
+            });
+
+            result.OdooWriteBackSuccess = true;
+
+            _logger.LogInformation(
+                "Odoo write-back completed for reallocated payment — " +
+                "OdooPaymentId={OdooPaymentId}, NewDocEntry={NewDocEntry}",
+                odooPaymentId, result.DocEntry);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Odoo write-back failed for reallocated payment — " +
+                "OdooPaymentId={OdooPaymentId}, NewDocEntry={NewDocEntry}. " +
+                "SAP payment was reallocated successfully — manual update may be needed.",
+                odooPaymentId, result.DocEntry);
+
+            result.OdooWriteBackSuccess = false;
+            result.OdooWriteBackError = ex.Message;
         }
     }
 }
