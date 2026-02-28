@@ -1175,46 +1175,167 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 request.SapBaseDeliveryDocEntry,
                 request.Lines.Count);
 
-            var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
+            // First attempt: with copy-from references (if available)
+            bool hasCopyFrom = request.Lines.Any(l =>
+                l.BaseInvoiceDocEntry.HasValue && l.BaseInvoiceLineNum.HasValue);
 
-            // Header fields
-            creditMemo.CardCode = request.CustomerCode;
-            creditMemo.NumAtCard = request.ExternalCreditMemoId;
+            var (docEntry, docNum) = BuildAndAddCreditMemo(request, useCopyFrom: hasCopyFrom);
 
-            if (request.DocDate.HasValue)
-                creditMemo.DocDate = request.DocDate.Value;
+            _logger.LogInformation(
+                "✅ AR Credit Memo created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                "ExternalCreditMemoId={ExternalCreditMemoId}, LineCount={LineCount}, CopyFrom={CopyFrom}",
+                docEntry, docNum, request.ExternalCreditMemoId, request.Lines.Count, hasCopyFrom);
 
-            if (request.DueDate.HasValue)
-                creditMemo.DocDueDate = request.DueDate.Value;
-
-            if (!string.IsNullOrEmpty(request.Currency))
-                creditMemo.DocCurrency = request.Currency;
-
-            // UDFs
-            TrySetUserField(creditMemo.UserFields, "U_Odoo_Invoice_ID", request.ExternalCreditMemoId, "Credit Memo header");
-
-            if (!string.IsNullOrEmpty(request.UOdooSoId))
-                TrySetUserField(creditMemo.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Credit Memo header");
-
-            var syncDate = DateTime.UtcNow.Date;
-            TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync", syncDate, "Credit Memo header");
-            TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Credit Memo header");
-
-            // Lines
-            for (int i = 0; i < request.Lines.Count; i++)
+            return new SapCreditMemoResponse
             {
-                if (i > 0)
-                    creditMemo.Lines.Add();
+                DocEntry = docEntry,
+                DocNum = docNum,
+                ExternalCreditMemoId = request.ExternalCreditMemoId,
+                OdooInvoiceId = request.OdooInvoiceId
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 
-                var line = request.Lines[i];
+    /// <summary>
+    /// Builds and adds an AR Credit Memo document.
+    /// When <paramref name="useCopyFrom"/> is true and Add() fails with -5002
+    /// (base document already closed — typically a fully-paid invoice),
+    /// automatically retries as a standalone credit memo without copy-from.
+    /// </summary>
+    private (int DocEntry, int DocNum) BuildAndAddCreditMemo(
+        SapCreditMemoRequest request, bool useCopyFrom)
+    {
+        var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
 
-                creditMemo.Lines.ItemCode = line.ItemCode;
-                creditMemo.Lines.Quantity = line.Quantity;
-                creditMemo.Lines.UnitPrice = line.Price;
+        try
+        {
+            PopulateCreditMemo(creditMemo, request, useCopyFrom);
 
-                if (line.DiscountPercent.HasValue)
-                    creditMemo.Lines.DiscountPercent = line.DiscountPercent.Value;
+            int result = creditMemo.Add();
 
+            if (result != 0)
+            {
+                _company!.GetLastError(out int errCode, out string errMsg);
+
+                // -5002: base document already closed (e.g. invoice fully paid)
+                // Retry without copy-from as a standalone credit memo
+                if (errCode == -5002 && useCopyFrom)
+                {
+                    _logger.LogWarning(
+                        "Copy-from failed with -5002 (base invoice closed) for {ExternalCreditMemoId}. " +
+                        "Retrying as standalone credit memo without copy-from.",
+                        request.ExternalCreditMemoId);
+
+                    Marshal.ReleaseComObject(creditMemo);
+                    creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
+
+                    PopulateCreditMemo(creditMemo, request, useCopyFrom: false);
+
+                    result = creditMemo.Add();
+
+                    if (result != 0)
+                    {
+                        _company!.GetLastError(out int errCode2, out string errMsg2);
+                        Marshal.ReleaseComObject(creditMemo);
+
+                        _logger.LogError(
+                            "Standalone credit memo also failed for {ExternalCreditMemoId}: DI API error {ErrCode}: {ErrMsg}",
+                            request.ExternalCreditMemoId, errCode2, errMsg2);
+
+                        throw new InvalidOperationException(
+                            $"SAP DI API error {errCode2}: {errMsg2}");
+                    }
+
+                    _logger.LogInformation(
+                        "Standalone credit memo succeeded for {ExternalCreditMemoId} (copy-from bypassed due to closed base invoice)",
+                        request.ExternalCreditMemoId);
+                }
+                else
+                {
+                    Marshal.ReleaseComObject(creditMemo);
+
+                    _logger.LogError(
+                        "Failed to create AR Credit Memo for {ExternalCreditMemoId}: DI API error {ErrCode}: {ErrMsg}",
+                        request.ExternalCreditMemoId, errCode, errMsg);
+
+                    throw new InvalidOperationException(
+                        $"SAP DI API error {errCode}: {errMsg}");
+                }
+            }
+
+            int docEntry = int.Parse(_company!.GetNewObjectKey());
+            creditMemo.GetByKey(docEntry);
+            int docNum = creditMemo.DocNum;
+
+            Marshal.ReleaseComObject(creditMemo);
+            return (docEntry, docNum);
+        }
+        catch
+        {
+            Marshal.ReleaseComObject(creditMemo);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Populates the credit memo DI API object with header, UDFs, and lines.
+    /// When <paramref name="useCopyFrom"/> is false, per-line BaseType/BaseEntry/BaseLine
+    /// are omitted (standalone credit memo — used when base invoice is closed).
+    /// </summary>
+    private void PopulateCreditMemo(Documents creditMemo, SapCreditMemoRequest request, bool useCopyFrom)
+    {
+        // Header fields
+        creditMemo.CardCode = request.CustomerCode;
+        creditMemo.NumAtCard = request.ExternalCreditMemoId;
+
+        if (request.DocDate.HasValue)
+            creditMemo.DocDate = request.DocDate.Value;
+
+        if (request.DueDate.HasValue)
+            creditMemo.DocDueDate = request.DueDate.Value;
+
+        if (!string.IsNullOrEmpty(request.Currency))
+            creditMemo.DocCurrency = request.Currency;
+
+        // When created as standalone (base invoice was closed), add a remark
+        // so SAP users can trace it back to the original invoice manually.
+        if (!useCopyFrom && request.SapBaseInvoiceDocEntry.HasValue)
+        {
+            creditMemo.Comments = $"Based on AR Invoice DocEntry {request.SapBaseInvoiceDocEntry.Value} " +
+                                  "(standalone — base invoice was closed)";
+        }
+
+        // UDFs
+        TrySetUserField(creditMemo.UserFields, "U_Odoo_Invoice_ID", request.ExternalCreditMemoId, "Credit Memo header");
+
+        if (!string.IsNullOrEmpty(request.UOdooSoId))
+            TrySetUserField(creditMemo.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Credit Memo header");
+
+        var syncDate = DateTime.UtcNow.Date;
+        TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync", syncDate, "Credit Memo header");
+        TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Credit Memo header");
+
+        // Lines
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            if (i > 0)
+                creditMemo.Lines.Add();
+
+            var line = request.Lines[i];
+
+            creditMemo.Lines.ItemCode = line.ItemCode;
+            creditMemo.Lines.Quantity = line.Quantity;
+            creditMemo.Lines.UnitPrice = line.Price;
+
+            if (line.DiscountPercent.HasValue)
+                creditMemo.Lines.DiscountPercent = line.DiscountPercent.Value;
+
+            if (useCopyFrom)
+            {
                 // Copy-from AR Invoice (BaseType=13)
                 if (line.BaseInvoiceDocEntry.HasValue && line.BaseInvoiceLineNum.HasValue)
                 {
@@ -1228,7 +1349,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
 
                 // ActualBaseEntry/ActualBaseLine for delivery chain
-                // Required when the invoice was created via copy-from-delivery (SO → ODLN → OINV)
                 if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
                 {
                     creditMemo.Lines.ActualBaseEntry = line.BaseDeliveryDocEntry.Value;
@@ -1238,50 +1358,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                         "Credit Memo Line[{Index}]: ActualBaseEntry={ActualBaseEntry}, ActualBaseLine={ActualBaseLine}",
                         i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
                 }
-
-                _logger.LogDebug(
-                    "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
-                    i, line.ItemCode, line.Quantity, line.Price);
             }
 
-            int result = creditMemo.Add();
-
-            if (result != 0)
-            {
-                _company!.GetLastError(out int errCode, out string errMsg);
-                Marshal.ReleaseComObject(creditMemo);
-
-                _logger.LogError(
-                    "Failed to create AR Credit Memo for {ExternalCreditMemoId}: DI API error {ErrCode}: {ErrMsg}",
-                    request.ExternalCreditMemoId, errCode, errMsg);
-
-                throw new InvalidOperationException(
-                    $"SAP DI API error {errCode}: {errMsg}");
-            }
-
-            int docEntry = int.Parse(_company!.GetNewObjectKey());
-
-            creditMemo.GetByKey(docEntry);
-            int docNum = creditMemo.DocNum;
-
-            Marshal.ReleaseComObject(creditMemo);
-
-            _logger.LogInformation(
-                "✅ AR Credit Memo created: DocEntry={DocEntry}, DocNum={DocNum}, " +
-                "ExternalCreditMemoId={ExternalCreditMemoId}, LineCount={LineCount}",
-                docEntry, docNum, request.ExternalCreditMemoId, request.Lines.Count);
-
-            return new SapCreditMemoResponse
-            {
-                DocEntry = docEntry,
-                DocNum = docNum,
-                ExternalCreditMemoId = request.ExternalCreditMemoId,
-                OdooInvoiceId = request.OdooInvoiceId
-            };
-        }
-        finally
-        {
-            _lock.Release();
+            _logger.LogDebug(
+                "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, CopyFrom={CopyFrom}",
+                i, line.ItemCode, line.Quantity, line.Price, useCopyFrom);
         }
     }
 
