@@ -763,180 +763,188 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         try
         {
             EnsureConnected();
-
-            _logger.LogInformation(
-                "Received Incoming Payment creation request — ExternalPaymentId={ExternalPaymentId}, " +
-                "CustomerCode={CustomerCode}, DocDate={DocDate}, Currency={Currency}, " +
-                "PaymentTotal={PaymentTotal}, IsPartial={IsPartial}, JournalCode={JournalCode}, " +
-                "BankOrCashAccountCode={BankOrCashAccountCode}, IsCashPayment={IsCashPayment}, " +
-                "OdooPaymentId={OdooPaymentId}, LineCount={LineCount}",
-                request.ExternalPaymentId,
-                request.CustomerCode,
-                request.DocDate,
-                request.Currency,
-                request.PaymentTotal,
-                request.IsPartial,
-                request.JournalCode,
-                request.BankOrCashAccountCode,
-                request.IsCashPayment,
-                request.OdooPaymentId,
-                request.Lines.Count);
-
-            var payment = (Payments)_company!.GetBusinessObject(BoObjectTypes.oIncomingPayments);
-
-            // Header fields
-            payment.CardCode = request.CustomerCode;
-            payment.CounterReference = request.ExternalPaymentId;
-
-            if (request.DocDate.HasValue)
-                payment.DocDate = request.DocDate.Value;
-
-            if (!string.IsNullOrEmpty(request.Currency))
-                payment.DocCurrency = request.Currency;
-
-            if (!string.IsNullOrEmpty(request.JournalRemarks))
-                payment.JournalRemarks = request.JournalRemarks;
-
-            // UDF fields — store Odoo identifiers on the SAP payment for traceability
-            TrySetUserField(payment.UserFields, "U_Odoo_Payment_ID", request.ExternalPaymentId, "Payment header");
-
-            // Document trail: link payment back to the originating SO and invoice
-            if (!string.IsNullOrEmpty(request.UOdooSoId))
-                TrySetUserField(payment.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Payment header");
-
-            if (!string.IsNullOrEmpty(request.ExternalInvoiceId))
-                TrySetUserField(payment.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Payment header");
-
-            var syncDate = DateTime.UtcNow.Date;
-            TrySetUserField(payment.UserFields, "U_Odoo_LastSync", syncDate, "Payment header");
-            TrySetUserField(payment.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Payment header");
-
-            _logger.LogDebug(
-                "UDFs set on Payment header: U_Odoo_Payment_ID='{PaymentId}', U_Odoo_SO_ID='{SoId}', " +
-                "U_Odoo_Invoice_ID='{InvId}', U_Odoo_LastSync={SyncDate}, U_Odoo_SyncDir={SyncDir}",
-                request.ExternalPaymentId, request.UOdooSoId, request.ExternalInvoiceId,
-                syncDate, SyncDirectionOdooToSap);
-
-            // SAP calculates DocTotal from CashSum / TransferSum / CheckSum,
-            // so we only set the appropriate payment-method amount below.
-
-            // Cash vs bank/transfer account
-            if (request.IsCashPayment)
-            {
-                if (!string.IsNullOrEmpty(request.BankOrCashAccountCode))
-                    payment.CashAccount = request.BankOrCashAccountCode;
-
-                payment.CashSum = request.PaymentTotal;
-
-                _logger.LogInformation(
-                    "Cash payment — DocTotal={DocTotal}, CashAccount={CashAccount}, CashSum={CashSum}",
-                    request.PaymentTotal,
-                    request.BankOrCashAccountCode,
-                    request.PaymentTotal);
-            }
-            else
-            {
-                // Bank / mobile money transfer
-                // When a Forex transfer account is specified, use it as the primary transfer account
-                // (cross-currency payments route through account 1026216).
-                string transferAccount = !string.IsNullOrEmpty(request.ForexAccountCode)
-                    ? request.ForexAccountCode
-                    : request.BankOrCashAccountCode ?? string.Empty;
-
-                if (!string.IsNullOrEmpty(transferAccount))
-                    payment.TransferAccount = transferAccount;
-
-                payment.TransferSum = request.PaymentTotal;
-
-                if (request.DocDate.HasValue)
-                    payment.TransferDate = request.DocDate.Value;
-
-                _logger.LogInformation(
-                    "Bank/transfer payment — DocTotal={DocTotal}, TransferAccount={TransferAccount}, TransferSum={TransferSum}, " +
-                    "ForexAccountCode={ForexAccountCode}",
-                    request.PaymentTotal,
-                    transferAccount,
-                    request.PaymentTotal,
-                    request.ForexAccountCode);
-            }
-
-            // Invoice allocations (RCT2)
-            for (int i = 0; i < request.Lines.Count; i++)
-            {
-                if (i > 0)
-                    payment.Invoices.Add();
-
-                var line = request.Lines[i];
-
-                payment.Invoices.DocEntry = line.SapInvoiceDocEntry;
-                payment.Invoices.InvoiceType = BoRcptInvTypes.it_Invoice;
-                payment.Invoices.SumApplied = line.AppliedAmount;
-
-                if (line.DiscountAmount.HasValue && line.DiscountAmount.Value != 0)
-                {
-                    double totalDue = line.AppliedAmount + line.DiscountAmount.Value;
-                    if (totalDue > 0)
-                        payment.Invoices.DiscountPercent = (line.DiscountAmount.Value / totalDue) * 100;
-                }
-
-                _logger.LogDebug(
-                    "Payment allocation Line[{Index}]: SapInvoiceDocEntry={DocEntry}, " +
-                    "AppliedAmount={AppliedAmount}, DiscountAmount={DiscountAmount}, OdooInvoiceId={OdooInvoiceId}",
-                    i,
-                    line.SapInvoiceDocEntry,
-                    line.AppliedAmount,
-                    line.DiscountAmount,
-                    line.OdooInvoiceId);
-            }
-
-            int result = payment.Add();
-
-            if (result != 0)
-            {
-                _company!.GetLastError(out int errCode, out string errMsg);
-                Marshal.ReleaseComObject(payment);
-
-                _logger.LogError(
-                    "Failed to create Incoming Payment for ExternalPaymentId={ExternalPaymentId}: " +
-                    "DI API error {ErrCode}: {ErrMsg}",
-                    request.ExternalPaymentId, errCode, errMsg);
-
-                throw new InvalidOperationException(
-                    $"SAP DI API error {errCode}: {errMsg}");
-            }
-
-            int docEntry = int.Parse(_company!.GetNewObjectKey());
-
-            // Retrieve created payment to get DocNum
-            payment.GetByKey(docEntry);
-            int docNum = payment.DocNum;
-
-            Marshal.ReleaseComObject(payment);
-
-            _logger.LogInformation(
-                "✅ Incoming Payment created successfully — DocEntry={DocEntry}, DocNum={DocNum}, " +
-                "ExternalPaymentId={ExternalPaymentId}, CustomerCode={CustomerCode}, " +
-                "PaymentTotal={PaymentTotal}, LineCount={LineCount}",
-                docEntry,
-                docNum,
-                request.ExternalPaymentId,
-                request.CustomerCode,
-                request.PaymentTotal,
-                request.Lines.Count);
-
-            return new SapIncomingPaymentResponse
-            {
-                DocEntry = docEntry,
-                DocNum = docNum,
-                ExternalPaymentId = request.ExternalPaymentId,
-                OdooPaymentId = request.OdooPaymentId,
-                TotalApplied = request.Lines.Sum(l => l.AppliedAmount)
-            };
+            return CreateIncomingPaymentCore(request);
         }
         finally
         {
             _lock.Release();
         }
+    }
+
+    /// <summary>
+    /// Core creation logic for an Incoming Payment (ORCT).
+    /// Caller must hold <see cref="_lock"/> and call <see cref="EnsureConnected"/> first.
+    /// </summary>
+    private SapIncomingPaymentResponse CreateIncomingPaymentCore(SapIncomingPaymentRequest request)
+    {
+        _logger.LogInformation(
+            "Received Incoming Payment creation request — ExternalPaymentId={ExternalPaymentId}, " +
+            "CustomerCode={CustomerCode}, DocDate={DocDate}, Currency={Currency}, " +
+            "PaymentTotal={PaymentTotal}, IsPartial={IsPartial}, JournalCode={JournalCode}, " +
+            "BankOrCashAccountCode={BankOrCashAccountCode}, IsCashPayment={IsCashPayment}, " +
+            "OdooPaymentId={OdooPaymentId}, LineCount={LineCount}",
+            request.ExternalPaymentId,
+            request.CustomerCode,
+            request.DocDate,
+            request.Currency,
+            request.PaymentTotal,
+            request.IsPartial,
+            request.JournalCode,
+            request.BankOrCashAccountCode,
+            request.IsCashPayment,
+            request.OdooPaymentId,
+            request.Lines.Count);
+
+        var payment = (Payments)_company!.GetBusinessObject(BoObjectTypes.oIncomingPayments);
+
+        // Header fields
+        payment.CardCode = request.CustomerCode;
+        payment.CounterReference = request.ExternalPaymentId;
+
+        if (request.DocDate.HasValue)
+            payment.DocDate = request.DocDate.Value;
+
+        if (!string.IsNullOrEmpty(request.Currency))
+            payment.DocCurrency = request.Currency;
+
+        if (!string.IsNullOrEmpty(request.JournalRemarks))
+            payment.JournalRemarks = request.JournalRemarks;
+
+        // UDF fields — store Odoo identifiers on the SAP payment for traceability
+        TrySetUserField(payment.UserFields, "U_Odoo_Payment_ID", request.ExternalPaymentId, "Payment header");
+
+        // Document trail: link payment back to the originating SO and invoice
+        if (!string.IsNullOrEmpty(request.UOdooSoId))
+            TrySetUserField(payment.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Payment header");
+
+        if (!string.IsNullOrEmpty(request.ExternalInvoiceId))
+            TrySetUserField(payment.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Payment header");
+
+        var syncDate = DateTime.UtcNow.Date;
+        TrySetUserField(payment.UserFields, "U_Odoo_LastSync", syncDate, "Payment header");
+        TrySetUserField(payment.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Payment header");
+
+        _logger.LogDebug(
+            "UDFs set on Payment header: U_Odoo_Payment_ID='{PaymentId}', U_Odoo_SO_ID='{SoId}', " +
+            "U_Odoo_Invoice_ID='{InvId}', U_Odoo_LastSync={SyncDate}, U_Odoo_SyncDir={SyncDir}",
+            request.ExternalPaymentId, request.UOdooSoId, request.ExternalInvoiceId,
+            syncDate, SyncDirectionOdooToSap);
+
+        // SAP calculates DocTotal from CashSum / TransferSum / CheckSum,
+        // so we only set the appropriate payment-method amount below.
+
+        // Cash vs bank/transfer account
+        if (request.IsCashPayment)
+        {
+            if (!string.IsNullOrEmpty(request.BankOrCashAccountCode))
+                payment.CashAccount = request.BankOrCashAccountCode;
+
+            payment.CashSum = request.PaymentTotal;
+
+            _logger.LogInformation(
+                "Cash payment — DocTotal={DocTotal}, CashAccount={CashAccount}, CashSum={CashSum}",
+                request.PaymentTotal,
+                request.BankOrCashAccountCode,
+                request.PaymentTotal);
+        }
+        else
+        {
+            // Bank / mobile money transfer
+            // When a Forex transfer account is specified, use it as the primary transfer account
+            // (cross-currency payments route through account 1026216).
+            string transferAccount = !string.IsNullOrEmpty(request.ForexAccountCode)
+                ? request.ForexAccountCode
+                : request.BankOrCashAccountCode ?? string.Empty;
+
+            if (!string.IsNullOrEmpty(transferAccount))
+                payment.TransferAccount = transferAccount;
+
+            payment.TransferSum = request.PaymentTotal;
+
+            if (request.DocDate.HasValue)
+                payment.TransferDate = request.DocDate.Value;
+
+            _logger.LogInformation(
+                "Bank/transfer payment — DocTotal={DocTotal}, TransferAccount={TransferAccount}, TransferSum={TransferSum}, " +
+                "ForexAccountCode={ForexAccountCode}",
+                request.PaymentTotal,
+                transferAccount,
+                request.PaymentTotal,
+                request.ForexAccountCode);
+        }
+
+        // Invoice allocations (RCT2)
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            if (i > 0)
+                payment.Invoices.Add();
+
+            var line = request.Lines[i];
+
+            payment.Invoices.DocEntry = line.SapInvoiceDocEntry;
+            payment.Invoices.InvoiceType = BoRcptInvTypes.it_Invoice;
+            payment.Invoices.SumApplied = line.AppliedAmount;
+
+            if (line.DiscountAmount.HasValue && line.DiscountAmount.Value != 0)
+            {
+                double totalDue = line.AppliedAmount + line.DiscountAmount.Value;
+                if (totalDue > 0)
+                    payment.Invoices.DiscountPercent = (line.DiscountAmount.Value / totalDue) * 100;
+            }
+
+            _logger.LogDebug(
+                "Payment allocation Line[{Index}]: SapInvoiceDocEntry={DocEntry}, " +
+                "AppliedAmount={AppliedAmount}, DiscountAmount={DiscountAmount}, OdooInvoiceId={OdooInvoiceId}",
+                i,
+                line.SapInvoiceDocEntry,
+                line.AppliedAmount,
+                line.DiscountAmount,
+                line.OdooInvoiceId);
+        }
+
+        int result = payment.Add();
+
+        if (result != 0)
+        {
+            _company!.GetLastError(out int errCode, out string errMsg);
+            Marshal.ReleaseComObject(payment);
+
+            _logger.LogError(
+                "Failed to create Incoming Payment for ExternalPaymentId={ExternalPaymentId}: " +
+                "DI API error {ErrCode}: {ErrMsg}",
+                request.ExternalPaymentId, errCode, errMsg);
+
+            throw new InvalidOperationException(
+                $"SAP DI API error {errCode}: {errMsg}");
+        }
+
+        int docEntry = int.Parse(_company!.GetNewObjectKey());
+
+        // Retrieve created payment to get DocNum
+        payment.GetByKey(docEntry);
+        int docNum = payment.DocNum;
+
+        Marshal.ReleaseComObject(payment);
+
+        _logger.LogInformation(
+            "✅ Incoming Payment created successfully — DocEntry={DocEntry}, DocNum={DocNum}, " +
+            "ExternalPaymentId={ExternalPaymentId}, CustomerCode={CustomerCode}, " +
+            "PaymentTotal={PaymentTotal}, LineCount={LineCount}",
+            docEntry,
+            docNum,
+            request.ExternalPaymentId,
+            request.CustomerCode,
+            request.PaymentTotal,
+            request.Lines.Count);
+
+        return new SapIncomingPaymentResponse
+        {
+            DocEntry = docEntry,
+            DocNum = docNum,
+            ExternalPaymentId = request.ExternalPaymentId,
+            OdooPaymentId = request.OdooPaymentId,
+            TotalApplied = request.Lines.Sum(l => l.AppliedAmount)
+        };
     }
 
     // ------------------------------------------------------------------
@@ -1013,6 +1021,15 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             EnsureConnected();
 
+            // When invoice allocation lines are provided, SAP B1 does not allow
+            // modifying RCT2 rows on an existing payment.  The only option is to
+            // cancel the original "Payment on Account" and create a new payment
+            // with the correct invoice allocations.
+            if (request.Lines is { Count: > 0 })
+            {
+                return ReallocateIncomingPaymentCore(docEntry, request);
+            }
+
             _logger.LogInformation(
                 "Updating SAP Incoming Payment — DocEntry={DocEntry}, ExternalPaymentId={ExternalPaymentId}",
                 docEntry, request.ExternalPaymentId);
@@ -1070,6 +1087,71 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             _lock.Release();
         }
+    }
+
+    /// <summary>
+    /// Cancels an existing Incoming Payment and creates a new one with invoice
+    /// allocations.  SAP B1 does not allow modifying the RCT2 (invoice allocation)
+    /// table on an existing payment, so this cancel-and-recreate approach is the
+    /// standard way to add allocations after the fact.
+    /// <para>
+    /// Caller must hold <see cref="_lock"/> and call <see cref="EnsureConnected"/> first.
+    /// </para>
+    /// </summary>
+    private SapIncomingPaymentResponse ReallocateIncomingPaymentCore(
+        int originalDocEntry, SapIncomingPaymentRequest request)
+    {
+        _logger.LogInformation(
+            "Reallocating SAP Incoming Payment — cancelling DocEntry={DocEntry} " +
+            "and recreating with {LineCount} invoice allocation(s)",
+            originalDocEntry, request.Lines.Count);
+
+        // Step 1: Cancel the existing "Payment on Account"
+        var payment = (Payments)_company!.GetBusinessObject(BoObjectTypes.oIncomingPayments);
+
+        if (!payment.GetByKey(originalDocEntry))
+        {
+            Marshal.ReleaseComObject(payment);
+            throw new InvalidOperationException(
+                $"SAP B1 Incoming Payment with DocEntry={originalDocEntry} not found.");
+        }
+
+        int cancelResult = payment.Cancel();
+
+        if (cancelResult != 0)
+        {
+            _company.GetLastError(out int errCode, out string errMsg);
+            Marshal.ReleaseComObject(payment);
+            throw new InvalidOperationException(
+                $"Failed to cancel SAP Incoming Payment DocEntry={originalDocEntry}: " +
+                $"DI API error {errCode}: {errMsg}");
+        }
+
+        Marshal.ReleaseComObject(payment);
+
+        _logger.LogInformation(
+            "Cancelled SAP Incoming Payment DocEntry={DocEntry} — " +
+            "creating replacement with invoice allocations",
+            originalDocEntry);
+
+        // Step 2: Create a new payment with the full payload (including allocations)
+        var newResponse = CreateIncomingPaymentCore(request);
+
+        // Tag the response so the caller knows a reallocation occurred
+        newResponse.Reallocated = true;
+        newResponse.CancelledDocEntry = originalDocEntry;
+
+        _logger.LogInformation(
+            "✅ Payment reallocation complete — old DocEntry={OldDocEntry} → " +
+            "new DocEntry={NewDocEntry}, DocNum={NewDocNum}, LineCount={LineCount}, " +
+            "TotalApplied={TotalApplied}",
+            originalDocEntry,
+            newResponse.DocEntry,
+            newResponse.DocNum,
+            request.Lines.Count,
+            newResponse.TotalApplied);
+
+        return newResponse;
     }
 
     /// <summary>
