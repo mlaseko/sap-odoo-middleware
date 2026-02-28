@@ -1301,6 +1301,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         if (!string.IsNullOrEmpty(request.Currency))
             creditMemo.DocCurrency = request.Currency;
 
+        // When created as standalone (base invoice was closed), add a remark
+        // so SAP users can trace it back to the original invoice manually.
+        if (!useCopyFrom && request.SapBaseInvoiceDocEntry.HasValue)
+        {
+            creditMemo.Comments = $"Based on AR Invoice DocEntry {request.SapBaseInvoiceDocEntry.Value} " +
+                                  "(standalone — base invoice was closed)";
+        }
+
         // UDFs
         TrySetUserField(creditMemo.UserFields, "U_Odoo_Invoice_ID", request.ExternalCreditMemoId, "Credit Memo header");
 
