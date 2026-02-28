@@ -817,8 +817,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 request.ExternalPaymentId, request.UOdooSoId, request.ExternalInvoiceId,
                 syncDate, SyncDirectionOdooToSap);
 
-            // DocTotal must be set explicitly so SAP posts the payment amount
-            payment.DocTotal = request.PaymentTotal;
+            // SAP calculates DocTotal from CashSum / TransferSum / CheckSum,
+            // so we only set the appropriate payment-method amount below.
 
             // Cash vs bank/transfer account
             if (request.IsCashPayment)
