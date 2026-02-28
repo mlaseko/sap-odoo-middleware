@@ -44,6 +44,28 @@ public interface ISapB1Service
     Task<SapIncomingPaymentResponse> UpdateIncomingPaymentAsync(int docEntry, SapIncomingPaymentRequest request);
 
     /// <summary>
+    /// Creates an AR Credit Memo (ORIN) in SAP B1 via DI API.
+    /// Optionally copies from the original AR Invoice (OINV) to maintain the document chain.
+    /// </summary>
+    Task<SapCreditMemoResponse> CreateCreditMemoAsync(SapCreditMemoRequest request);
+
+    /// <summary>
+    /// Updates UDF fields on an existing AR Credit Memo (ORIN) in SAP B1 by DocEntry.
+    /// </summary>
+    Task<SapCreditMemoResponse> UpdateCreditMemoAsync(int docEntry, SapCreditMemoRequest request);
+
+    /// <summary>
+    /// Creates a Goods Return (ORDN) in SAP B1 via DI API.
+    /// Optionally copies from the original Delivery Note (ODLN) to reverse inventory.
+    /// </summary>
+    Task<SapGoodsReturnResponse> CreateGoodsReturnAsync(SapGoodsReturnRequest request);
+
+    /// <summary>
+    /// Updates UDF fields on an existing Goods Return (ORDN) in SAP B1 by DocEntry.
+    /// </summary>
+    Task<SapGoodsReturnResponse> UpdateGoodsReturnAsync(int docEntry, SapGoodsReturnRequest request);
+
+    /// <summary>
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();
