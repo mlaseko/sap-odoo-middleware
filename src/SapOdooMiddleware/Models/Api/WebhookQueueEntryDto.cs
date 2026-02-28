@@ -15,4 +15,5 @@ public class WebhookQueueEntryDto
     public string? ResponseBody { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime? ProcessedAt { get; set; }
+    public string EventType { get; set; } = "webhook";
 }
