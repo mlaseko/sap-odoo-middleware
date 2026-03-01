@@ -104,6 +104,36 @@ public class InvoicesController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/invoices/{docEntry}/status
+    /// Returns the document status (open/closed) of an AR Invoice in SAP B1.
+    /// Used by Odoo to validate that a credit note can be posted against this invoice.
+    /// </summary>
+    [HttpGet("{docEntry:int}/status")]
+    public async Task<IActionResult> GetStatus(int docEntry)
+    {
+        _logger.LogInformation(
+            "Received AR Invoice status request — DocEntry={DocEntry}", docEntry);
+
+        try
+        {
+            var result = await _sapService.GetInvoiceStatusAsync(docEntry);
+
+            _logger.LogInformation(
+                "AR Invoice status: DocEntry={DocEntry}, DocNum={DocNum}, Status={Status}",
+                result.DocEntry, result.DocNum, result.Status);
+
+            return Ok(ApiResponse<SapInvoiceStatusResponse>.Ok(result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to get AR Invoice status for DocEntry={DocEntry}", docEntry);
+
+            return StatusCode(500, ApiResponse<SapInvoiceStatusResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// PUT /api/invoices/{docEntry}
     /// Updates UDF fields on an existing AR Invoice in SAP B1 (re-sync).
     /// </summary>
