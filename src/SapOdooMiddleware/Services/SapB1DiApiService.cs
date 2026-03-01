@@ -927,7 +927,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         Marshal.ReleaseComObject(payment);
 
         _logger.LogInformation(
-            "✅ Incoming Payment created successfully — DocEntry={DocEntry}, DocNum={DocNum}, " +
+            "Incoming Payment created successfully — DocEntry={DocEntry}, DocNum={DocNum}, " +
             "ExternalPaymentId={ExternalPaymentId}, CustomerCode={CustomerCode}, " +
             "PaymentTotal={PaymentTotal}, LineCount={LineCount}",
             docEntry,
@@ -937,6 +937,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             request.PaymentTotal,
             request.Lines.Count);
 
+        // Stamp U_Odoo_Payment_ID on each linked SAP invoice so the
+        // invoice form shows which Odoo payment settled it.
+        StampPaymentIdOnInvoices(request.Lines, request.ExternalPaymentId);
+
         return new SapIncomingPaymentResponse
         {
             DocEntry = docEntry,
@@ -945,6 +949,68 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             OdooPaymentId = request.OdooPaymentId,
             TotalApplied = request.Lines.Sum(l => l.AppliedAmount)
         };
+    }
+
+    /// <summary>
+    /// After an Incoming Payment is created, update the <c>U_Odoo_Payment_ID</c>
+    /// UDF on every AR Invoice that the payment was allocated against.
+    /// This lets SAP users see which Odoo payment settled each invoice.
+    /// Failures are logged but do not fail the payment creation.
+    /// Caller must already hold <see cref="_lock"/>.
+    /// </summary>
+    private void StampPaymentIdOnInvoices(
+        List<SapIncomingPaymentLineRequest> lines, string paymentId)
+    {
+        if (string.IsNullOrEmpty(paymentId) || lines.Count == 0)
+            return;
+
+        var invoiceDocEntries = lines
+            .Select(l => l.SapInvoiceDocEntry)
+            .Where(d => d > 0)
+            .Distinct()
+            .ToList();
+
+        foreach (var invDocEntry in invoiceDocEntries)
+        {
+            var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+            try
+            {
+                if (!invoice.GetByKey(invDocEntry))
+                {
+                    _logger.LogWarning(
+                        "Cannot stamp U_Odoo_Payment_ID on invoice DocEntry={DocEntry} — not found",
+                        invDocEntry);
+                    continue;
+                }
+
+                TrySetUserField(invoice.UserFields, "U_Odoo_Payment_ID", paymentId,
+                    $"Invoice {invDocEntry} payment stamp");
+
+                int result = invoice.Update();
+                if (result != 0)
+                {
+                    _company!.GetLastError(out int errCode, out string errMsg);
+                    _logger.LogWarning(
+                        "Failed to stamp U_Odoo_Payment_ID on invoice DocEntry={DocEntry}: {ErrCode} {ErrMsg}",
+                        invDocEntry, errCode, errMsg);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Stamped U_Odoo_Payment_ID='{PaymentId}' on invoice DocEntry={DocEntry}",
+                        paymentId, invDocEntry);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Error stamping U_Odoo_Payment_ID on invoice DocEntry={DocEntry}", invDocEntry);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(invoice);
+            }
+        }
     }
 
     // ------------------------------------------------------------------
