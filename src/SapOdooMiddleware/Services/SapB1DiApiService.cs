@@ -1536,6 +1536,59 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     // ================================
+    // DELIVERY NOTE STATUS (ODLN)
+    // ================================
+
+    public async Task<SapDeliveryStatusResponse> GetDeliveryStatusAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Checking Delivery Note status — DocEntry={DocEntry}", docEntry);
+
+            var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+
+            try
+            {
+                if (!delivery.GetByKey(docEntry))
+                {
+                    Marshal.ReleaseComObject(delivery);
+                    throw new InvalidOperationException(
+                        $"SAP B1 Delivery Note with DocEntry={docEntry} not found.");
+                }
+
+                string status = delivery.DocumentStatus == BoStatus.bost_Open ? "open" : "closed";
+                int docNum = delivery.DocNum;
+
+                Marshal.ReleaseComObject(delivery);
+
+                _logger.LogInformation(
+                    "Delivery Note status: DocEntry={DocEntry}, DocNum={DocNum}, Status={Status}",
+                    docEntry, docNum, status);
+
+                return new SapDeliveryStatusResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = docNum,
+                    Status = status
+                };
+            }
+            catch
+            {
+                Marshal.ReleaseComObject(delivery);
+                throw;
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ================================
     // GOODS RETURN (ORDN)
     // ================================
 
@@ -1552,6 +1605,38 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 request.ExternalReturnId,
                 request.CustomerCode,
                 request.Lines.Count);
+
+            // ── Pre-validate: ensure base delivery note(s) are open ──
+            var baseDocEntries = request.Lines
+                .Where(l => l.BaseDeliveryDocEntry.HasValue)
+                .Select(l => l.BaseDeliveryDocEntry!.Value)
+                .Distinct()
+                .ToList();
+
+            foreach (var baseDocEntry in baseDocEntries)
+            {
+                var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+                try
+                {
+                    if (delivery.GetByKey(baseDocEntry))
+                    {
+                        if (delivery.DocumentStatus != BoStatus.bost_Open)
+                        {
+                            int closedDocNum = delivery.DocNum;
+                            Marshal.ReleaseComObject(delivery);
+                            throw new InvalidOperationException(
+                                $"SAP B1 Delivery Note DocEntry={baseDocEntry} (DocNum={closedDocNum}) " +
+                                "is closed. Cannot create a Goods Return against a closed delivery — " +
+                                "open the delivery in SAP B1 first.");
+                        }
+                    }
+                    // If delivery not found, let SAP DI API handle the error naturally
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(delivery);
+                }
+            }
 
             var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
 

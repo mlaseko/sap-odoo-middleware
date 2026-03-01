@@ -1,24 +1,61 @@
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Models.Api;
 using SapOdooMiddleware.Models.Odoo;
+using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services;
 
 namespace SapOdooMiddleware.Controllers;
 
 /// <summary>
 /// Receives delivery confirmations from SAP B1 and updates Odoo stock.picking.
+/// Also provides delivery status lookups for goods-return validation.
 /// </summary>
 [ApiController]
 [Route("api/deliveries")]
 public class DeliveriesController : ControllerBase
 {
+    private readonly ISapB1Service _sapService;
     private readonly IOdooService _odooService;
     private readonly ILogger<DeliveriesController> _logger;
 
-    public DeliveriesController(IOdooService odooService, ILogger<DeliveriesController> logger)
+    public DeliveriesController(
+        ISapB1Service sapService,
+        IOdooService odooService,
+        ILogger<DeliveriesController> logger)
     {
+        _sapService = sapService;
         _odooService = odooService;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// GET /api/deliveries/{docEntry}/status
+    /// Returns the document status (open/closed) of a Delivery Note (ODLN) in SAP B1.
+    /// Used by Odoo to validate that a goods return can be created against this delivery.
+    /// </summary>
+    [HttpGet("{docEntry:int}/status")]
+    public async Task<IActionResult> GetStatus(int docEntry)
+    {
+        _logger.LogInformation(
+            "Received Delivery Note status request — DocEntry={DocEntry}", docEntry);
+
+        try
+        {
+            var result = await _sapService.GetDeliveryStatusAsync(docEntry);
+
+            _logger.LogInformation(
+                "Delivery Note status: DocEntry={DocEntry}, DocNum={DocNum}, Status={Status}",
+                result.DocEntry, result.DocNum, result.Status);
+
+            return Ok(ApiResponse<SapDeliveryStatusResponse>.Ok(result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to get Delivery Note status for DocEntry={DocEntry}", docEntry);
+
+            return StatusCode(500, ApiResponse<SapDeliveryStatusResponse>.Fail(ex.Message));
+        }
     }
 
     /// <summary>
