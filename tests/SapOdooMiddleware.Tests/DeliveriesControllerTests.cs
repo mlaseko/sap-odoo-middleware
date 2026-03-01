@@ -10,13 +10,14 @@ namespace SapOdooMiddleware.Tests;
 
 public class DeliveriesControllerTests
 {
+    private readonly Mock<ISapB1Service> _sapServiceMock = new();
     private readonly Mock<IOdooService> _odooServiceMock = new();
     private readonly Mock<ILogger<DeliveriesController>> _loggerMock = new();
     private readonly DeliveriesController _controller;
 
     public DeliveriesControllerTests()
     {
-        _controller = new DeliveriesController(_odooServiceMock.Object, _loggerMock.Object);
+        _controller = new DeliveriesController(_sapServiceMock.Object, _odooServiceMock.Object, _loggerMock.Object);
     }
 
     [Fact]
