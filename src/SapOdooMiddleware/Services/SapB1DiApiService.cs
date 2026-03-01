@@ -1213,7 +1213,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
         try
         {
-            PopulateCreditMemo(creditMemo, request, useCopyFrom);
+            PopulateCreditMemo(creditMemo, request, useCopyFrom, invoiceLineDefaults: null);
 
             int result = creditMemo.Add();
 
@@ -1230,10 +1230,15 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                         "Retrying as standalone credit memo without copy-from.",
                         request.ExternalCreditMemoId);
 
+                    // Load the base invoice to copy TaxCode and WarehouseCode
+                    // per line — these are required for standalone mode because SAP
+                    // can no longer inherit them from the copy-from chain.
+                    var invoiceLineDefaults = ReadBaseInvoiceLineDefaults(request);
+
                     Marshal.ReleaseComObject(creditMemo);
                     creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
 
-                    PopulateCreditMemo(creditMemo, request, useCopyFrom: false);
+                    PopulateCreditMemo(creditMemo, request, useCopyFrom: false, invoiceLineDefaults);
 
                     result = creditMemo.Add();
 
@@ -1285,8 +1290,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// Populates the credit memo DI API object with header, UDFs, and lines.
     /// When <paramref name="useCopyFrom"/> is false, per-line BaseType/BaseEntry/BaseLine
     /// are omitted (standalone credit memo — used when base invoice is closed).
+    /// <paramref name="invoiceLineDefaults"/> supplies TaxCode/WarehouseCode read from
+    /// the base invoice so standalone lines match the original tax determination.
     /// </summary>
-    private void PopulateCreditMemo(Documents creditMemo, SapCreditMemoRequest request, bool useCopyFrom)
+    private void PopulateCreditMemo(
+        Documents creditMemo, SapCreditMemoRequest request, bool useCopyFrom,
+        Dictionary<int, (string? TaxCode, string? WhsCode)>? invoiceLineDefaults)
     {
         // Header fields
         creditMemo.CardCode = request.CustomerCode;
@@ -1334,11 +1343,37 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (line.DiscountPercent.HasValue)
                 creditMemo.Lines.DiscountPercent = line.DiscountPercent.Value;
 
-            // Warehouse: only set when the caller supplies an explicit value.
-            // SAP auto-resolves each item's default warehouse from the Item Master,
-            // which handles both inventory and service-type items correctly.
+            // Warehouse: use caller-supplied value if present.
             if (!string.IsNullOrEmpty(line.WarehouseCode))
                 creditMemo.Lines.WarehouseCode = line.WarehouseCode;
+
+            // In standalone mode, apply TaxCode and WarehouseCode read from
+            // the base invoice so the credit memo matches the original tax
+            // determination and warehouse assignment.
+            if (!useCopyFrom && invoiceLineDefaults != null)
+            {
+                var lineNum = line.BaseInvoiceLineNum ?? i;
+                if (invoiceLineDefaults.TryGetValue(lineNum, out var defaults))
+                {
+                    if (!string.IsNullOrEmpty(defaults.TaxCode))
+                    {
+                        creditMemo.Lines.TaxCode = defaults.TaxCode;
+                        _logger.LogDebug(
+                            "Credit Memo Line[{Index}]: TaxCode={TaxCode} (from base invoice)",
+                            i, defaults.TaxCode);
+                    }
+
+                    // Only override warehouse if not already set by caller
+                    if (string.IsNullOrEmpty(line.WarehouseCode)
+                        && !string.IsNullOrEmpty(defaults.WhsCode))
+                    {
+                        creditMemo.Lines.WarehouseCode = defaults.WhsCode;
+                        _logger.LogDebug(
+                            "Credit Memo Line[{Index}]: WarehouseCode={WhsCode} (from base invoice)",
+                            i, defaults.WhsCode);
+                    }
+                }
+            }
 
             if (useCopyFrom)
             {
@@ -1370,6 +1405,54 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, CopyFrom={CopyFrom}",
                 i, line.ItemCode, line.Quantity, line.Price, useCopyFrom);
         }
+    }
+
+    /// <summary>
+    /// Reads TaxCode and WarehouseCode from each line of the base AR Invoice
+    /// so they can be applied to standalone credit memo lines.
+    /// Returns a dictionary keyed by line number (LineNum).
+    /// </summary>
+    private Dictionary<int, (string? TaxCode, string? WhsCode)> ReadBaseInvoiceLineDefaults(
+        SapCreditMemoRequest request)
+    {
+        var result = new Dictionary<int, (string? TaxCode, string? WhsCode)>();
+
+        if (!request.SapBaseInvoiceDocEntry.HasValue)
+            return result;
+
+        var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+
+        try
+        {
+            if (!invoice.GetByKey(request.SapBaseInvoiceDocEntry.Value))
+            {
+                _logger.LogWarning(
+                    "Could not load base invoice DocEntry={DocEntry} to read line defaults",
+                    request.SapBaseInvoiceDocEntry.Value);
+                return result;
+            }
+
+            int lineCount = invoice.Lines.Count;
+            for (int i = 0; i < lineCount; i++)
+            {
+                invoice.Lines.SetCurrentLine(i);
+                int lineNum = invoice.Lines.LineNum;
+                string taxCode = invoice.Lines.TaxCode;
+                string whsCode = invoice.Lines.WarehouseCode;
+
+                result[lineNum] = (taxCode, whsCode);
+
+                _logger.LogDebug(
+                    "Base Invoice DocEntry={DocEntry} Line[{LineNum}]: TaxCode={TaxCode}, WhsCode={WhsCode}",
+                    request.SapBaseInvoiceDocEntry.Value, lineNum, taxCode, whsCode);
+            }
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(invoice);
+        }
+
+        return result;
     }
 
     public async Task<SapCreditMemoResponse> UpdateCreditMemoAsync(int docEntry, SapCreditMemoRequest request)
