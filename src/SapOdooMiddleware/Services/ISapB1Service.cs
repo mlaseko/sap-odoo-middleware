@@ -44,8 +44,16 @@ public interface ISapB1Service
     Task<SapIncomingPaymentResponse> UpdateIncomingPaymentAsync(int docEntry, SapIncomingPaymentRequest request);
 
     /// <summary>
+    /// Returns the document status (open/closed) of an AR Invoice (OINV) in SAP B1.
+    /// Used to validate that a credit memo can be created against the invoice.
+    /// </summary>
+    Task<SapInvoiceStatusResponse> GetInvoiceStatusAsync(int docEntry);
+
+    /// <summary>
     /// Creates an AR Credit Memo (ORIN) in SAP B1 via DI API.
-    /// Optionally copies from the original AR Invoice (OINV) to maintain the document chain.
+    /// Copies from the original AR Invoice (OINV) to maintain the document chain.
+    /// The invoice must be open (not fully paid) — callers should verify via
+    /// <see cref="GetInvoiceStatusAsync"/> before calling this method.
     /// </summary>
     Task<SapCreditMemoResponse> CreateCreditMemoAsync(SapCreditMemoRequest request);
 
