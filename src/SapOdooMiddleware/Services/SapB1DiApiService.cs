@@ -1314,25 +1314,64 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             EnsureConnected();
 
-            bool hasCopyFrom = request.Lines.Any(l =>
-                l.BaseInvoiceDocEntry.HasValue && l.BaseInvoiceLineNum.HasValue);
+            // ── Enforce Copy-To: every line must reference the base invoice ──
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var line = request.Lines[i];
+                if (!line.BaseInvoiceDocEntry.HasValue || !line.BaseInvoiceLineNum.HasValue)
+                {
+                    throw new InvalidOperationException(
+                        $"Credit Memo line[{i}] (ItemCode={line.ItemCode}) is missing " +
+                        "BaseInvoiceDocEntry/BaseInvoiceLineNum. Credit memos must be " +
+                        "created by copying from the original AR Invoice (Copy-To).");
+                }
+            }
 
             _logger.LogInformation(
                 "Creating AR Credit Memo — ExternalCreditMemoId={ExternalCreditMemoId}, " +
                 "CustomerCode={CustomerCode}, SapBaseInvoiceDocEntry={SapBaseInvoiceDocEntry}, " +
-                "SapBaseDeliveryDocEntry={SapBaseDeliveryDocEntry}, LineCount={LineCount}, CopyFrom={CopyFrom}",
+                "SapBaseDeliveryDocEntry={SapBaseDeliveryDocEntry}, LineCount={LineCount}",
                 request.ExternalCreditMemoId,
                 request.CustomerCode,
                 request.SapBaseInvoiceDocEntry,
                 request.SapBaseDeliveryDocEntry,
-                request.Lines.Count,
-                hasCopyFrom);
+                request.Lines.Count);
+
+            // ── Pre-validate: ensure base invoice(s) are open ──
+            var baseInvoiceDocEntries = request.Lines
+                .Select(l => l.BaseInvoiceDocEntry!.Value)
+                .Distinct()
+                .ToList();
+
+            foreach (var baseDocEntry in baseInvoiceDocEntries)
+            {
+                var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+                try
+                {
+                    if (invoice.GetByKey(baseDocEntry))
+                    {
+                        if (invoice.DocumentStatus != BoStatus.bost_Open)
+                        {
+                            int closedDocNum = invoice.DocNum;
+                            throw new InvalidOperationException(
+                                $"SAP B1 AR Invoice DocEntry={baseDocEntry} (DocNum={closedDocNum}) " +
+                                "is closed. Cannot create a Credit Memo against a closed invoice — " +
+                                "open the invoice in SAP B1 first.");
+                        }
+                    }
+                    // If invoice not found, let SAP DI API handle the error naturally
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(invoice);
+                }
+            }
 
             var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
 
             try
             {
-                PopulateCreditMemo(creditMemo, request, hasCopyFrom);
+                PopulateCreditMemo(creditMemo, request);
 
                 int result = creditMemo.Add();
 
@@ -1356,9 +1395,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 Marshal.ReleaseComObject(creditMemo);
 
                 _logger.LogInformation(
-                    "AR Credit Memo created: DocEntry={DocEntry}, DocNum={DocNum}, " +
-                    "ExternalCreditMemoId={ExternalCreditMemoId}, LineCount={LineCount}, CopyFrom={CopyFrom}",
-                    docEntry, docNum, request.ExternalCreditMemoId, request.Lines.Count, hasCopyFrom);
+                    "AR Credit Memo created (Copy-To): DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "ExternalCreditMemoId={ExternalCreditMemoId}, LineCount={LineCount}",
+                    docEntry, docNum, request.ExternalCreditMemoId, request.Lines.Count);
 
                 return new SapCreditMemoResponse
                 {
@@ -1382,10 +1421,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
     /// <summary>
     /// Populates the credit memo DI API object with header, UDFs, and lines.
-    /// The base invoice must be open (verified by the caller via GetInvoiceStatusAsync)
-    /// so copy-from references will always succeed.
+    /// Every line is created by Copy-To from the original AR Invoice (BaseType=13).
+    /// The base invoice must be open (validated by CreateCreditMemoAsync before this call).
     /// </summary>
-    private void PopulateCreditMemo(Documents creditMemo, SapCreditMemoRequest request, bool useCopyFrom)
+    private void PopulateCreditMemo(Documents creditMemo, SapCreditMemoRequest request)
     {
         // Header fields
         creditMemo.CardCode = request.CustomerCode;
@@ -1410,7 +1449,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync", syncDate, "Credit Memo header");
         TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Credit Memo header");
 
-        // Lines
+        // Lines — always Copy-To from original invoice
         for (int i = 0; i < request.Lines.Count; i++)
         {
             if (i > 0)
@@ -1431,35 +1470,29 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (!string.IsNullOrEmpty(line.WarehouseCode))
                 creditMemo.Lines.WarehouseCode = line.WarehouseCode;
 
-            if (useCopyFrom)
+            // Copy-To from AR Invoice (BaseType=13) — mandatory
+            creditMemo.Lines.BaseType = (int)BoObjectTypes.oInvoices;  // 13
+            creditMemo.Lines.BaseEntry = line.BaseInvoiceDocEntry!.Value;
+            creditMemo.Lines.BaseLine = line.BaseInvoiceLineNum!.Value;
+
+            _logger.LogDebug(
+                "Credit Memo Line[{Index}]: BaseType=oInvoices, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                i, line.BaseInvoiceDocEntry.Value, line.BaseInvoiceLineNum.Value);
+
+            // ActualBaseEntry/ActualBaseLine for delivery chain (SO → ODLN → OINV)
+            if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
             {
-                // Copy-from AR Invoice (BaseType=13)
-                if (line.BaseInvoiceDocEntry.HasValue && line.BaseInvoiceLineNum.HasValue)
-                {
-                    creditMemo.Lines.BaseType = (int)BoObjectTypes.oInvoices;  // 13
-                    creditMemo.Lines.BaseEntry = line.BaseInvoiceDocEntry.Value;
-                    creditMemo.Lines.BaseLine = line.BaseInvoiceLineNum.Value;
+                creditMemo.Lines.ActualBaseEntry = line.BaseDeliveryDocEntry.Value;
+                creditMemo.Lines.ActualBaseLine = line.BaseDeliveryLineNum.Value;
 
-                    _logger.LogDebug(
-                        "Credit Memo Line[{Index}]: BaseType=oInvoices, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
-                        i, line.BaseInvoiceDocEntry.Value, line.BaseInvoiceLineNum.Value);
-                }
-
-                // ActualBaseEntry/ActualBaseLine for delivery chain
-                if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
-                {
-                    creditMemo.Lines.ActualBaseEntry = line.BaseDeliveryDocEntry.Value;
-                    creditMemo.Lines.ActualBaseLine = line.BaseDeliveryLineNum.Value;
-
-                    _logger.LogDebug(
-                        "Credit Memo Line[{Index}]: ActualBaseEntry={ActualBaseEntry}, ActualBaseLine={ActualBaseLine}",
-                        i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
-                }
+                _logger.LogDebug(
+                    "Credit Memo Line[{Index}]: ActualBaseEntry={ActualBaseEntry}, ActualBaseLine={ActualBaseLine}",
+                    i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
             }
 
             _logger.LogDebug(
-                "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, CopyFrom={CopyFrom}",
-                i, line.ItemCode, line.Quantity, line.Price, useCopyFrom);
+                "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
+                i, line.ItemCode, line.Quantity, line.Price);
         }
     }
 
@@ -1599,6 +1632,19 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             EnsureConnected();
 
+            // ── Enforce Copy-To: every line must reference the base delivery ──
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var ln = request.Lines[i];
+                if (!ln.BaseDeliveryDocEntry.HasValue || !ln.BaseDeliveryLineNum.HasValue)
+                {
+                    throw new InvalidOperationException(
+                        $"Goods Return line[{i}] (ItemCode={ln.ItemCode}) is missing " +
+                        "BaseDeliveryDocEntry/BaseDeliveryLineNum. Goods returns must be " +
+                        "created by copying from the original Delivery Note (Copy-To).");
+                }
+            }
+
             _logger.LogInformation(
                 "Creating Goods Return — ExternalReturnId={ExternalReturnId}, " +
                 "CustomerCode={CustomerCode}, LineCount={LineCount}",
@@ -1608,7 +1654,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             // ── Pre-validate: ensure base delivery note(s) are open ──
             var baseDocEntries = request.Lines
-                .Where(l => l.BaseDeliveryDocEntry.HasValue)
                 .Select(l => l.BaseDeliveryDocEntry!.Value)
                 .Distinct()
                 .ToList();
@@ -1670,17 +1715,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 if (!string.IsNullOrEmpty(line.WarehouseCode))
                     goodsReturn.Lines.WarehouseCode = line.WarehouseCode;
 
-                // Copy-from Delivery Note (BaseType=15)
-                if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
-                {
-                    goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;  // 15
-                    goodsReturn.Lines.BaseEntry = line.BaseDeliveryDocEntry.Value;
-                    goodsReturn.Lines.BaseLine = line.BaseDeliveryLineNum.Value;
+                // Copy-To from Delivery Note (BaseType=15) — mandatory
+                goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;  // 15
+                goodsReturn.Lines.BaseEntry = line.BaseDeliveryDocEntry!.Value;
+                goodsReturn.Lines.BaseLine = line.BaseDeliveryLineNum!.Value;
 
-                    _logger.LogDebug(
-                        "Goods Return Line[{Index}]: BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
-                        i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
-                }
+                _logger.LogDebug(
+                    "Goods Return Line[{Index}]: BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                    i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
 
                 _logger.LogDebug(
                     "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Warehouse={Warehouse}",

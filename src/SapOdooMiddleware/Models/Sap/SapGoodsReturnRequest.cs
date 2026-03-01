@@ -4,9 +4,11 @@ namespace SapOdooMiddleware.Models.Sap;
 
 /// <summary>
 /// Request payload sent from Odoo to create a Goods Return (ORDN) in SAP B1.
-/// The goods return reverses a Delivery Note (ODLN) to return items to inventory.
-/// When <see cref="Lines"/> contain <see cref="SapGoodsReturnLineRequest.BaseDeliveryDocEntry"/>,
-/// the return is created by copying from the original delivery.
+/// The goods return reverses a Delivery Note (ODLN) using the SAP "Copy-To" mechanism.
+/// Every line <b>must</b> reference the original Delivery Note via
+/// <see cref="SapGoodsReturnLineRequest.BaseDeliveryDocEntry"/> and
+/// <see cref="SapGoodsReturnLineRequest.BaseDeliveryLineNum"/> to maintain the
+/// full document chain.  The base delivery must be open (not closed/cancelled).
 /// </summary>
 public class SapGoodsReturnRequest
 {
@@ -52,9 +54,9 @@ public class SapGoodsReturnRequest
 }
 
 /// <summary>
-/// Goods return line item.  When <see cref="BaseDeliveryDocEntry"/> and
-/// <see cref="BaseDeliveryLineNum"/> are provided, the line is created by
-/// copying from the original Delivery Note line (DLN1).
+/// Goods return line item.  <see cref="BaseDeliveryDocEntry"/> and
+/// <see cref="BaseDeliveryLineNum"/> are <b>required</b> — every line is created
+/// by Copy-To from the original Delivery Note line (DLN1), maintaining the document chain.
 /// </summary>
 public class SapGoodsReturnLineRequest
 {
@@ -70,14 +72,16 @@ public class SapGoodsReturnLineRequest
     public string? WarehouseCode { get; set; }
 
     /// <summary>
-    /// Original Delivery Note DocEntry for copy-from per line.
+    /// Original Delivery Note DocEntry for Copy-To per line (required).
     /// Maps to RDN1 BaseEntry with BaseType=15 (Delivery Note).
     /// </summary>
+    [Required]
     public int? BaseDeliveryDocEntry { get; set; }
 
     /// <summary>
-    /// Original Delivery Note line number for copy-from per line.
+    /// Original Delivery Note line number for Copy-To per line (required).
     /// Maps to RDN1 BaseLine.
     /// </summary>
+    [Required]
     public int? BaseDeliveryLineNum { get; set; }
 }

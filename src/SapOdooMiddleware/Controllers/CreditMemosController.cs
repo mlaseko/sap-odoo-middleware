@@ -31,8 +31,9 @@ public class CreditMemosController : ControllerBase
 
     /// <summary>
     /// POST /api/credit-memos
-    /// Creates an AR Credit Memo (ORIN) in SAP B1, optionally by copying from the
-    /// original AR Invoice (OINV).
+    /// Creates an AR Credit Memo (ORIN) in SAP B1 by Copy-To from the original
+    /// AR Invoice (OINV).  Every line must reference the base invoice.
+    /// The base invoice must be open.
     /// </summary>
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] SapCreditMemoRequest request)
