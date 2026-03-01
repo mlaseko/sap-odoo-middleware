@@ -373,6 +373,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     $"SAP B1 Sales Order with DocEntry={docEntry} not found.");
             }
 
+            // Guard: document must be open for updates
+            if (order.DocumentStatus != BoStatus.bost_Open)
+            {
+                int closedDocNum = order.DocNum;
+                Marshal.ReleaseComObject(order);
+                throw new InvalidOperationException(
+                    $"SAP B1 Sales Order DocEntry={docEntry} (DocNum={closedDocNum}) is closed. " +
+                    "Cannot update a closed document — open it in SAP B1 first.");
+            }
+
             int docNum = order.DocNum;
 
             TrySetUserField(order.UserFields, "U_Odoo_SO_ID", request.ResolvedSoId, "SO header update");
@@ -1037,6 +1047,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     $"SAP B1 AR Invoice with DocEntry={docEntry} not found.");
             }
 
+            // Guard: document must be open for updates
+            if (invoice.DocumentStatus != BoStatus.bost_Open)
+            {
+                int closedDocNum = invoice.DocNum;
+                Marshal.ReleaseComObject(invoice);
+                throw new InvalidOperationException(
+                    $"SAP B1 AR Invoice DocEntry={docEntry} (DocNum={closedDocNum}) is closed. " +
+                    "Cannot update a closed document — open it in SAP B1 first.");
+            }
+
             int docNum = invoice.DocNum;
 
             // Refresh UDFs
@@ -1107,6 +1127,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 Marshal.ReleaseComObject(payment);
                 throw new InvalidOperationException(
                     $"SAP B1 Incoming Payment with DocEntry={docEntry} not found.");
+            }
+
+            // Guard: cancelled payments cannot be updated
+            if (payment.Cancelled == BoYesNoEnum.tYES)
+            {
+                int cancelledDocNum = payment.DocNum;
+                Marshal.ReleaseComObject(payment);
+                throw new InvalidOperationException(
+                    $"SAP B1 Incoming Payment DocEntry={docEntry} (DocNum={cancelledDocNum}) is cancelled. " +
+                    "Cannot update a cancelled payment.");
             }
 
             int docNum = payment.DocNum;
@@ -1453,6 +1483,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     $"SAP B1 AR Credit Memo with DocEntry={docEntry} not found.");
             }
 
+            // Guard: document must be open for updates
+            if (creditMemo.DocumentStatus != BoStatus.bost_Open)
+            {
+                int closedDocNum = creditMemo.DocNum;
+                Marshal.ReleaseComObject(creditMemo);
+                throw new InvalidOperationException(
+                    $"SAP B1 AR Credit Memo DocEntry={docEntry} (DocNum={closedDocNum}) is closed. " +
+                    "Cannot update a closed document — open it in SAP B1 first.");
+            }
+
             int docNum = creditMemo.DocNum;
 
             // Refresh UDFs
@@ -1621,6 +1661,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 Marshal.ReleaseComObject(goodsReturn);
                 throw new InvalidOperationException(
                     $"SAP B1 Goods Return with DocEntry={docEntry} not found.");
+            }
+
+            // Guard: document must be open for updates
+            if (goodsReturn.DocumentStatus != BoStatus.bost_Open)
+            {
+                int closedDocNum = goodsReturn.DocNum;
+                Marshal.ReleaseComObject(goodsReturn);
+                throw new InvalidOperationException(
+                    $"SAP B1 Goods Return DocEntry={docEntry} (DocNum={closedDocNum}) is closed. " +
+                    "Cannot update a closed document — open it in SAP B1 first.");
             }
 
             int docNum = goodsReturn.DocNum;
