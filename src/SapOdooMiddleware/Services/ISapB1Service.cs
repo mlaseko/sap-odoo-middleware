@@ -63,8 +63,16 @@ public interface ISapB1Service
     Task<SapCreditMemoResponse> UpdateCreditMemoAsync(int docEntry, SapCreditMemoRequest request);
 
     /// <summary>
+    /// Returns the document status (open/closed) of a Delivery Note (ODLN) in SAP B1.
+    /// Used to validate that a goods return can be created against the delivery.
+    /// </summary>
+    Task<SapDeliveryStatusResponse> GetDeliveryStatusAsync(int docEntry);
+
+    /// <summary>
     /// Creates a Goods Return (ORDN) in SAP B1 via DI API.
     /// Optionally copies from the original Delivery Note (ODLN) to reverse inventory.
+    /// The base delivery must be open — callers should verify via
+    /// <see cref="GetDeliveryStatusAsync"/> before calling this method.
     /// </summary>
     Task<SapGoodsReturnResponse> CreateGoodsReturnAsync(SapGoodsReturnRequest request);
 
