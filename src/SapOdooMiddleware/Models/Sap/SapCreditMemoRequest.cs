@@ -4,9 +4,11 @@ namespace SapOdooMiddleware.Models.Sap;
 
 /// <summary>
 /// Request payload sent from Odoo to create an AR Credit Memo (ORIN) in SAP B1.
-/// The credit memo reverses an AR Invoice.  When <see cref="SapBaseInvoiceDocEntry"/>
-/// is provided, the ORIN is created by copying from the original OINV, preserving
-/// the document chain.
+/// The credit memo reverses an AR Invoice using the SAP "Copy-To" mechanism.
+/// Every line <b>must</b> reference the original AR Invoice via
+/// <see cref="SapCreditMemoLineRequest.BaseInvoiceDocEntry"/> and
+/// <see cref="SapCreditMemoLineRequest.BaseInvoiceLineNum"/> to maintain the
+/// full document chain.  The base invoice must be open (not closed/cancelled).
 /// </summary>
 public class SapCreditMemoRequest
 {
@@ -87,9 +89,9 @@ public class SapCreditMemoRequest
 }
 
 /// <summary>
-/// Credit memo line item.  When <see cref="BaseInvoiceDocEntry"/> and
-/// <see cref="BaseInvoiceLineNum"/> are provided, the line is created by
-/// copying from the original AR Invoice line (INV1).
+/// Credit memo line item.  <see cref="BaseInvoiceDocEntry"/> and
+/// <see cref="BaseInvoiceLineNum"/> are <b>required</b> — every line is created
+/// by Copy-To from the original AR Invoice line (INV1), maintaining the document chain.
 /// </summary>
 public class SapCreditMemoLineRequest
 {
@@ -114,15 +116,17 @@ public class SapCreditMemoLineRequest
     public string? WarehouseCode { get; set; }
 
     /// <summary>
-    /// Original AR Invoice DocEntry for copy-from per line.
+    /// Original AR Invoice DocEntry for Copy-To per line (required).
     /// Maps to RIN1 BaseEntry with BaseType=13 (AR Invoice).
     /// </summary>
+    [Required]
     public int? BaseInvoiceDocEntry { get; set; }
 
     /// <summary>
-    /// Original AR Invoice line number for copy-from per line.
+    /// Original AR Invoice line number for Copy-To per line (required).
     /// Maps to RIN1 BaseLine.
     /// </summary>
+    [Required]
     public int? BaseInvoiceLineNum { get; set; }
 
     /// <summary>

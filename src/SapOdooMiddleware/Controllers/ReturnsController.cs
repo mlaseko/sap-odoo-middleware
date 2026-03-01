@@ -31,8 +31,9 @@ public class ReturnsController : ControllerBase
 
     /// <summary>
     /// POST /api/returns
-    /// Creates a Goods Return (ORDN) in SAP B1, optionally by copying from the
-    /// original Delivery Note (ODLN).
+    /// Creates a Goods Return (ORDN) in SAP B1 by Copy-To from the original
+    /// Delivery Note (ODLN).  Every line must reference the base delivery.
+    /// The base delivery must be open.
     /// </summary>
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] SapGoodsReturnRequest request)

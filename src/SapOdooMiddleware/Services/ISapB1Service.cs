@@ -50,10 +50,10 @@ public interface ISapB1Service
     Task<SapInvoiceStatusResponse> GetInvoiceStatusAsync(int docEntry);
 
     /// <summary>
-    /// Creates an AR Credit Memo (ORIN) in SAP B1 via DI API.
-    /// Copies from the original AR Invoice (OINV) to maintain the document chain.
-    /// The invoice must be open (not fully paid) — callers should verify via
-    /// <see cref="GetInvoiceStatusAsync"/> before calling this method.
+    /// Creates an AR Credit Memo (ORIN) in SAP B1 via DI API using Copy-To from
+    /// the original AR Invoice (OINV).  Every line must carry BaseInvoiceDocEntry
+    /// and BaseInvoiceLineNum.  The service validates that the base invoice is open
+    /// before attempting creation.
     /// </summary>
     Task<SapCreditMemoResponse> CreateCreditMemoAsync(SapCreditMemoRequest request);
 
@@ -69,10 +69,10 @@ public interface ISapB1Service
     Task<SapDeliveryStatusResponse> GetDeliveryStatusAsync(int docEntry);
 
     /// <summary>
-    /// Creates a Goods Return (ORDN) in SAP B1 via DI API.
-    /// Optionally copies from the original Delivery Note (ODLN) to reverse inventory.
-    /// The base delivery must be open — callers should verify via
-    /// <see cref="GetDeliveryStatusAsync"/> before calling this method.
+    /// Creates a Goods Return (ORDN) in SAP B1 via DI API using Copy-To from
+    /// the original Delivery Note (ODLN).  Every line must carry BaseDeliveryDocEntry
+    /// and BaseDeliveryLineNum.  The service validates that the base delivery is open
+    /// before attempting creation.
     /// </summary>
     Task<SapGoodsReturnResponse> CreateGoodsReturnAsync(SapGoodsReturnRequest request);
 
