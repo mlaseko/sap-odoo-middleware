@@ -1711,8 +1711,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 goodsReturn.Lines.ItemCode = line.ItemCode;
                 goodsReturn.Lines.Quantity = line.Quantity;
 
-                if (!string.IsNullOrEmpty(line.WarehouseCode))
-                    goodsReturn.Lines.WarehouseCode = line.WarehouseCode;
+                // WarehouseCode is NOT set — Copy-To from the delivery note
+                // inherits the warehouse from the original delivery line.
+                // Setting it explicitly would override with a mismatched code
+                // (e.g. Odoo's "WH" vs SAP's "MainWHSE").
 
                 // Copy-To from Delivery Note (BaseType=15) — mandatory
                 goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;  // 15
