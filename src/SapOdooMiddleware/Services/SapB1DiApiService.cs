@@ -1710,7 +1710,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                             "so that the Goods Return Copy-To can proceed",
                             baseDocEntry, deliveryDocNum);
 
-                        // Re-open header and lines via Recordset (DocumentStatus is read-only in DI API)
+                        // Re-open header and lines via Recordset (DocumentStatus is read-only in DI API).
+                        // Also restore OpenQty to the original Quantity — the invoice consumed all
+                        // open quantity when it closed the delivery, but the goods return still
+                        // needs available quantity for Copy-To.  SAP will reduce OpenQty again
+                        // after the goods return is created.
                         var rs = (Recordset)_company.GetBusinessObject(BoObjectTypes.BoRecordset);
                         try
                         {
@@ -1718,7 +1722,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                                 $"UPDATE ODLN SET DocStatus = 'O' " +
                                 $"WHERE DocEntry = {baseDocEntry} AND DocStatus = 'C' AND CANCELED = 'N'");
                             rs.DoQuery(
-                                $"UPDATE DLN1 SET LineStatus = 'O' " +
+                                $"UPDATE DLN1 SET LineStatus = 'O', OpenQty = Quantity " +
                                 $"WHERE DocEntry = {baseDocEntry} AND LineStatus = 'C'");
                         }
                         finally
