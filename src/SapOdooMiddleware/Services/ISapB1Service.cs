@@ -71,8 +71,8 @@ public interface ISapB1Service
     /// <summary>
     /// Creates a Goods Return (ORDN) in SAP B1 via DI API using Copy-To from
     /// the original Delivery Note (ODLN).  Every line must carry BaseDeliveryDocEntry
-    /// and BaseDeliveryLineNum.  The service validates that the base delivery is open
-    /// before attempting creation.
+    /// and BaseDeliveryLineNum.  When <c>SapBaseInvoiceDocEntry</c> is provided,
+    /// the service validates that the related AR Invoice is open before creation.
     /// </summary>
     Task<SapGoodsReturnResponse> CreateGoodsReturnAsync(SapGoodsReturnRequest request);
 
