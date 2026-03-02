@@ -55,6 +55,10 @@ internal sealed class SapB1DiApiServiceStub : ISapB1Service
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
+    public Task<SapReturnRequestStatusResponse> GetReturnRequestStatusAsync(int docEntry) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
     public Task<SapGoodsReturnResponse> CreateGoodsReturnAsync(SapGoodsReturnRequest request) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");

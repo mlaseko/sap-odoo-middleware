@@ -69,15 +69,22 @@ public interface ISapB1Service
     Task<SapDeliveryStatusResponse> GetDeliveryStatusAsync(int docEntry);
 
     /// <summary>
-    /// Creates a Goods Return (ORDN) in SAP B1 via DI API using Copy-To from
-    /// the original Delivery Note (ODLN).  Every line must carry BaseDeliveryDocEntry
-    /// and BaseDeliveryLineNum.  When <c>SapBaseInvoiceDocEntry</c> is provided,
-    /// the service validates that the related AR Invoice is open before creation.
+    /// Returns the document status (open/closed) of a Return Request (ORRR) in SAP B1.
+    /// Odoo gates return validation on this — the picking can only be validated
+    /// once the Return Request is closed (SAP has processed the inventory adjustment).
+    /// </summary>
+    Task<SapReturnRequestStatusResponse> GetReturnRequestStatusAsync(int docEntry);
+
+    /// <summary>
+    /// Creates a Return Request (ORRR) in SAP B1 via DI API using Copy-To from
+    /// the A/R Invoice (OINV).  <c>SapBaseInvoiceDocEntry</c> is required — the
+    /// service validates that the invoice is open and resolves line numbers by
+    /// matching ItemCode.
     /// </summary>
     Task<SapGoodsReturnResponse> CreateGoodsReturnAsync(SapGoodsReturnRequest request);
 
     /// <summary>
-    /// Updates UDF fields on an existing Goods Return (ORDN) in SAP B1 by DocEntry.
+    /// Updates UDF fields on an existing Return Request (ORRR) in SAP B1 by DocEntry.
     /// </summary>
     Task<SapGoodsReturnResponse> UpdateGoodsReturnAsync(int docEntry, SapGoodsReturnRequest request);
 
