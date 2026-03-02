@@ -28,6 +28,10 @@ x86/
 ## Test results
 **/TestResults/
 
+## Secrets – never commit production credentials
+appsettings.Production.json
+appsettings.*.local.json
+
 ## OS
 .DS_Store
 Thumbs.db

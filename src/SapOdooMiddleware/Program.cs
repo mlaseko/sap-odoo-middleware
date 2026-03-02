@@ -7,6 +7,15 @@ using SapOdooMiddleware.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// --- Windows Service hosting ---
+// When installed as a Windows Service, UseWindowsService() sets the
+// content root correctly and hooks into the SCM lifecycle (start/stop).
+// When running interactively (console / dotnet run) this is a no-op.
+builder.Host.UseWindowsService(options =>
+{
+    options.ServiceName = "SapOdooMiddleware";
+});
+
 // --- Configuration ---
 builder.Services.Configure<SapB1Settings>(builder.Configuration.GetSection(SapB1Settings.SectionName));
 builder.Services.Configure<OdooSettings>(builder.Configuration.GetSection(OdooSettings.SectionName));
