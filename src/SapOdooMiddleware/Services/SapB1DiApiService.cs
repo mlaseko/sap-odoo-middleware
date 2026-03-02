@@ -1632,169 +1632,112 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             EnsureConnected();
 
-            // ── Enforce Copy-To: every line must reference the base delivery ──
-            for (int i = 0; i < request.Lines.Count; i++)
+            // ── Validate: invoice DocEntry is required for Return Request ──
+            if (!request.SapBaseInvoiceDocEntry.HasValue || request.SapBaseInvoiceDocEntry.Value <= 0)
             {
-                var ln = request.Lines[i];
-                if (!ln.BaseDeliveryDocEntry.HasValue || !ln.BaseDeliveryLineNum.HasValue)
-                {
-                    throw new InvalidOperationException(
-                        $"Goods Return line[{i}] (ItemCode={ln.ItemCode}) is missing " +
-                        "BaseDeliveryDocEntry/BaseDeliveryLineNum. Goods returns must be " +
-                        "created by copying from the original Delivery Note (Copy-To).");
-                }
+                throw new InvalidOperationException(
+                    "SapBaseInvoiceDocEntry is required. Return Requests are created " +
+                    "by Copy-To from the A/R Invoice (BaseType=13).");
             }
 
             _logger.LogInformation(
-                "Creating Goods Return — ExternalReturnId={ExternalReturnId}, " +
+                "Creating Return Request (ORRR) — ExternalReturnId={ExternalReturnId}, " +
                 "CustomerCode={CustomerCode}, SapBaseInvoiceDocEntry={SapBaseInvoiceDocEntry}, LineCount={LineCount}",
                 request.ExternalReturnId,
                 request.CustomerCode,
                 request.SapBaseInvoiceDocEntry,
                 request.Lines.Count);
 
-            // ── Pre-validate: ensure the related AR Invoice is open ──
-            // The delivery is already done (goods shipped), so its status is
-            // irrelevant.  The invoice must be open for the return flow to
-            // proceed — a closed invoice means the payment must be reversed first.
-            if (request.SapBaseInvoiceDocEntry.HasValue && request.SapBaseInvoiceDocEntry.Value > 0)
+            // ── Pre-validate: ensure the A/R Invoice is open ──
+            var baseInvoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+            var invoiceLineIndex = new Dictionary<string, int>();  // ItemCode → LineNum
+            try
             {
-                var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
-                try
+                if (!baseInvoice.GetByKey(request.SapBaseInvoiceDocEntry.Value))
                 {
-                    if (invoice.GetByKey(request.SapBaseInvoiceDocEntry.Value))
+                    throw new InvalidOperationException(
+                        $"SAP B1 A/R Invoice DocEntry={request.SapBaseInvoiceDocEntry.Value} not found.");
+                }
+
+                if (baseInvoice.DocumentStatus != BoStatus.bost_Open)
+                {
+                    int closedDocNum = baseInvoice.DocNum;
+                    throw new InvalidOperationException(
+                        $"SAP B1 A/R Invoice DocEntry={request.SapBaseInvoiceDocEntry.Value} " +
+                        $"(DocNum={closedDocNum}) is closed. Cannot create a Return Request " +
+                        "when the invoice is closed — reverse the incoming payment " +
+                        "in SAP B1 first to re-open the invoice.");
+                }
+
+                // Build ItemCode → LineNum index from the invoice for Copy-To mapping
+                for (int ln = 0; ln < baseInvoice.Lines.Count; ln++)
+                {
+                    baseInvoice.Lines.SetCurrentLine(ln);
+                    string itemCode = baseInvoice.Lines.ItemCode;
+                    // Use first occurrence if item appears on multiple lines
+                    if (!invoiceLineIndex.ContainsKey(itemCode))
                     {
-                        if (invoice.DocumentStatus != BoStatus.bost_Open)
-                        {
-                            int closedDocNum = invoice.DocNum;
-                            throw new InvalidOperationException(
-                                $"SAP B1 AR Invoice DocEntry={request.SapBaseInvoiceDocEntry.Value} " +
-                                $"(DocNum={closedDocNum}) is closed. Cannot create a Goods Return " +
-                                "when the related invoice is closed — reverse the incoming payment " +
-                                "in SAP B1 first to re-open the invoice.");
-                        }
+                        invoiceLineIndex[itemCode] = baseInvoice.Lines.LineNum;
                     }
-                    // If invoice not found, let SAP DI API handle the error naturally
                 }
-                finally
-                {
-                    Marshal.ReleaseComObject(invoice);
-                }
+
+                _logger.LogInformation(
+                    "A/R Invoice DocEntry={DocEntry} is open with {LineCount} lines",
+                    request.SapBaseInvoiceDocEntry.Value, invoiceLineIndex.Count);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(baseInvoice);
             }
 
-            // ── First attempt: Create goods return with Copy-To from Delivery ──
-            var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
+            // ── Create Return Request (ORRR) with Copy-To from Invoice ──
+            var returnRequest = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturnRequest);
 
-            SetGoodsReturnHeader(goodsReturn, request);
+            SetGoodsReturnHeader(returnRequest, request);
 
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 if (i > 0)
-                    goodsReturn.Lines.Add();
+                    returnRequest.Lines.Add();
 
                 var line = request.Lines[i];
 
-                goodsReturn.Lines.ItemCode = line.ItemCode;
-                goodsReturn.Lines.Quantity = line.Quantity;
+                returnRequest.Lines.ItemCode = line.ItemCode;
+                returnRequest.Lines.Quantity = line.Quantity;
 
-                // Copy-To from Delivery Note (BaseType=15)
-                goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;  // 15
-                goodsReturn.Lines.BaseEntry = line.BaseDeliveryDocEntry!.Value;
-                goodsReturn.Lines.BaseLine = line.BaseDeliveryLineNum!.Value;
+                // Copy-To from A/R Invoice (BaseType=13)
+                returnRequest.Lines.BaseType = (int)BoObjectTypes.oInvoices;  // 13
+                returnRequest.Lines.BaseEntry = request.SapBaseInvoiceDocEntry.Value;
 
-                _logger.LogDebug(
-                    "Goods Return Line[{Index}]: BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
-                    i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
-
-                _logger.LogDebug(
-                    "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}",
-                    i, line.ItemCode, line.Quantity);
-            }
-
-            int result = goodsReturn.Add();
-
-            // ── Fallback: if Copy-To fails (closed/consumed delivery), create standalone ──
-            if (result != 0)
-            {
-                _company!.GetLastError(out int copyToErrCode, out string copyToErrMsg);
-                Marshal.ReleaseComObject(goodsReturn);
-
-                _logger.LogWarning(
-                    "Copy-To creation failed for {ExternalReturnId}: [{ErrCode}] {ErrMsg}. " +
-                    "Falling back to standalone goods return (delivery already fully consumed).",
-                    request.ExternalReturnId, copyToErrCode, copyToErrMsg);
-
-                // Create a standalone goods return without Copy-To references.
-                // The delivery has been fully consumed by the invoice, so SAP won't
-                // allow Copy-To.  Traceability is maintained via UDFs.
-
-                // Look up warehouse codes from the original delivery lines so the
-                // standalone return uses the correct SAP warehouse.
-                var warehouseByLine = new Dictionary<int, string>();
-                var baseDeliveryDocEntry = request.Lines
-                    .FirstOrDefault(l => l.BaseDeliveryDocEntry.HasValue)?
-                    .BaseDeliveryDocEntry!.Value;
-
-                if (baseDeliveryDocEntry.HasValue)
+                // Resolve the invoice line number by matching ItemCode
+                if (invoiceLineIndex.TryGetValue(line.ItemCode, out int invoiceLineNum))
                 {
-                    var baseDelivery = (Documents)_company.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
-                    try
-                    {
-                        if (baseDelivery.GetByKey(baseDeliveryDocEntry.Value))
-                        {
-                            for (int ln = 0; ln < baseDelivery.Lines.Count; ln++)
-                            {
-                                baseDelivery.Lines.SetCurrentLine(ln);
-                                warehouseByLine[ln] = baseDelivery.Lines.WarehouseCode;
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        Marshal.ReleaseComObject(baseDelivery);
-                    }
+                    returnRequest.Lines.BaseLine = invoiceLineNum;
+                }
+                else
+                {
+                    throw new InvalidOperationException(
+                        $"Return Request line[{i}] ItemCode={line.ItemCode} not found on " +
+                        $"A/R Invoice DocEntry={request.SapBaseInvoiceDocEntry.Value}. " +
+                        "Cannot create Copy-To reference.");
                 }
 
-                goodsReturn = (Documents)_company.GetBusinessObject(BoObjectTypes.oReturns);
-
-                SetGoodsReturnHeader(goodsReturn, request);
-
-                for (int i = 0; i < request.Lines.Count; i++)
-                {
-                    if (i > 0)
-                        goodsReturn.Lines.Add();
-
-                    var line = request.Lines[i];
-
-                    goodsReturn.Lines.ItemCode = line.ItemCode;
-                    goodsReturn.Lines.Quantity = line.Quantity;
-
-                    // No BaseType/BaseEntry/BaseLine — standalone creation.
-                    // Use the warehouse from the original delivery line.
-                    if (line.BaseDeliveryLineNum.HasValue
-                        && warehouseByLine.TryGetValue(line.BaseDeliveryLineNum.Value, out var whsCode))
-                    {
-                        goodsReturn.Lines.WarehouseCode = whsCode;
-                    }
-
-                    _logger.LogDebug(
-                        "Standalone Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
-                        "Warehouse={Warehouse} (from delivery line {BaseLine})",
-                        i, line.ItemCode, line.Quantity,
-                        warehouseByLine.GetValueOrDefault(line.BaseDeliveryLineNum ?? -1, "(default)"),
-                        line.BaseDeliveryLineNum);
-                }
-
-                result = goodsReturn.Add();
+                _logger.LogDebug(
+                    "Return Request Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
+                    "BaseType=oInvoices, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                    i, line.ItemCode, line.Quantity,
+                    request.SapBaseInvoiceDocEntry.Value, invoiceLineNum);
             }
+
+            int result = returnRequest.Add();
 
             if (result != 0)
             {
                 _company!.GetLastError(out int errCode, out string errMsg);
-                Marshal.ReleaseComObject(goodsReturn);
+                Marshal.ReleaseComObject(returnRequest);
 
                 _logger.LogError(
-                    "Failed to create Goods Return for {ExternalReturnId}: DI API error {ErrCode}: {ErrMsg}",
+                    "Failed to create Return Request for {ExternalReturnId}: DI API error {ErrCode}: {ErrMsg}",
                     request.ExternalReturnId, errCode, errMsg);
 
                 throw new InvalidOperationException(
@@ -1803,13 +1746,13 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             int docEntry = int.Parse(_company!.GetNewObjectKey());
 
-            goodsReturn.GetByKey(docEntry);
-            int docNum = goodsReturn.DocNum;
+            returnRequest.GetByKey(docEntry);
+            int docNum = returnRequest.DocNum;
 
-            Marshal.ReleaseComObject(goodsReturn);
+            Marshal.ReleaseComObject(returnRequest);
 
             _logger.LogInformation(
-                "✅ Goods Return created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                "✅ Return Request created: DocEntry={DocEntry}, DocNum={DocNum}, " +
                 "ExternalReturnId={ExternalReturnId}, LineCount={LineCount}",
                 docEntry, docNum, request.ExternalReturnId, request.Lines.Count);
 
@@ -1828,24 +1771,23 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     /// <summary>
-    /// Sets header fields and UDFs on a goods return document (shared by
-    /// both the Copy-To and standalone creation paths).
+    /// Sets header fields and UDFs on a return request document.
     /// </summary>
-    private void SetGoodsReturnHeader(Documents goodsReturn, SapGoodsReturnRequest request)
+    private void SetGoodsReturnHeader(Documents returnDoc, SapGoodsReturnRequest request)
     {
-        goodsReturn.CardCode = request.CustomerCode;
+        returnDoc.CardCode = request.CustomerCode;
 
         if (request.DeliveryDate.HasValue)
-            goodsReturn.DocDate = request.DeliveryDate.Value;
+            returnDoc.DocDate = request.DeliveryDate.Value;
 
-        TrySetUserField(goodsReturn.UserFields, "U_Odoo_Delivery_ID", request.ExternalReturnId, "Goods Return header");
+        TrySetUserField(returnDoc.UserFields, "U_Odoo_Delivery_ID", request.ExternalReturnId, "Return Request header");
 
         if (!string.IsNullOrEmpty(request.UOdooSoId))
-            TrySetUserField(goodsReturn.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Goods Return header");
+            TrySetUserField(returnDoc.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Return Request header");
 
         var syncDate = DateTime.UtcNow.Date;
-        TrySetUserField(goodsReturn.UserFields, "U_Odoo_LastSync", syncDate, "Goods Return header");
-        TrySetUserField(goodsReturn.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Goods Return header");
+        TrySetUserField(returnDoc.UserFields, "U_Odoo_LastSync", syncDate, "Return Request header");
+        TrySetUserField(returnDoc.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Return Request header");
     }
 
     public async Task<SapGoodsReturnResponse> UpdateGoodsReturnAsync(int docEntry, SapGoodsReturnRequest request)
@@ -1856,10 +1798,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             EnsureConnected();
 
             _logger.LogInformation(
-                "Updating SAP Goods Return — DocEntry={DocEntry}, ExternalReturnId={ExternalReturnId}",
+                "Updating SAP Return Request — DocEntry={DocEntry}, ExternalReturnId={ExternalReturnId}",
                 docEntry, request.ExternalReturnId);
 
-            var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
+            var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturnRequest);
 
             if (!goodsReturn.GetByKey(docEntry))
             {
