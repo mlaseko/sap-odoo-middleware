@@ -1682,12 +1682,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
-            // ── Re-open closed base delivery notes for Copy-To ──────────
+            // ── Ensure base delivery notes are open with available qty for Copy-To ──
             // Deliveries are automatically "closed" by SAP once fully invoiced,
             // which is the normal state.  SAP won't allow Copy-To from a closed
-            // delivery, so we re-open them before creating the goods return.
-            // The DI API Documents.DocumentStatus is read-only, so we use a
-            // Recordset query — a well-established pattern for this scenario.
+            // delivery or one with depleted OpenQty.  We ensure the header/lines
+            // are open and OpenQty is restored before creating the goods return.
+            // This is idempotent — safe to run on retries or already-open deliveries.
             var baseDocEntries = request.Lines
                 .Select(l => l.BaseDeliveryDocEntry!.Value)
                 .Distinct()
@@ -1695,51 +1695,35 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             foreach (var baseDocEntry in baseDocEntries)
             {
-                var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+                _logger.LogInformation(
+                    "Ensuring Delivery Note DocEntry={DocEntry} is open with available " +
+                    "quantity for Goods Return Copy-To",
+                    baseDocEntry);
+
+                var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
                 try
                 {
-                    if (delivery.GetByKey(baseDocEntry)
-                        && delivery.DocumentStatus != BoStatus.bost_Open)
-                    {
-                        int deliveryDocNum = delivery.DocNum;
-                        Marshal.ReleaseComObject(delivery);
-                        delivery = null!;
+                    // Re-open header if closed (skip cancelled documents)
+                    rs.DoQuery(
+                        $"UPDATE ODLN SET DocStatus = 'O' " +
+                        $"WHERE DocEntry = {baseDocEntry} AND DocStatus = 'C' AND CANCELED = 'N'");
 
-                        _logger.LogInformation(
-                            "Re-opening closed Delivery Note DocEntry={DocEntry} (DocNum={DocNum}) " +
-                            "so that the Goods Return Copy-To can proceed",
-                            baseDocEntry, deliveryDocNum);
-
-                        // Re-open header and lines via Recordset (DocumentStatus is read-only in DI API).
-                        // Also restore OpenQty to the original Quantity — the invoice consumed all
-                        // open quantity when it closed the delivery, but the goods return still
-                        // needs available quantity for Copy-To.  SAP will reduce OpenQty again
-                        // after the goods return is created.
-                        var rs = (Recordset)_company.GetBusinessObject(BoObjectTypes.BoRecordset);
-                        try
-                        {
-                            rs.DoQuery(
-                                $"UPDATE ODLN SET DocStatus = 'O' " +
-                                $"WHERE DocEntry = {baseDocEntry} AND DocStatus = 'C' AND CANCELED = 'N'");
-                            rs.DoQuery(
-                                $"UPDATE DLN1 SET LineStatus = 'O', OpenQty = Quantity " +
-                                $"WHERE DocEntry = {baseDocEntry} AND LineStatus = 'C'");
-                        }
-                        finally
-                        {
-                            Marshal.ReleaseComObject(rs);
-                        }
-
-                        _logger.LogInformation(
-                            "Successfully re-opened Delivery Note DocEntry={DocEntry} (DocNum={DocNum})",
-                            baseDocEntry, deliveryDocNum);
-                    }
+                    // Re-open lines and restore OpenQty where it has been depleted.
+                    // The invoice consumed OpenQty when it closed the delivery, but
+                    // the goods return still needs available qty for Copy-To.
+                    // SAP will reduce OpenQty again after the goods return is created.
+                    rs.DoQuery(
+                        $"UPDATE DLN1 SET LineStatus = 'O', OpenQty = Quantity " +
+                        $"WHERE DocEntry = {baseDocEntry} AND OpenQty < Quantity");
                 }
                 finally
                 {
-                    if (delivery != null!)
-                        Marshal.ReleaseComObject(delivery);
+                    Marshal.ReleaseComObject(rs);
                 }
+
+                _logger.LogInformation(
+                    "Delivery Note DocEntry={DocEntry} is ready for Copy-To",
+                    baseDocEntry);
             }
 
             var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
