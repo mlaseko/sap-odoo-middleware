@@ -1682,69 +1682,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
-            // ── Ensure base delivery notes are open with available qty for Copy-To ──
-            // Deliveries are automatically "closed" by SAP once fully invoiced,
-            // which is the normal state.  SAP won't allow Copy-To from a closed
-            // delivery or one with depleted OpenQty.  We ensure the header/lines
-            // are open and OpenQty is restored before creating the goods return.
-            // This is idempotent — safe to run on retries or already-open deliveries.
-            var baseDocEntries = request.Lines
-                .Select(l => l.BaseDeliveryDocEntry!.Value)
-                .Distinct()
-                .ToList();
-
-            foreach (var baseDocEntry in baseDocEntries)
-            {
-                _logger.LogInformation(
-                    "Ensuring Delivery Note DocEntry={DocEntry} is open with available " +
-                    "quantity for Goods Return Copy-To",
-                    baseDocEntry);
-
-                var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
-                try
-                {
-                    // Re-open header if closed (skip cancelled documents)
-                    rs.DoQuery(
-                        $"UPDATE ODLN SET DocStatus = 'O' " +
-                        $"WHERE DocEntry = {baseDocEntry} AND DocStatus = 'C' AND CANCELED = 'N'");
-
-                    // Re-open lines and restore OpenQty where it has been depleted.
-                    // The invoice consumed OpenQty when it closed the delivery, but
-                    // the goods return still needs available qty for Copy-To.
-                    // SAP will reduce OpenQty again after the goods return is created.
-                    rs.DoQuery(
-                        $"UPDATE DLN1 SET LineStatus = 'O', OpenQty = Quantity " +
-                        $"WHERE DocEntry = {baseDocEntry} AND OpenQty < Quantity");
-                }
-                finally
-                {
-                    Marshal.ReleaseComObject(rs);
-                }
-
-                _logger.LogInformation(
-                    "Delivery Note DocEntry={DocEntry} is ready for Copy-To",
-                    baseDocEntry);
-            }
-
+            // ── First attempt: Create goods return with Copy-To from Delivery ──
             var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
 
-            // Header fields
-            goodsReturn.CardCode = request.CustomerCode;
+            SetGoodsReturnHeader(goodsReturn, request);
 
-            if (request.DeliveryDate.HasValue)
-                goodsReturn.DocDate = request.DeliveryDate.Value;
-
-            // UDFs
-            TrySetUserField(goodsReturn.UserFields, "U_Odoo_Delivery_ID", request.ExternalReturnId, "Goods Return header");
-
-            if (!string.IsNullOrEmpty(request.UOdooSoId))
-                TrySetUserField(goodsReturn.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Goods Return header");
-
-            var syncDate = DateTime.UtcNow.Date;
-            TrySetUserField(goodsReturn.UserFields, "U_Odoo_LastSync", syncDate, "Goods Return header");
-            TrySetUserField(goodsReturn.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Goods Return header");
-
-            // Lines
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 if (i > 0)
@@ -1755,12 +1697,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 goodsReturn.Lines.ItemCode = line.ItemCode;
                 goodsReturn.Lines.Quantity = line.Quantity;
 
-                // WarehouseCode is NOT set — Copy-To from the delivery note
-                // inherits the warehouse from the original delivery line.
-                // Setting it explicitly would override with a mismatched code
-                // (e.g. Odoo's "WH" vs SAP's "MainWHSE").
-
-                // Copy-To from Delivery Note (BaseType=15) — mandatory
+                // Copy-To from Delivery Note (BaseType=15)
                 goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;  // 15
                 goodsReturn.Lines.BaseEntry = line.BaseDeliveryDocEntry!.Value;
                 goodsReturn.Lines.BaseLine = line.BaseDeliveryLineNum!.Value;
@@ -1770,11 +1707,86 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
 
                 _logger.LogDebug(
-                    "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Warehouse={Warehouse}",
-                    i, line.ItemCode, line.Quantity, line.WarehouseCode);
+                    "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}",
+                    i, line.ItemCode, line.Quantity);
             }
 
             int result = goodsReturn.Add();
+
+            // ── Fallback: if Copy-To fails (closed/consumed delivery), create standalone ──
+            if (result != 0)
+            {
+                _company!.GetLastError(out int copyToErrCode, out string copyToErrMsg);
+                Marshal.ReleaseComObject(goodsReturn);
+
+                _logger.LogWarning(
+                    "Copy-To creation failed for {ExternalReturnId}: [{ErrCode}] {ErrMsg}. " +
+                    "Falling back to standalone goods return (delivery already fully consumed).",
+                    request.ExternalReturnId, copyToErrCode, copyToErrMsg);
+
+                // Create a standalone goods return without Copy-To references.
+                // The delivery has been fully consumed by the invoice, so SAP won't
+                // allow Copy-To.  Traceability is maintained via UDFs.
+
+                // Look up warehouse codes from the original delivery lines so the
+                // standalone return uses the correct SAP warehouse.
+                var warehouseByLine = new Dictionary<int, string>();
+                var baseDeliveryDocEntry = request.Lines
+                    .FirstOrDefault(l => l.BaseDeliveryDocEntry.HasValue)?
+                    .BaseDeliveryDocEntry!.Value;
+
+                if (baseDeliveryDocEntry.HasValue)
+                {
+                    var baseDelivery = (Documents)_company.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+                    try
+                    {
+                        if (baseDelivery.GetByKey(baseDeliveryDocEntry.Value))
+                        {
+                            for (int ln = 0; ln < baseDelivery.Lines.Count; ln++)
+                            {
+                                baseDelivery.Lines.SetCurrentLine(ln);
+                                warehouseByLine[ln] = baseDelivery.Lines.WarehouseCode;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(baseDelivery);
+                    }
+                }
+
+                goodsReturn = (Documents)_company.GetBusinessObject(BoObjectTypes.oReturns);
+
+                SetGoodsReturnHeader(goodsReturn, request);
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0)
+                        goodsReturn.Lines.Add();
+
+                    var line = request.Lines[i];
+
+                    goodsReturn.Lines.ItemCode = line.ItemCode;
+                    goodsReturn.Lines.Quantity = line.Quantity;
+
+                    // No BaseType/BaseEntry/BaseLine — standalone creation.
+                    // Use the warehouse from the original delivery line.
+                    if (line.BaseDeliveryLineNum.HasValue
+                        && warehouseByLine.TryGetValue(line.BaseDeliveryLineNum.Value, out var whsCode))
+                    {
+                        goodsReturn.Lines.WarehouseCode = whsCode;
+                    }
+
+                    _logger.LogDebug(
+                        "Standalone Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
+                        "Warehouse={Warehouse} (from delivery line {BaseLine})",
+                        i, line.ItemCode, line.Quantity,
+                        warehouseByLine.GetValueOrDefault(line.BaseDeliveryLineNum ?? -1, "(default)"),
+                        line.BaseDeliveryLineNum);
+                }
+
+                result = goodsReturn.Add();
+            }
 
             if (result != 0)
             {
@@ -1813,6 +1825,27 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             _lock.Release();
         }
+    }
+
+    /// <summary>
+    /// Sets header fields and UDFs on a goods return document (shared by
+    /// both the Copy-To and standalone creation paths).
+    /// </summary>
+    private void SetGoodsReturnHeader(Documents goodsReturn, SapGoodsReturnRequest request)
+    {
+        goodsReturn.CardCode = request.CustomerCode;
+
+        if (request.DeliveryDate.HasValue)
+            goodsReturn.DocDate = request.DeliveryDate.Value;
+
+        TrySetUserField(goodsReturn.UserFields, "U_Odoo_Delivery_ID", request.ExternalReturnId, "Goods Return header");
+
+        if (!string.IsNullOrEmpty(request.UOdooSoId))
+            TrySetUserField(goodsReturn.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Goods Return header");
+
+        var syncDate = DateTime.UtcNow.Date;
+        TrySetUserField(goodsReturn.UserFields, "U_Odoo_LastSync", syncDate, "Goods Return header");
+        TrySetUserField(goodsReturn.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Goods Return header");
     }
 
     public async Task<SapGoodsReturnResponse> UpdateGoodsReturnAsync(int docEntry, SapGoodsReturnRequest request)
