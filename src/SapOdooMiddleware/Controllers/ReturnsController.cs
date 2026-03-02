@@ -30,10 +30,40 @@ public class ReturnsController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/returns/{docEntry}/status
+    /// Returns the document status (open/closed) of a Return Request (ORRR) in SAP B1.
+    /// Odoo gates return validation on this — the return picking can only be validated
+    /// once the Return Request is closed in SAP (inventory adjusted).
+    /// </summary>
+    [HttpGet("{docEntry:int}/status")]
+    public async Task<IActionResult> GetStatus(int docEntry)
+    {
+        _logger.LogInformation(
+            "Received Return Request status request — DocEntry={DocEntry}", docEntry);
+
+        try
+        {
+            var result = await _sapService.GetReturnRequestStatusAsync(docEntry);
+
+            _logger.LogInformation(
+                "Return Request status: DocEntry={DocEntry}, DocNum={DocNum}, Status={Status}",
+                result.DocEntry, result.DocNum, result.Status);
+
+            return Ok(ApiResponse<SapReturnRequestStatusResponse>.Ok(result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to get Return Request status for DocEntry={DocEntry}", docEntry);
+
+            return StatusCode(500, ApiResponse<SapReturnRequestStatusResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/returns
-    /// Creates a Goods Return (ORDN) in SAP B1 by Copy-To from the original
-    /// Delivery Note (ODLN).  Every line must reference the base delivery.
-    /// The base delivery must be open.
+    /// Creates a Return Request (ORRR) in SAP B1 by Copy-To from the
+    /// A/R Invoice (OINV).  The invoice must be open.
     /// </summary>
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] SapGoodsReturnRequest request)

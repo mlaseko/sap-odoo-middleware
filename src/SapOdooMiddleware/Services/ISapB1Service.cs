@@ -69,6 +69,13 @@ public interface ISapB1Service
     Task<SapDeliveryStatusResponse> GetDeliveryStatusAsync(int docEntry);
 
     /// <summary>
+    /// Returns the document status (open/closed) of a Return Request (ORRR) in SAP B1.
+    /// Odoo gates return validation on this — the picking can only be validated
+    /// once the Return Request is closed (SAP has processed the inventory adjustment).
+    /// </summary>
+    Task<SapReturnRequestStatusResponse> GetReturnRequestStatusAsync(int docEntry);
+
+    /// <summary>
     /// Creates a Return Request (ORRR) in SAP B1 via DI API using Copy-To from
     /// the A/R Invoice (OINV).  <c>SapBaseInvoiceDocEntry</c> is required — the
     /// service validates that the invoice is open and resolves line numbers by

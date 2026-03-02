@@ -1622,8 +1622,57 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     // ================================
-    // GOODS RETURN (ORDN)
+    // RETURN REQUEST (ORRR)
     // ================================
+
+    public async Task<SapReturnRequestStatusResponse> GetReturnRequestStatusAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Checking Return Request status — DocEntry={DocEntry}", docEntry);
+
+            var returnReq = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturnRequest);
+
+            try
+            {
+                if (!returnReq.GetByKey(docEntry))
+                {
+                    Marshal.ReleaseComObject(returnReq);
+                    throw new InvalidOperationException(
+                        $"SAP B1 Return Request with DocEntry={docEntry} not found.");
+                }
+
+                string status = returnReq.DocumentStatus == BoStatus.bost_Open ? "open" : "closed";
+                int docNum = returnReq.DocNum;
+
+                Marshal.ReleaseComObject(returnReq);
+
+                _logger.LogInformation(
+                    "Return Request status: DocEntry={DocEntry}, DocNum={DocNum}, Status={Status}",
+                    docEntry, docNum, status);
+
+                return new SapReturnRequestStatusResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = docNum,
+                    Status = status
+                };
+            }
+            catch
+            {
+                Marshal.ReleaseComObject(returnReq);
+                throw;
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 
     public async Task<SapGoodsReturnResponse> CreateGoodsReturnAsync(SapGoodsReturnRequest request)
     {
