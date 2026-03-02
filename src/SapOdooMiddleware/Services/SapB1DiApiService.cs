@@ -1647,39 +1647,38 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             _logger.LogInformation(
                 "Creating Goods Return — ExternalReturnId={ExternalReturnId}, " +
-                "CustomerCode={CustomerCode}, LineCount={LineCount}",
+                "CustomerCode={CustomerCode}, SapBaseInvoiceDocEntry={SapBaseInvoiceDocEntry}, LineCount={LineCount}",
                 request.ExternalReturnId,
                 request.CustomerCode,
+                request.SapBaseInvoiceDocEntry,
                 request.Lines.Count);
 
-            // ── Pre-validate: ensure base delivery note(s) are open ──
-            var baseDocEntries = request.Lines
-                .Select(l => l.BaseDeliveryDocEntry!.Value)
-                .Distinct()
-                .ToList();
-
-            foreach (var baseDocEntry in baseDocEntries)
+            // ── Pre-validate: ensure the related AR Invoice is open ──
+            // The delivery is already done (goods shipped), so its status is
+            // irrelevant.  The invoice must be open for the return flow to
+            // proceed — a closed invoice means the payment must be reversed first.
+            if (request.SapBaseInvoiceDocEntry.HasValue && request.SapBaseInvoiceDocEntry.Value > 0)
             {
-                var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+                var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
                 try
                 {
-                    if (delivery.GetByKey(baseDocEntry))
+                    if (invoice.GetByKey(request.SapBaseInvoiceDocEntry.Value))
                     {
-                        if (delivery.DocumentStatus != BoStatus.bost_Open)
+                        if (invoice.DocumentStatus != BoStatus.bost_Open)
                         {
-                            int closedDocNum = delivery.DocNum;
-                            Marshal.ReleaseComObject(delivery);
+                            int closedDocNum = invoice.DocNum;
                             throw new InvalidOperationException(
-                                $"SAP B1 Delivery Note DocEntry={baseDocEntry} (DocNum={closedDocNum}) " +
-                                "is closed. Cannot create a Goods Return against a closed delivery — " +
-                                "open the delivery in SAP B1 first.");
+                                $"SAP B1 AR Invoice DocEntry={request.SapBaseInvoiceDocEntry.Value} " +
+                                $"(DocNum={closedDocNum}) is closed. Cannot create a Goods Return " +
+                                "when the related invoice is closed — reverse the incoming payment " +
+                                "in SAP B1 first to re-open the invoice.");
                         }
                     }
-                    // If delivery not found, let SAP DI API handle the error naturally
+                    // If invoice not found, let SAP DI API handle the error naturally
                 }
                 finally
                 {
-                    Marshal.ReleaseComObject(delivery);
+                    Marshal.ReleaseComObject(invoice);
                 }
             }
 

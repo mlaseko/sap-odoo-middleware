@@ -8,7 +8,8 @@ namespace SapOdooMiddleware.Models.Sap;
 /// Every line <b>must</b> reference the original Delivery Note via
 /// <see cref="SapGoodsReturnLineRequest.BaseDeliveryDocEntry"/> and
 /// <see cref="SapGoodsReturnLineRequest.BaseDeliveryLineNum"/> to maintain the
-/// full document chain.  The base delivery must be open (not closed/cancelled).
+/// full document chain.  The related AR Invoice must be open (not closed/cancelled)
+/// — validated via <see cref="SapBaseInvoiceDocEntry"/> when provided.
 /// </summary>
 public class SapGoodsReturnRequest
 {
@@ -34,6 +35,14 @@ public class SapGoodsReturnRequest
     /// SAP Sales Order DocEntry (ORDR.DocEntry) for traceability.
     /// </summary>
     public int? SalesOrderDocEntry { get; set; }
+
+    /// <summary>
+    /// SAP AR Invoice DocEntry (OINV.DocEntry) for the invoice linked to
+    /// this delivery.  Used to validate that the invoice is still open
+    /// before creating the goods return — a closed (fully paid) invoice
+    /// means the return flow should not proceed.
+    /// </summary>
+    public int? SapBaseInvoiceDocEntry { get; set; }
 
     /// <summary>
     /// Odoo sale.order identifier (e.g. "SO0042").
