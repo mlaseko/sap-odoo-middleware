@@ -1682,6 +1682,52 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
+            // ── Re-open closed base delivery notes for Copy-To ──────────
+            // Deliveries are automatically "closed" by SAP once fully invoiced,
+            // which is the normal state.  SAP won't allow Copy-To from a closed
+            // delivery, so we re-open them before creating the goods return.
+            var baseDocEntries = request.Lines
+                .Select(l => l.BaseDeliveryDocEntry!.Value)
+                .Distinct()
+                .ToList();
+
+            foreach (var baseDocEntry in baseDocEntries)
+            {
+                var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+                try
+                {
+                    if (delivery.GetByKey(baseDocEntry)
+                        && delivery.DocumentStatus != BoStatus.bost_Open)
+                    {
+                        int docNum = delivery.DocNum;
+                        _logger.LogInformation(
+                            "Re-opening closed Delivery Note DocEntry={DocEntry} (DocNum={DocNum}) " +
+                            "so that the Goods Return Copy-To can proceed",
+                            baseDocEntry, docNum);
+
+                        delivery.DocumentStatus = BoStatus.bost_Open;
+                        int rc = delivery.Update();
+                        if (rc != 0)
+                        {
+                            int errCode = _company.GetLastErrorCode();
+                            string errMsg = _company.GetLastErrorDescription();
+                            throw new InvalidOperationException(
+                                $"Could not re-open Delivery Note DocEntry={baseDocEntry} " +
+                                $"(DocNum={docNum}): [{errCode}] {errMsg}. " +
+                                "Please re-open it manually in SAP B1 before retrying.");
+                        }
+
+                        _logger.LogInformation(
+                            "Successfully re-opened Delivery Note DocEntry={DocEntry} (DocNum={DocNum})",
+                            baseDocEntry, docNum);
+                    }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(delivery);
+                }
+            }
+
             var goodsReturn = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
 
             // Header fields
