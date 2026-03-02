@@ -1686,6 +1686,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             // Deliveries are automatically "closed" by SAP once fully invoiced,
             // which is the normal state.  SAP won't allow Copy-To from a closed
             // delivery, so we re-open them before creating the goods return.
+            // The DI API Documents.DocumentStatus is read-only, so we use a
+            // Recordset query — a well-established pattern for this scenario.
             var baseDocEntries = request.Lines
                 .Select(l => l.BaseDeliveryDocEntry!.Value)
                 .Distinct()
@@ -1699,32 +1701,40 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     if (delivery.GetByKey(baseDocEntry)
                         && delivery.DocumentStatus != BoStatus.bost_Open)
                     {
-                        int docNum = delivery.DocNum;
+                        int deliveryDocNum = delivery.DocNum;
+                        Marshal.ReleaseComObject(delivery);
+                        delivery = null!;
+
                         _logger.LogInformation(
                             "Re-opening closed Delivery Note DocEntry={DocEntry} (DocNum={DocNum}) " +
                             "so that the Goods Return Copy-To can proceed",
-                            baseDocEntry, docNum);
+                            baseDocEntry, deliveryDocNum);
 
-                        delivery.DocumentStatus = BoStatus.bost_Open;
-                        int rc = delivery.Update();
-                        if (rc != 0)
+                        // Re-open header and lines via Recordset (DocumentStatus is read-only in DI API)
+                        var rs = (Recordset)_company.GetBusinessObject(BoObjectTypes.BoRecordset);
+                        try
                         {
-                            int errCode = _company.GetLastErrorCode();
-                            string errMsg = _company.GetLastErrorDescription();
-                            throw new InvalidOperationException(
-                                $"Could not re-open Delivery Note DocEntry={baseDocEntry} " +
-                                $"(DocNum={docNum}): [{errCode}] {errMsg}. " +
-                                "Please re-open it manually in SAP B1 before retrying.");
+                            rs.DoQuery(
+                                $"UPDATE ODLN SET DocStatus = 'O' " +
+                                $"WHERE DocEntry = {baseDocEntry} AND DocStatus = 'C' AND CANCELED = 'N'");
+                            rs.DoQuery(
+                                $"UPDATE DLN1 SET LineStatus = 'O' " +
+                                $"WHERE DocEntry = {baseDocEntry} AND LineStatus = 'C'");
+                        }
+                        finally
+                        {
+                            Marshal.ReleaseComObject(rs);
                         }
 
                         _logger.LogInformation(
                             "Successfully re-opened Delivery Note DocEntry={DocEntry} (DocNum={DocNum})",
-                            baseDocEntry, docNum);
+                            baseDocEntry, deliveryDocNum);
                     }
                 }
                 finally
                 {
-                    Marshal.ReleaseComObject(delivery);
+                    if (delivery != null!)
+                        Marshal.ReleaseComObject(delivery);
                 }
             }
 
