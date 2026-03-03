@@ -10,12 +10,12 @@
     Also delete the install directory. Default: $false
 
 .PARAMETER InstallDir
-    Install directory (only used if -RemoveFiles). Default: C:\SapOdoo
+    Install directory (only used if -RemoveFiles). Default: C:\SapOdoo\Middleware Project
 #>
 param(
     [string]$ServiceName = "SapOdooMiddleware",
     [switch]$RemoveFiles,
-    [string]$InstallDir  = "C:\SapOdoo"
+    [string]$InstallDir  = "C:\SapOdoo\Middleware Project"
 )
 
 $ErrorActionPreference = "Stop"
