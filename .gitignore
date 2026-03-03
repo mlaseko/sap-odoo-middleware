@@ -28,6 +28,9 @@ x86/
 ## Test results
 **/TestResults/
 
+## Logs
+Logs/
+
 ## Secrets – never commit production credentials
 appsettings.Production.json
 appsettings.*.local.json

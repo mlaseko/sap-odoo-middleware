@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.OpenApi.Models;
+using Serilog;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Filters;
 using SapOdooMiddleware.Middleware;
@@ -14,6 +15,13 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Host.UseWindowsService(options =>
 {
     options.ServiceName = "SapOdooMiddleware";
+});
+
+// --- Serilog file logging ---
+// Reads "Serilog" section from appsettings. Falls back to C:\SapOdoo\Logs if not configured.
+builder.Host.UseSerilog((context, configuration) =>
+{
+    configuration.ReadFrom.Configuration(context.Configuration);
 });
 
 // --- Configuration ---
