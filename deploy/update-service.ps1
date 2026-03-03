@@ -10,7 +10,7 @@
     appsettings.Production.json is preserved (not overwritten).
 
 .PARAMETER InstallDir
-    Where the service files are deployed. Default: C:\Services\SapOdooMiddleware
+    Where the service files are deployed. Default: C:\SapOdoo
 
 .PARAMETER ServiceName
     Windows Service name. Default: SapOdooMiddleware
@@ -19,7 +19,7 @@
     .\update-service.ps1
 #>
 param(
-    [string]$InstallDir  = "C:\Services\SapOdooMiddleware",
+    [string]$InstallDir  = "C:\SapOdoo",
     [string]$ServiceName = "SapOdooMiddleware"
 )
 

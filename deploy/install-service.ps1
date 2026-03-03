@@ -9,7 +9,7 @@
     3. Configures automatic restart on failure.
 
 .PARAMETER InstallDir
-    Where to deploy the published files. Default: C:\Services\SapOdooMiddleware
+    Where to deploy the published files. Default: C:\SapOdoo
 
 .PARAMETER ServiceName
     Windows Service name. Default: SapOdooMiddleware
@@ -22,7 +22,7 @@
     .\install-service.ps1 -InstallDir "D:\SapOdoo" -Port 8080
 #>
 param(
-    [string]$InstallDir  = "C:\Services\SapOdooMiddleware",
+    [string]$InstallDir  = "C:\SapOdoo",
     [string]$ServiceName = "SapOdooMiddleware",
     [int]$Port           = 5259
 )
