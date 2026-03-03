@@ -7,6 +7,9 @@ using SapOdooMiddleware.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Allow the app to run as a Windows Service
+builder.Host.UseWindowsService();
+
 // --- Configuration ---
 builder.Services.Configure<SapB1Settings>(builder.Configuration.GetSection(SapB1Settings.SectionName));
 builder.Services.Configure<OdooSettings>(builder.Configuration.GetSection(OdooSettings.SectionName));
@@ -19,6 +22,7 @@ builder.Services.AddSingleton<ISapB1Service, SapB1DiApiService>();
 #else
 builder.Services.AddSingleton<ISapB1Service, SapB1DiApiServiceStub>();
 #endif
+
 builder.Services.AddHttpClient<IOdooService, OdooJsonRpcService>();
 builder.Services.AddHostedService<WebhookQueueProcessor>();
 
@@ -37,7 +41,7 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "SAP-Odoo Middleware API",
         Version = "v1",
-        Description = "Click **Authorize** and enter your API key to authenticate requests in Swagger UI."
+        Description = "Click Authorize and enter your API key to authenticate requests in Swagger UI."
     });
 
     options.AddSecurityDefinition("ApiKey", new OpenApiSecurityScheme
@@ -60,7 +64,10 @@ bool enableSwagger = app.Environment.IsDevelopment()
 if (enableSwagger)
 {
     app.UseSwagger();
-    app.UseSwaggerUI(options => options.SwaggerEndpoint("/swagger/v1/swagger.json", "SAP-Odoo Middleware v1"));
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/swagger/v1/swagger.json", "SAP-Odoo Middleware v1");
+    });
 }
 
 // --- Middleware ---
