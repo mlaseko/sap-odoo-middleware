@@ -32,6 +32,13 @@ public class SapSalesOrderRequest
     /// <summary>Requested delivery due date (ISO-8601).</summary>
     public DateTime? DocDueDate { get; set; }
 
+    /// <summary>
+    /// SAP Sales Employee Code from OSLP.SlpCode.
+    /// Maps to SAP B1 <c>ORDR.SlpCode</c> (the salesperson on this order).
+    /// When null or -1, no sales employee is assigned.
+    /// </summary>
+    public int? SlpCode { get; set; }
+
     /// <summary>Order lines.</summary>
     [Required]
     [MinLength(1)]

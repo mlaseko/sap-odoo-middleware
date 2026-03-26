@@ -51,6 +51,13 @@ public class SapInvoiceRequest
     public double? VatSum { get; set; }
 
     /// <summary>
+    /// SAP Sales Employee Code from OSLP.SlpCode.
+    /// Maps to SAP B1 <c>OINV.SlpCode</c> (the salesperson on this invoice).
+    /// When null or -1, no sales employee is assigned.
+    /// </summary>
+    public int? SlpCode { get; set; }
+
+    /// <summary>
     /// SAP Delivery Note DocEntry (ODLN.DocEntry) from which to copy this invoice.
     /// When provided, the invoice is created by copying from this delivery,
     /// preserving the Sales Order → Delivery → Invoice document chain in SAP B1.

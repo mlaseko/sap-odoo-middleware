@@ -189,6 +189,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             order.CardCode = request.CardCode;
             order.NumAtCard = request.ResolvedSoId;
 
+            if (request.SlpCode.HasValue && request.SlpCode.Value >= 0)
+                order.SalesPersonCode = request.SlpCode.Value;
+
             if (request.DocDate.HasValue)
                 order.DocDate = request.DocDate.Value;
 
@@ -509,6 +512,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
         invoice.NumAtCard = request.ExternalInvoiceId;
 
+        if (request.SlpCode.HasValue && request.SlpCode.Value >= 0)
+            invoice.SalesPersonCode = request.SlpCode.Value;
+
         if (request.DocDate.HasValue)
             invoice.DocDate = request.DocDate.Value;
 
@@ -632,6 +638,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         // Set header
         invoice.CardCode = request.CustomerCode;
         invoice.NumAtCard = request.ExternalInvoiceId;
+
+        if (request.SlpCode.HasValue && request.SlpCode.Value >= 0)
+            invoice.SalesPersonCode = request.SlpCode.Value;
 
         if (request.DocDate.HasValue)
             invoice.DocDate = request.DocDate.Value;
@@ -1992,6 +2001,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             bp.Phone1 = request.Phone1;
             bp.GroupCode = request.GroupCode;
 
+            if (request.SlpCode.HasValue && request.SlpCode.Value >= 0)
+                bp.SalesPersonCode = request.SlpCode.Value;
+
             if (!string.IsNullOrEmpty(request.Phone2))
                 bp.Phone2 = request.Phone2;
 
@@ -2089,6 +2101,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             bp.CardName = request.CardName;
             bp.Phone1 = request.Phone1;
 
+            if (request.SlpCode.HasValue && request.SlpCode.Value >= 0)
+                bp.SalesPersonCode = request.SlpCode.Value;
+
             if (!string.IsNullOrEmpty(request.Phone2))
                 bp.Phone2 = request.Phone2;
 
@@ -2125,6 +2140,158 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 OdooCustomerId = request.OdooCustomerId,
                 Operation = "updated"
             };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ================================
+    // SALES EMPLOYEES (OSLP)
+    // ================================
+
+    public async Task<SapSalesEmployeeResponse> CreateSalesEmployeeAsync(SapSalesEmployeeRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var sp = (SalesPersons)_company!.GetBusinessObject(BoObjectTypes.oSalesPersons);
+
+            sp.SalesEmployeeName = request.SlpName;
+
+            TrySetUserField(sp.UserFields, "U_OdooEmployeeId", request.OdooEmployeeId, "SalesPerson header");
+
+            int result = sp.Add();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(sp);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            string newKey = _company.GetNewObjectKey();
+            int slpCode = int.Parse(newKey);
+
+            _logger.LogInformation(
+                "SAP Sales Employee created: SlpCode={SlpCode}, SlpName={SlpName}, OdooId={OdooId}",
+                slpCode, request.SlpName, request.OdooEmployeeId);
+
+            Marshal.ReleaseComObject(sp);
+
+            return new SapSalesEmployeeResponse
+            {
+                SlpCode = slpCode,
+                SlpName = request.SlpName,
+                OdooEmployeeId = request.OdooEmployeeId,
+                Operation = "created"
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<SapSalesEmployeeResponse> UpdateSalesEmployeeAsync(int slpCode, SapSalesEmployeeRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var sp = (SalesPersons)_company!.GetBusinessObject(BoObjectTypes.oSalesPersons);
+
+            if (!sp.GetByKey(slpCode))
+            {
+                Marshal.ReleaseComObject(sp);
+                throw new InvalidOperationException(
+                    $"Sales Employee SlpCode={slpCode} not found in SAP B1");
+            }
+
+            if (!string.IsNullOrEmpty(request.SlpName))
+                sp.SalesEmployeeName = request.SlpName;
+
+            TrySetUserField(sp.UserFields, "U_OdooEmployeeId", request.OdooEmployeeId, "SalesPerson header");
+
+            int result = sp.Update();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(sp);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            _logger.LogInformation(
+                "SAP Sales Employee updated: SlpCode={SlpCode}, SlpName={SlpName}, OdooId={OdooId}",
+                slpCode, request.SlpName, request.OdooEmployeeId);
+
+            Marshal.ReleaseComObject(sp);
+
+            return new SapSalesEmployeeResponse
+            {
+                SlpCode = slpCode,
+                SlpName = request.SlpName,
+                OdooEmployeeId = request.OdooEmployeeId,
+                Operation = "updated"
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<List<SapSalesEmployeeResponse>> ListSalesEmployeesAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var employees = new List<SapSalesEmployeeResponse>();
+            var recordset = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+
+            recordset.DoQuery(
+                "SELECT T0.\"SlpCode\", T0.\"SlpName\", T0.\"U_OdooEmployeeId\" " +
+                "FROM \"OSLP\" T0 WHERE T0.\"Active\" = 'Y' ORDER BY T0.\"SlpCode\"");
+
+            while (!recordset.EoF)
+            {
+                var emp = new SapSalesEmployeeResponse
+                {
+                    SlpCode = (int)recordset.Fields.Item("SlpCode").Value,
+                    SlpName = (string)recordset.Fields.Item("SlpName").Value,
+                    OdooEmployeeId = "",
+                    Operation = "listed"
+                };
+
+                try
+                {
+                    var odooIdVal = recordset.Fields.Item("U_OdooEmployeeId").Value;
+                    if (odooIdVal != null)
+                        emp.OdooEmployeeId = odooIdVal.ToString() ?? "";
+                }
+                catch
+                {
+                    // UDF may not exist yet
+                }
+
+                employees.Add(emp);
+                recordset.MoveNext();
+            }
+
+            Marshal.ReleaseComObject(recordset);
+
+            _logger.LogInformation("Listed {Count} active Sales Employees from SAP OSLP", employees.Count);
+
+            return employees;
         }
         finally
         {
