@@ -177,7 +177,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// <summary>
     /// Required UDFs across SAP B1 tables.
     /// Each tuple: (TableName, FieldName, Description, FieldType, Size).
-    /// FieldType: 0 = db_Alpha, 5 = db_Date
+    /// FieldType: 0 = db_Alpha, 1 = db_Memo, 2 = db_Numeric, 3 = db_Date, 4 = db_Float
     /// </summary>
     private static readonly (string Table, string Name, string Desc, int Type, int Size)[] RequiredUdfs =
     [
@@ -186,19 +186,19 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
         // OCRD (Business Partners / Customers)
         ("OCRD", "OdooCustomerId", "Odoo Customer ID", 0, 20),
-        ("OCRD", "Odoo_LastSync", "Last Odoo Sync Date", 5, 0),
+        ("OCRD", "Odoo_LastSync", "Last Odoo Sync Date", 3, 0),
         ("OCRD", "Odoo_SyncDir", "Odoo Sync Direction", 0, 10),
 
         // ORDR (Sales Orders)
         ("ORDR", "Odoo_SO_ID", "Odoo Sales Order ID", 0, 50),
         ("ORDR", "Odoo_Delivery_ID", "Odoo Delivery ID", 0, 50),
-        ("ORDR", "Odoo_LastSync", "Last Odoo Sync Date", 5, 0),
+        ("ORDR", "Odoo_LastSync", "Last Odoo Sync Date", 3, 0),
         ("ORDR", "Odoo_SyncDir", "Odoo Sync Direction", 0, 10),
 
         // OINV (AR Invoices)
         ("OINV", "Odoo_Invoice_ID", "Odoo Invoice ID", 0, 50),
         ("OINV", "Odoo_SO_ID", "Odoo Sales Order ID", 0, 50),
-        ("OINV", "Odoo_LastSync", "Last Odoo Sync Date", 5, 0),
+        ("OINV", "Odoo_LastSync", "Last Odoo Sync Date", 3, 0),
         ("OINV", "Odoo_SyncDir", "Odoo Sync Direction", 0, 10),
     ];
 
@@ -238,7 +238,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     {
                         _company.GetLastError(out int errCode, out string errMsg);
                         if (errMsg.Contains("already exists", StringComparison.OrdinalIgnoreCase)
-                            || errCode == -1120)
+                            || errCode == -1120
+                            || errCode == -5002)
                         {
                             results.Add($"EXISTS: {udf.Table}.{fullName}");
                             _logger.LogDebug(
