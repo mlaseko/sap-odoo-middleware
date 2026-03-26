@@ -89,6 +89,18 @@ public interface ISapB1Service
     Task<SapGoodsReturnResponse> UpdateGoodsReturnAsync(int docEntry, SapGoodsReturnRequest request);
 
     /// <summary>
+    /// Creates a Customer (BusinessPartner CardType=C) in SAP B1 via DI API.
+    /// Returns the auto-generated CardCode for write-back to Odoo.
+    /// </summary>
+    Task<SapCustomerResponse> CreateCustomerAsync(SapCustomerRequest request);
+
+    /// <summary>
+    /// Updates an existing Customer (BusinessPartner) in SAP B1 via DI API by CardCode.
+    /// Only non-null fields in the request are applied.
+    /// </summary>
+    Task<SapCustomerResponse> UpdateCustomerAsync(string cardCode, SapCustomerRequest request);
+
+    /// <summary>
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();

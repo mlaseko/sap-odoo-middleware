@@ -1974,6 +1974,164 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    // ================================
+    // CUSTOMERS (BUSINESS PARTNERS)
+    // ================================
+
+    public async Task<SapCustomerResponse> CreateCustomerAsync(SapCustomerRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var bp = (BusinessPartners)_company!.GetBusinessObject(BoObjectTypes.oBusinessPartners);
+
+            bp.CardName = request.CardName;
+            bp.CardType = BoCardTypes.cCustomer;
+            bp.Phone1 = request.Phone1;
+            bp.GroupCode = request.GroupCode;
+
+            if (!string.IsNullOrEmpty(request.Phone2))
+                bp.Phone2 = request.Phone2;
+
+            if (!string.IsNullOrEmpty(request.Email))
+                bp.EmailAddress = request.Email;
+
+            TrySetUserField(bp.UserFields, "U_OdooCustomerId", request.OdooCustomerId, "BP header");
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(bp.UserFields, "U_Odoo_LastSync", syncDate, "BP header");
+            TrySetUserField(bp.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "BP header");
+
+            // Bill-to address
+            if (request.BillTo != null)
+            {
+                bp.Addresses.AddressName = "Bill To";
+                bp.Addresses.AddressType = BoAddressType.bo_BillTo;
+                bp.Addresses.Street = request.BillTo.Street;
+                if (!string.IsNullOrEmpty(request.BillTo.City))
+                    bp.Addresses.City = request.BillTo.City;
+                if (!string.IsNullOrEmpty(request.BillTo.Country))
+                    bp.Addresses.Country = request.BillTo.Country;
+                if (!string.IsNullOrEmpty(request.BillTo.ZipCode))
+                    bp.Addresses.ZipCode = request.BillTo.ZipCode;
+                if (!string.IsNullOrEmpty(request.BillTo.State))
+                    bp.Addresses.State = request.BillTo.State;
+                bp.Addresses.Add();
+            }
+
+            // Ship-to address
+            if (request.ShipTo != null)
+            {
+                bp.Addresses.AddressName = "Ship To";
+                bp.Addresses.AddressType = BoAddressType.bo_ShipTo;
+                bp.Addresses.Street = request.ShipTo.Street;
+                if (!string.IsNullOrEmpty(request.ShipTo.City))
+                    bp.Addresses.City = request.ShipTo.City;
+                if (!string.IsNullOrEmpty(request.ShipTo.Country))
+                    bp.Addresses.Country = request.ShipTo.Country;
+                if (!string.IsNullOrEmpty(request.ShipTo.ZipCode))
+                    bp.Addresses.ZipCode = request.ShipTo.ZipCode;
+                if (!string.IsNullOrEmpty(request.ShipTo.State))
+                    bp.Addresses.State = request.ShipTo.State;
+                bp.Addresses.Add();
+            }
+
+            int result = bp.Add();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(bp);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            string cardCode = _company.GetNewObjectKey();
+
+            _logger.LogInformation(
+                "SAP Customer created: CardCode={CardCode}, CardName={CardName}, OdooId={OdooId}",
+                cardCode, request.CardName, request.OdooCustomerId);
+
+            Marshal.ReleaseComObject(bp);
+
+            return new SapCustomerResponse
+            {
+                CardCode = cardCode,
+                CardName = request.CardName,
+                OdooCustomerId = request.OdooCustomerId,
+                Operation = "created"
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<SapCustomerResponse> UpdateCustomerAsync(string cardCode, SapCustomerRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var bp = (BusinessPartners)_company!.GetBusinessObject(BoObjectTypes.oBusinessPartners);
+
+            if (!bp.GetByKey(cardCode))
+            {
+                Marshal.ReleaseComObject(bp);
+                throw new InvalidOperationException(
+                    $"Customer '{cardCode}' not found in SAP B1");
+            }
+
+            bp.CardName = request.CardName;
+            bp.Phone1 = request.Phone1;
+
+            if (!string.IsNullOrEmpty(request.Phone2))
+                bp.Phone2 = request.Phone2;
+
+            if (!string.IsNullOrEmpty(request.Email))
+                bp.EmailAddress = request.Email;
+
+            if (request.GroupCode > 0)
+                bp.GroupCode = request.GroupCode;
+
+            var syncDate = DateTime.UtcNow.Date;
+            TrySetUserField(bp.UserFields, "U_Odoo_LastSync", syncDate, "BP header");
+            TrySetUserField(bp.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "BP header");
+
+            int result = bp.Update();
+
+            if (result != 0)
+            {
+                _company.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(bp);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            _logger.LogInformation(
+                "SAP Customer updated: CardCode={CardCode}, CardName={CardName}, OdooId={OdooId}",
+                cardCode, request.CardName, request.OdooCustomerId);
+
+            Marshal.ReleaseComObject(bp);
+
+            return new SapCustomerResponse
+            {
+                CardCode = cardCode,
+                CardName = request.CardName,
+                OdooCustomerId = request.OdooCustomerId,
+                Operation = "updated"
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
