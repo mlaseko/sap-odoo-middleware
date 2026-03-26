@@ -45,6 +45,13 @@ public class SapCustomerRequest
     /// </summary>
     public int? SlpCode { get; set; }
 
+    /// <summary>
+    /// SAP Price List Number from OPLN.ListNum.
+    /// Maps to SAP B1 <c>OCRD.ListNum</c> (the price list assigned to this customer).
+    /// When null, the SAP default price list is used.
+    /// </summary>
+    public int? PriceListNum { get; set; }
+
     /// <summary>Bill-to address.</summary>
     public SapCustomerAddressRequest? BillTo { get; set; }
 

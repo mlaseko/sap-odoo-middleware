@@ -2004,6 +2004,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (request.SlpCode.HasValue && request.SlpCode.Value >= 0)
                 bp.SalesPersonCode = request.SlpCode.Value;
 
+            if (request.PriceListNum.HasValue)
+                bp.PriceListNum = request.PriceListNum.Value;
+
             if (!string.IsNullOrEmpty(request.Phone2))
                 bp.Phone2 = request.Phone2;
 
@@ -2103,6 +2106,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             if (request.SlpCode.HasValue && request.SlpCode.Value >= 0)
                 bp.SalesPersonCode = request.SlpCode.Value;
+
+            if (request.PriceListNum.HasValue)
+                bp.PriceListNum = request.PriceListNum.Value;
 
             if (!string.IsNullOrEmpty(request.Phone2))
                 bp.Phone2 = request.Phone2;
