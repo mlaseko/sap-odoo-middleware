@@ -38,6 +38,13 @@ public class SapCustomerRequest
     /// </summary>
     public int GroupCode { get; set; } = 100;
 
+    /// <summary>
+    /// SAP Sales Employee Code from OSLP.SlpCode.
+    /// Maps to SAP B1 <c>OCRD.SlpCode</c> (the sales employee assigned to this customer).
+    /// When null or -1, no sales employee is assigned.
+    /// </summary>
+    public int? SlpCode { get; set; }
+
     /// <summary>Bill-to address.</summary>
     public SapCustomerAddressRequest? BillTo { get; set; }
 

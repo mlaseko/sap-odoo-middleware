@@ -101,6 +101,23 @@ public interface ISapB1Service
     Task<SapCustomerResponse> UpdateCustomerAsync(string cardCode, SapCustomerRequest request);
 
     /// <summary>
+    /// Creates a Sales Employee in SAP B1 OSLP table via DI API.
+    /// Returns the auto-generated SlpCode for write-back to Odoo.
+    /// </summary>
+    Task<SapSalesEmployeeResponse> CreateSalesEmployeeAsync(SapSalesEmployeeRequest request);
+
+    /// <summary>
+    /// Updates an existing Sales Employee in SAP B1 OSLP table by SlpCode.
+    /// </summary>
+    Task<SapSalesEmployeeResponse> UpdateSalesEmployeeAsync(int slpCode, SapSalesEmployeeRequest request);
+
+    /// <summary>
+    /// Lists all Sales Employees from SAP B1 OSLP table.
+    /// Used for one-time sync between Odoo and SAP.
+    /// </summary>
+    Task<List<SapSalesEmployeeResponse>> ListSalesEmployeesAsync();
+
+    /// <summary>
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();
