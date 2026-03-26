@@ -171,6 +171,109 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     // ================================
+    // UDF SETUP
+    // ================================
+
+    /// <summary>
+    /// Required UDFs across SAP B1 tables.
+    /// Each tuple: (TableName, FieldName, Description, FieldType, Size).
+    /// FieldType: 0 = db_Alpha, 5 = db_Date
+    /// </summary>
+    private static readonly (string Table, string Name, string Desc, int Type, int Size)[] RequiredUdfs =
+    [
+        // OSLP (Sales Employees)
+        ("OSLP", "OdooEmployeeId", "Odoo Employee ID", 0, 20),
+
+        // OCRD (Business Partners / Customers)
+        ("OCRD", "OdooCustomerId", "Odoo Customer ID", 0, 20),
+        ("OCRD", "Odoo_LastSync", "Last Odoo Sync Date", 5, 0),
+        ("OCRD", "Odoo_SyncDir", "Odoo Sync Direction", 0, 10),
+
+        // ORDR (Sales Orders)
+        ("ORDR", "Odoo_SO_ID", "Odoo Sales Order ID", 0, 50),
+        ("ORDR", "Odoo_Delivery_ID", "Odoo Delivery ID", 0, 50),
+        ("ORDR", "Odoo_LastSync", "Last Odoo Sync Date", 5, 0),
+        ("ORDR", "Odoo_SyncDir", "Odoo Sync Direction", 0, 10),
+
+        // OINV (AR Invoices)
+        ("OINV", "Odoo_Invoice_ID", "Odoo Invoice ID", 0, 50),
+        ("OINV", "Odoo_SO_ID", "Odoo Sales Order ID", 0, 50),
+        ("OINV", "Odoo_LastSync", "Last Odoo Sync Date", 5, 0),
+        ("OINV", "Odoo_SyncDir", "Odoo Sync Direction", 0, 10),
+    ];
+
+    public async Task<List<string>> EnsureUdfsAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var results = new List<string>();
+
+            foreach (var udf in RequiredUdfs)
+            {
+                string fullName = $"U_{udf.Name}";
+                try
+                {
+                    var udfMD = (UserFieldsMD)_company!.GetBusinessObject(BoObjectTypes.oUserFields);
+
+                    udfMD.TableName = udf.Table;
+                    udfMD.Name = udf.Name;
+                    udfMD.Description = udf.Desc;
+                    udfMD.Type = (BoFieldTypes)udf.Type;
+                    if (udf.Size > 0)
+                        udfMD.Size = udf.Size;
+
+                    int result = udfMD.Add();
+
+                    if (result == 0)
+                    {
+                        results.Add($"CREATED: {udf.Table}.{fullName} ({udf.Desc})");
+                        _logger.LogInformation(
+                            "UDF created: {Table}.{Field} ({Desc})",
+                            udf.Table, fullName, udf.Desc);
+                    }
+                    else
+                    {
+                        _company.GetLastError(out int errCode, out string errMsg);
+                        if (errMsg.Contains("already exists", StringComparison.OrdinalIgnoreCase)
+                            || errCode == -1120)
+                        {
+                            results.Add($"EXISTS: {udf.Table}.{fullName}");
+                            _logger.LogDebug(
+                                "UDF already exists: {Table}.{Field}",
+                                udf.Table, fullName);
+                        }
+                        else
+                        {
+                            results.Add($"ERROR: {udf.Table}.{fullName} — {errCode}: {errMsg}");
+                            _logger.LogWarning(
+                                "Failed to create UDF {Table}.{Field}: {ErrCode} {ErrMsg}",
+                                udf.Table, fullName, errCode, errMsg);
+                        }
+                    }
+
+                    Marshal.ReleaseComObject(udfMD);
+                }
+                catch (Exception ex)
+                {
+                    results.Add($"ERROR: {udf.Table}.{fullName} — {ex.Message}");
+                    _logger.LogWarning(ex,
+                        "Exception creating UDF {Table}.{Field}",
+                        udf.Table, fullName);
+                }
+            }
+
+            return results;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ================================
     // SALES ORDER
     // ================================
     public async Task<SapSalesOrderResponse> CreateSalesOrderAsync(SapSalesOrderRequest request)

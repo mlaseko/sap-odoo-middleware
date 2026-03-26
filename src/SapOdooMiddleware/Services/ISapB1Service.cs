@@ -118,6 +118,12 @@ public interface ISapB1Service
     Task<List<SapSalesEmployeeResponse>> ListSalesEmployeesAsync();
 
     /// <summary>
+    /// Creates required User-Defined Fields (UDFs) in SAP B1 if they don't already exist.
+    /// Returns a list of UDFs that were created or already existed.
+    /// </summary>
+    Task<List<string>> EnsureUdfsAsync();
+
+    /// <summary>
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();

@@ -41,4 +41,29 @@ public class SapB1Controller : ControllerBase
             return StatusCode(500, ApiResponse<SapB1PingResponse>.Fail(ex.Message));
         }
     }
+
+    /// <summary>
+    /// POST /api/sapb1/setup-udfs
+    /// Creates all required User-Defined Fields (UDFs) in SAP B1 if they don't exist.
+    /// Safe to call multiple times — existing UDFs are skipped.
+    /// </summary>
+    [HttpPost("setup-udfs")]
+    public async Task<IActionResult> SetupUdfs()
+    {
+        _logger.LogInformation("UDF setup requested.");
+
+        try
+        {
+            var results = await _sapService.EnsureUdfsAsync();
+
+            _logger.LogInformation("UDF setup completed: {Results}", string.Join("; ", results));
+
+            return Ok(ApiResponse<List<string>>.Ok(results));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "UDF setup failed.");
+            return StatusCode(500, ApiResponse<List<string>>.Fail(ex.Message));
+        }
+    }
 }
