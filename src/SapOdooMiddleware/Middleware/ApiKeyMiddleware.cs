@@ -6,13 +6,15 @@ using SapOdooMiddleware.Models.Api;
 namespace SapOdooMiddleware.Middleware;
 
 /// <summary>
-/// Validates X-Api-Key header on /api/* requests only.
+/// Validates API key on /api/* requests only.
+/// Accepts the key via X-Api-Key header or Authorization: Bearer {token}.
 /// All other paths (health, Swagger, favicon, unknown) skip authentication.
 /// Logs authenticated API requests for observability.
 /// </summary>
 public class ApiKeyMiddleware
 {
     private const string ApiKeyHeader = "X-Api-Key";
+    private const string BearerPrefix = "Bearer ";
     private readonly RequestDelegate _next;
     private readonly ILogger<ApiKeyMiddleware> _logger;
 
@@ -52,14 +54,16 @@ public class ApiKeyMiddleware
             return;
         }
 
-        if (!context.Request.Headers.TryGetValue(ApiKeyHeader, out var extractedApiKey)
-            || string.IsNullOrEmpty(extractedApiKey))
+        var extractedApiKey = ExtractApiKey(context);
+
+        if (string.IsNullOrEmpty(extractedApiKey))
         {
             _logger.LogWarning(
-                "Unauthorized request: {Method} {Path} — missing X-Api-Key header from {RemoteIp}",
+                "Unauthorized request: {Method} {Path} — missing API key from {RemoteIp}. " +
+                "Send via X-Api-Key header or Authorization: Bearer token.",
                 method, path, context.Connection.RemoteIpAddress);
 
-            await WriteUnauthorizedResponse(context, "Missing X-Api-Key header. Include a valid API key in the X-Api-Key request header.");
+            await WriteUnauthorizedResponse(context, "Missing API key. Include a valid key via X-Api-Key header or Authorization: Bearer token.");
             return;
         }
 
@@ -78,6 +82,35 @@ public class ApiKeyMiddleware
             method, path);
 
         await _next(context);
+    }
+
+    /// <summary>
+    /// Extracts the API key from X-Api-Key header first, then falls back to
+    /// Authorization: Bearer {token}.
+    /// </summary>
+    private static string? ExtractApiKey(HttpContext context)
+    {
+        // Prefer X-Api-Key header
+        if (context.Request.Headers.TryGetValue(ApiKeyHeader, out var apiKey)
+            && !string.IsNullOrEmpty(apiKey))
+        {
+            return apiKey;
+        }
+
+        // Fall back to Authorization: Bearer {token}
+        if (context.Request.Headers.TryGetValue("Authorization", out var authHeader)
+            && !string.IsNullOrEmpty(authHeader))
+        {
+            var headerValue = authHeader.ToString();
+            if (headerValue.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var token = headerValue[BearerPrefix.Length..].Trim();
+                if (!string.IsNullOrEmpty(token))
+                    return token;
+            }
+        }
+
+        return null;
     }
 
     private static async Task WriteUnauthorizedResponse(HttpContext context, string message)
