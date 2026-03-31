@@ -73,7 +73,7 @@ builder.Services.AddSwaggerGen(options =>
         Name = "X-Api-Key",
         In = ParameterLocation.Header,
         Type = SecuritySchemeType.ApiKey,
-        Description = "API key required for all endpoints except /health and /swagger"
+        Description = "API key via X-Api-Key header (or use Authorization: Bearer token)"
     });
 
     options.OperationFilter<ApiKeyOperationFilter>();
