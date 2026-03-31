@@ -8,6 +8,16 @@ using SapOdooMiddleware.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// --- External production config ---
+// Load appsettings.Production.json from C:\SapOdoo\Config\ if it exists.
+// This survives publish/redeploy since it lives outside the install directory.
+var externalConfigDir = Path.Combine("C:", "SapOdoo", "Config");
+var externalConfig = Path.Combine(externalConfigDir, "appsettings.Production.json");
+if (File.Exists(externalConfig))
+{
+    builder.Configuration.AddJsonFile(externalConfig, optional: false, reloadOnChange: true);
+}
+
 // --- Windows Service hosting ---
 // When installed as a Windows Service, UseWindowsService() sets the
 // content root correctly and hooks into the SCM lifecycle (start/stop).
@@ -87,10 +97,11 @@ if (enableSwagger)
 // --- Startup summary ---
 var webhookQueueEnabled = builder.Configuration.GetValue<bool>("WebhookQueue:Enabled");
 Log.Information(
-    "Middleware started — Environment={Environment}, Swagger={SwaggerEnabled}, WebhookQueue={WebhookQueueEnabled}",
+    "Middleware started — Environment={Environment}, Swagger={SwaggerEnabled}, WebhookQueue={WebhookQueueEnabled}, ExternalConfig={ExternalConfigLoaded}",
     app.Environment.EnvironmentName,
     enableSwagger,
-    webhookQueueEnabled);
+    webhookQueueEnabled,
+    File.Exists(externalConfig));
 
 // --- Middleware ---
 app.UseMiddleware<ApiKeyMiddleware>();

@@ -60,20 +60,24 @@ dotnet publish $projectDir `
 if ($LASTEXITCODE -ne 0) { Write-Error "dotnet publish failed." }
 Write-Host "Published to: $InstallDir" -ForegroundColor Green
 
-# --- Ensure log directory exists ---
+# --- Create log and config directories ---
 $logDir = "C:\SapOdoo\Logs"
-if (-not (Test-Path $logDir)) {
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    Write-Host "Created log directory: $logDir" -ForegroundColor Green
+$configDir = "C:\SapOdoo\Config"
+foreach ($dir in @($logDir, $configDir)) {
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Write-Host "Created directory: $dir" -ForegroundColor Green
+    }
 }
 
 # --- Copy production config template if not yet customized ---
-$prodConfig = Join-Path $InstallDir "appsettings.Production.json"
+# Stored outside the publish folder so it survives redeploys.
+$prodConfig = Join-Path $configDir "appsettings.Production.json"
 if (-not (Test-Path $prodConfig)) {
     $templateConfig = Join-Path $projectDir "appsettings.Production.template.json"
     if (Test-Path $templateConfig) {
         Copy-Item $templateConfig $prodConfig
-        Write-Host "`n[!] Copied appsettings.Production.json from template." -ForegroundColor Yellow
+        Write-Host "`n[!] Copied appsettings.Production.json to config directory." -ForegroundColor Yellow
         Write-Host "    EDIT THIS FILE before starting the service:" -ForegroundColor Yellow
         Write-Host "    $prodConfig" -ForegroundColor White
     }
@@ -111,7 +115,7 @@ Set-ItemProperty -Path $regPath -Name $envKey -Value $envValues -Type MultiStrin
 Write-Host "`n=== Installation Complete ===" -ForegroundColor Green
 Write-Host ""
 Write-Host "BEFORE starting the service, you MUST:" -ForegroundColor Yellow
-Write-Host "  1. Edit: $prodConfig" -ForegroundColor White
+Write-Host "  1. Edit: C:\SapOdoo\Config\appsettings.Production.json" -ForegroundColor White
 Write-Host "     - Set ApiKey:Key         (strong random string, shared with Odoo backend)" -ForegroundColor White
 Write-Host "     - Set SapB1:Server        (SAP B1 SQL Server hostname)" -ForegroundColor White
 Write-Host "     - Set SapB1:CompanyDb      (SAP B1 company database name)" -ForegroundColor White
