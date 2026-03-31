@@ -94,7 +94,8 @@ $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 $envKey = "Environment"
 # The service needs ASPNETCORE_ENVIRONMENT=Production and optionally ENABLE_SWAGGER
 $envValues = @(
-    "ASPNETCORE_ENVIRONMENT=Production"
+    "ASPNETCORE_ENVIRONMENT=Production",
+    "ENABLE_SWAGGER=true"
 )
 # Note: sc.exe doesn't support multi-string env vars easily.
 # We set it via the registry instead.
@@ -121,6 +122,6 @@ Write-Host ""
 Write-Host "  3. Verify health:" -ForegroundColor White
 Write-Host "     Invoke-RestMethod http://localhost:$Port/health" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  4. (Optional) Enable Swagger UI in production:" -ForegroundColor White
-Write-Host "     Set environment variable ENABLE_SWAGGER=true" -ForegroundColor Cyan
+Write-Host "  4. Swagger UI is enabled by default (ENABLE_SWAGGER=true)." -ForegroundColor White
+Write-Host "     Access at: http://localhost:$Port/swagger" -ForegroundColor Cyan
 Write-Host ""
