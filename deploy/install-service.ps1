@@ -60,6 +60,13 @@ dotnet publish $projectDir `
 if ($LASTEXITCODE -ne 0) { Write-Error "dotnet publish failed." }
 Write-Host "Published to: $InstallDir" -ForegroundColor Green
 
+# --- Ensure log directory exists ---
+$logDir = "C:\SapOdoo\Logs"
+if (-not (Test-Path $logDir)) {
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    Write-Host "Created log directory: $logDir" -ForegroundColor Green
+}
+
 # --- Copy production config template if not yet customized ---
 $prodConfig = Join-Path $InstallDir "appsettings.Production.json"
 if (-not (Test-Path $prodConfig)) {
