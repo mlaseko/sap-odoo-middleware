@@ -84,6 +84,14 @@ if (enableSwagger)
     });
 }
 
+// --- Startup summary ---
+var webhookQueueEnabled = builder.Configuration.GetValue<bool>("WebhookQueue:Enabled");
+Log.Information(
+    "Middleware started — Environment={Environment}, Swagger={SwaggerEnabled}, WebhookQueue={WebhookQueueEnabled}",
+    app.Environment.EnvironmentName,
+    enableSwagger,
+    webhookQueueEnabled);
+
 // --- Middleware ---
 app.UseMiddleware<ApiKeyMiddleware>();
 
