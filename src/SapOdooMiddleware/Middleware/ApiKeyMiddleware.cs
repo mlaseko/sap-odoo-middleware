@@ -69,9 +69,18 @@ public class ApiKeyMiddleware
 
         if (!string.Equals(extractedApiKey, settings.Value.Key, StringComparison.Ordinal))
         {
+            var receivedPrefix = extractedApiKey.Length > 8
+                ? extractedApiKey[..8] + "..."
+                : extractedApiKey;
+            var expectedPrefix = settings.Value.Key.Length > 8
+                ? settings.Value.Key[..8] + "..."
+                : settings.Value.Key;
             _logger.LogWarning(
-                "Unauthorized request: {Method} {Path} — invalid API key from {RemoteIp}",
-                method, path, context.Connection.RemoteIpAddress);
+                "Unauthorized request: {Method} {Path} — invalid API key from {RemoteIp}. " +
+                "Received={ReceivedKeyPrefix} (len={ReceivedLen}), Expected={ExpectedKeyPrefix} (len={ExpectedLen})",
+                method, path, context.Connection.RemoteIpAddress,
+                receivedPrefix, extractedApiKey.Length,
+                expectedPrefix, settings.Value.Key.Length);
 
             await WriteUnauthorizedResponse(context, "Invalid API key.");
             return;
