@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <Platforms>AnyCPU;x64</Platforms>
+    <Version>1.1.0</Version>
   </PropertyGroup>
 
   <!-- SAP B1 DI API is Windows-only (COM). Define a constant so Program.cs can choose the right service. -->
