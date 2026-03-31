@@ -7,7 +7,8 @@
     1. Stops the running service.
     2. Publishes the latest code.
     3. Restarts the service.
-    appsettings.Production.json is preserved (not overwritten).
+    appsettings.Production.json is stored in C:\SapOdoo\Config\ (outside the
+    publish folder) so it is not affected by redeploys.
 
 .PARAMETER InstallDir
     Where the service files are deployed. Default: C:\SapOdoo\Middleware Project
@@ -37,12 +38,10 @@ if (-not $svc) {
     Write-Error "Service '$ServiceName' not found. Run .\install-service.ps1 first."
 }
 
-# --- Backup production config ---
-$prodConfig = Join-Path $InstallDir "appsettings.Production.json"
-$backupConfig = "$prodConfig.bak"
-if (Test-Path $prodConfig) {
-    Copy-Item $prodConfig $backupConfig -Force
-    Write-Host "Backed up appsettings.Production.json" -ForegroundColor Green
+# --- Verify production config exists ---
+$prodConfig = "C:\SapOdoo\Config\appsettings.Production.json"
+if (-not (Test-Path $prodConfig)) {
+    Write-Warning "Production config not found at $prodConfig. The service may use default settings."
 }
 
 # --- Stop service ---
@@ -64,19 +63,8 @@ dotnet publish $projectDir `
     /p:PublishSingleFile=false
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Publish failed! Restoring config backup and restarting old version."
-    if (Test-Path $backupConfig) {
-        Copy-Item $backupConfig $prodConfig -Force
-    }
     Start-Service $ServiceName
-    Write-Error "dotnet publish failed."
-}
-
-# --- Restore production config (publish may overwrite with template) ---
-if (Test-Path $backupConfig) {
-    Copy-Item $backupConfig $prodConfig -Force
-    Remove-Item $backupConfig -Force
-    Write-Host "Restored appsettings.Production.json" -ForegroundColor Green
+    Write-Error "dotnet publish failed. Restarted service with previous build."
 }
 
 # --- Restart service ---
@@ -87,3 +75,4 @@ $svc = Get-Service -Name $ServiceName
 Write-Host "Service status: $($svc.Status)" -ForegroundColor Green
 
 Write-Host "`n=== Update Complete ===" -ForegroundColor Green
+Write-Host "Production config: $prodConfig (untouched by publish)" -ForegroundColor Cyan
