@@ -2100,6 +2100,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             var bp = (BusinessPartners)_company!.GetBusinessObject(BoObjectTypes.oBusinessPartners);
 
+            // SAP B1 requires CardCode (PK) — generate from Odoo customer ID
+            var cardCode = $"C{request.OdooCustomerId}";
+            bp.CardCode = cardCode;
             bp.CardName = request.CardName;
             bp.CardType = BoCardTypes.cCustomer;
             bp.Phone1 = request.Phone1;
@@ -2167,7 +2170,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     $"SAP DI API error {errCode}: {errMsg}");
             }
 
-            string cardCode = _company.GetNewObjectKey();
+            // cardCode already set above — GetNewObjectKey returns same value
+            var sapCardCode = _company.GetNewObjectKey();
 
             _logger.LogInformation(
                 "SAP Customer created: CardCode={CardCode}, CardName={CardName}, OdooId={OdooId}",
