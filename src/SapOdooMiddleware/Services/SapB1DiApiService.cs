@@ -1665,40 +1665,101 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             _logger.LogInformation(
                 "Creating AR Credit Memo — ExternalCreditMemoId={ExternalCreditMemoId}, " +
                 "CustomerCode={CustomerCode}, SapBaseInvoiceDocEntry={SapBaseInvoiceDocEntry}, " +
-                "SapBaseDeliveryDocEntry={SapBaseDeliveryDocEntry}, LineCount={LineCount}",
+                "SapBaseDeliveryDocEntry={SapBaseDeliveryDocEntry}, " +
+                "SapReturnRequestDocEntry={SapReturnRequestDocEntry}, LineCount={LineCount}",
                 request.ExternalCreditMemoId,
                 request.CustomerCode,
                 request.SapBaseInvoiceDocEntry,
                 request.SapBaseDeliveryDocEntry,
+                request.SapReturnRequestDocEntry,
                 request.Lines.Count);
 
-            // ── Pre-validate: ensure base invoice(s) are open ──
-            var baseInvoiceDocEntries = request.Lines
-                .Select(l => l.BaseInvoiceDocEntry!.Value)
-                .Distinct()
-                .ToList();
+            // ── Build Return Request line index (ItemCode → ORRR LineNum) ──
+            // When a Return Request exists, the Credit Memo copies from ORRR
+            // (BaseType=16) so SAP closes the ORRR and the Relationship Map
+            // shows the full chain: SO → Delivery → Invoice → Return Request → Credit Memo.
+            Dictionary<string, int>? returnRequestLineIndex = null;
 
-            foreach (var baseDocEntry in baseInvoiceDocEntries)
+            if (request.SapReturnRequestDocEntry.HasValue
+                && request.SapReturnRequestDocEntry.Value > 0)
             {
-                var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+                var returnReq = (Documents)_company!.GetBusinessObject(
+                    BoObjectTypes.oReturnRequest);
                 try
                 {
-                    if (invoice.GetByKey(baseDocEntry))
+                    if (!returnReq.GetByKey(request.SapReturnRequestDocEntry.Value))
                     {
-                        if (invoice.DocumentStatus != BoStatus.bost_Open)
-                        {
-                            int closedDocNum = invoice.DocNum;
-                            throw new InvalidOperationException(
-                                $"SAP B1 AR Invoice DocEntry={baseDocEntry} (DocNum={closedDocNum}) " +
-                                "is closed. Cannot create a Credit Memo against a closed invoice — " +
-                                "open the invoice in SAP B1 first.");
-                        }
+                        throw new InvalidOperationException(
+                            $"SAP B1 Return Request DocEntry=" +
+                            $"{request.SapReturnRequestDocEntry.Value} not found.");
                     }
-                    // If invoice not found, let SAP DI API handle the error naturally
+
+                    if (returnReq.DocumentStatus != BoStatus.bost_Open)
+                    {
+                        _logger.LogWarning(
+                            "Return Request DocEntry={DocEntry} is already closed " +
+                            "— falling back to Copy-To from Invoice (BaseType=13)",
+                            request.SapReturnRequestDocEntry.Value);
+                    }
+                    else
+                    {
+                        returnRequestLineIndex = new Dictionary<string, int>();
+                        for (int ln = 0; ln < returnReq.Lines.Count; ln++)
+                        {
+                            returnReq.Lines.SetCurrentLine(ln);
+                            string itemCode = returnReq.Lines.ItemCode;
+                            if (!returnRequestLineIndex.ContainsKey(itemCode))
+                            {
+                                returnRequestLineIndex[itemCode] = returnReq.Lines.LineNum;
+                            }
+                        }
+
+                        _logger.LogInformation(
+                            "Return Request DocEntry={DocEntry} is open with " +
+                            "{LineCount} lines — Credit Memo will use BaseType=16",
+                            request.SapReturnRequestDocEntry.Value,
+                            returnRequestLineIndex.Count);
+                    }
                 }
                 finally
                 {
-                    Marshal.ReleaseComObject(invoice);
+                    Marshal.ReleaseComObject(returnReq);
+                }
+            }
+
+            // ── Pre-validate: ensure base invoice(s) are open ──
+            // Skip invoice validation when copying from Return Request —
+            // SAP resolves the invoice chain through the ORRR.
+            if (returnRequestLineIndex == null)
+            {
+                var baseInvoiceDocEntries = request.Lines
+                    .Select(l => l.BaseInvoiceDocEntry!.Value)
+                    .Distinct()
+                    .ToList();
+
+                foreach (var baseDocEntry in baseInvoiceDocEntries)
+                {
+                    var invoice = (Documents)_company!.GetBusinessObject(
+                        BoObjectTypes.oInvoices);
+                    try
+                    {
+                        if (invoice.GetByKey(baseDocEntry))
+                        {
+                            if (invoice.DocumentStatus != BoStatus.bost_Open)
+                            {
+                                int closedDocNum = invoice.DocNum;
+                                throw new InvalidOperationException(
+                                    $"SAP B1 AR Invoice DocEntry={baseDocEntry} " +
+                                    $"(DocNum={closedDocNum}) is closed. Cannot " +
+                                    "create a Credit Memo against a closed " +
+                                    "invoice — open the invoice in SAP B1 first.");
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        Marshal.ReleaseComObject(invoice);
+                    }
                 }
             }
 
@@ -1706,7 +1767,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             try
             {
-                PopulateCreditMemo(creditMemo, request);
+                PopulateCreditMemo(creditMemo, request, returnRequestLineIndex);
 
                 int result = creditMemo.Add();
 
@@ -1756,10 +1817,15 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
     /// <summary>
     /// Populates the credit memo DI API object with header, UDFs, and lines.
-    /// Every line is created by Copy-To from the original AR Invoice (BaseType=13).
-    /// The base invoice must be open (validated by CreateCreditMemoAsync before this call).
+    /// When <paramref name="returnRequestLineIndex"/> is provided, each line
+    /// uses Copy-To from the Return Request (BaseType=16) which closes the
+    /// ORRR and preserves the full Relationship Map chain.
+    /// Otherwise falls back to Copy-To from the AR Invoice (BaseType=13).
     /// </summary>
-    private void PopulateCreditMemo(Documents creditMemo, SapCreditMemoRequest request)
+    private void PopulateCreditMemo(
+        Documents creditMemo,
+        SapCreditMemoRequest request,
+        Dictionary<string, int>? returnRequestLineIndex = null)
     {
         // Header fields
         creditMemo.CardCode = request.CustomerCode;
@@ -1784,7 +1850,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync", syncDate, "Credit Memo header");
         TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Credit Memo header");
 
-        // Lines — always Copy-To from original invoice
+        bool useReturnRequest = returnRequestLineIndex != null
+            && request.SapReturnRequestDocEntry.HasValue;
+
+        // Lines
         for (int i = 0; i < request.Lines.Count; i++)
         {
             if (i > 0)
@@ -1799,30 +1868,50 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (line.DiscountPercent.HasValue)
                 creditMemo.Lines.DiscountPercent = line.DiscountPercent.Value;
 
-            // Warehouse: only set when the caller supplies an explicit value.
-            // SAP auto-resolves each item's default warehouse from the Item Master,
-            // which handles both inventory and service-type items correctly.
             if (!string.IsNullOrEmpty(line.WarehouseCode))
                 creditMemo.Lines.WarehouseCode = line.WarehouseCode;
 
-            // Copy-To from AR Invoice (BaseType=13) — mandatory
-            creditMemo.Lines.BaseType = (int)BoObjectTypes.oInvoices;  // 13
-            creditMemo.Lines.BaseEntry = line.BaseInvoiceDocEntry!.Value;
-            creditMemo.Lines.BaseLine = line.BaseInvoiceLineNum!.Value;
-
-            _logger.LogDebug(
-                "Credit Memo Line[{Index}]: BaseType=oInvoices, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
-                i, line.BaseInvoiceDocEntry.Value, line.BaseInvoiceLineNum.Value);
-
-            // ActualBaseEntry/ActualBaseLine for delivery chain (SO → ODLN → OINV)
-            if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
+            // ── Base document reference ──
+            if (useReturnRequest
+                && returnRequestLineIndex!.TryGetValue(line.ItemCode, out int orrLineNum))
             {
-                creditMemo.Lines.ActualBaseEntry = line.BaseDeliveryDocEntry.Value;
-                creditMemo.Lines.ActualBaseLine = line.BaseDeliveryLineNum.Value;
+                // Copy-To from Return Request (BaseType=16)
+                // This closes the ORRR and links the full chain:
+                // SO → Delivery → Invoice → Return Request → Credit Memo
+                creditMemo.Lines.BaseType = (int)BoObjectTypes.oReturnRequest;  // 16
+                creditMemo.Lines.BaseEntry = request.SapReturnRequestDocEntry!.Value;
+                creditMemo.Lines.BaseLine = orrLineNum;
 
                 _logger.LogDebug(
-                    "Credit Memo Line[{Index}]: ActualBaseEntry={ActualBaseEntry}, ActualBaseLine={ActualBaseLine}",
-                    i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
+                    "Credit Memo Line[{Index}]: BaseType=oReturnRequest, " +
+                    "BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                    i, request.SapReturnRequestDocEntry.Value, orrLineNum);
+            }
+            else
+            {
+                // Fallback: Copy-To from AR Invoice (BaseType=13)
+                creditMemo.Lines.BaseType = (int)BoObjectTypes.oInvoices;  // 13
+                creditMemo.Lines.BaseEntry = line.BaseInvoiceDocEntry!.Value;
+                creditMemo.Lines.BaseLine = line.BaseInvoiceLineNum!.Value;
+
+                _logger.LogDebug(
+                    "Credit Memo Line[{Index}]: BaseType=oInvoices, " +
+                    "BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                    i, line.BaseInvoiceDocEntry.Value, line.BaseInvoiceLineNum.Value);
+
+                // ActualBaseEntry/ActualBaseLine for delivery chain
+                if (line.BaseDeliveryDocEntry.HasValue
+                    && line.BaseDeliveryLineNum.HasValue)
+                {
+                    creditMemo.Lines.ActualBaseEntry = line.BaseDeliveryDocEntry.Value;
+                    creditMemo.Lines.ActualBaseLine = line.BaseDeliveryLineNum.Value;
+
+                    _logger.LogDebug(
+                        "Credit Memo Line[{Index}]: ActualBaseEntry={ActualBaseEntry}, " +
+                        "ActualBaseLine={ActualBaseLine}",
+                        i, line.BaseDeliveryDocEntry.Value,
+                        line.BaseDeliveryLineNum.Value);
+                }
             }
 
             _logger.LogDebug(
