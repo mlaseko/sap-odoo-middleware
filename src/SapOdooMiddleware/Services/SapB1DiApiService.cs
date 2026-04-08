@@ -515,7 +515,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                             if (b > 0) pickList.Lines.BinAllocations.Add();
                             pickList.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
                             pickList.Lines.BinAllocations.Quantity = allocations[b].allocQty;
-                            pickList.Lines.BinAllocations.BinActionType = BinActionTypeEnum.batFromWarehouse;
                             pickList.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = pickLineIndex;
 
                             _logger.LogInformation(
@@ -990,7 +989,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                         if (b > 0) invoice.Lines.BinAllocations.Add();
                         invoice.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
                         invoice.Lines.BinAllocations.Quantity = allocations[b].allocQty;
-                        invoice.Lines.BinAllocations.BinActionType = BinActionTypeEnum.batFromWarehouse;
                         invoice.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = i;
 
                         _logger.LogInformation(
