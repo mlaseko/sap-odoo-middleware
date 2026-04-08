@@ -37,4 +37,11 @@ public class SapB1Settings
     /// Override via <c>SapB1:DefaultWarehouseCode</c> in appsettings.
     /// </summary>
     public string DefaultWarehouseCode { get; set; } = "MainWHSE";
+
+    /// <summary>
+    /// Ordered list of bin location codes (OBIN.BinCode) for cascading pick list allocation.
+    /// Stock is allocated from the first bin with availability, then the next, etc.
+    /// If empty, pick lists are created without bin allocation (legacy behavior).
+    /// </summary>
+    public List<string> BinLocationPriority { get; set; } = new();
 }
