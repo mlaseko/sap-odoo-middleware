@@ -1826,16 +1826,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "Credit Memo Line[{Index}]: BaseType=oInvoices, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
                 i, line.BaseInvoiceDocEntry.Value, line.BaseInvoiceLineNum.Value);
 
-            // ActualBaseEntry/ActualBaseLine for delivery chain (SO → ODLN → OINV)
-            if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
-            {
-                creditMemo.Lines.ActualBaseEntry = line.BaseDeliveryDocEntry.Value;
-                creditMemo.Lines.ActualBaseLine = line.BaseDeliveryLineNum.Value;
-
-                _logger.LogDebug(
-                    "Credit Memo Line[{Index}]: ActualBaseEntry={ActualBaseEntry}, ActualBaseLine={ActualBaseLine}",
-                    i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
-            }
+            // Note: ActualBaseEntry/ActualBaseLine are NOT set here.
+            // SAP resolves the delivery chain internally through the
+            // Invoice's own base references.  Setting them explicitly
+            // with incorrect line numbers causes DI API error -5002.
 
             _logger.LogDebug(
                 "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
