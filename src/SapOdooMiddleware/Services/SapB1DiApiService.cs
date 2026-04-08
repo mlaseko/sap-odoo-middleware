@@ -1704,18 +1704,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
-            // ── Cancel the Return Request BEFORE creating the Credit Memo ──
-            // The ORRR was created by Copy-To from the same Invoice, which
-            // "locks" the open quantity on the invoice lines.  Cancelling
-            // (not closing) releases that quantity so the Credit Memo can
-            // reference the same invoice lines.  Close() would auto-close
-            // the invoice lines, making them unavailable.
-            if (request.SapReturnRequestDocEntry.HasValue
-                && request.SapReturnRequestDocEntry.Value > 0)
-            {
-                CancelReturnRequest(request.SapReturnRequestDocEntry.Value);
-            }
-
             var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
 
             try
@@ -1919,68 +1907,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
-    /// <summary>
-    /// Cancels an open Return Request (ORRR) in SAP B1 before a Credit Memo
-    /// is created from the same Invoice.  The ORRR "locks" the open quantity
-    /// on the invoice lines — cancelling it releases those quantities so the
-    /// Credit Memo can reference them.  Using Cancel (not Close) keeps the
-    /// Invoice lines open; Close would auto-close the invoice lines.
-    /// Non-fatal: logs a warning on failure rather than throwing.
-    /// </summary>
-    private void CancelReturnRequest(int returnRequestDocEntry)
-    {
-        try
-        {
-            var returnReq = (Documents)_company!.GetBusinessObject(
-                BoObjectTypes.oReturnRequest);
-            try
-            {
-                if (!returnReq.GetByKey(returnRequestDocEntry))
-                {
-                    _logger.LogWarning(
-                        "Return Request DocEntry={DocEntry} not found — cannot cancel",
-                        returnRequestDocEntry);
-                    return;
-                }
-
-                if (returnReq.DocumentStatus != BoStatus.bost_Open)
-                {
-                    _logger.LogInformation(
-                        "Return Request DocEntry={DocEntry} is already closed/cancelled",
-                        returnRequestDocEntry);
-                    return;
-                }
-
-                int result = returnReq.Cancel();
-                if (result != 0)
-                {
-                    _company!.GetLastError(out int errCode, out string errMsg);
-                    _logger.LogWarning(
-                        "Failed to cancel Return Request DocEntry={DocEntry}: " +
-                        "DI API error {ErrCode}: {ErrMsg}",
-                        returnRequestDocEntry, errCode, errMsg);
-                }
-                else
-                {
-                    _logger.LogInformation(
-                        "Return Request DocEntry={DocEntry} cancelled — " +
-                        "invoice line quantities released for Credit Memo",
-                        returnRequestDocEntry);
-                }
-            }
-            finally
-            {
-                Marshal.ReleaseComObject(returnReq);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Non-fatal: could not cancel Return Request DocEntry={DocEntry}",
-                returnRequestDocEntry);
-        }
-    }
-
     // ================================
     // DELIVERY NOTE STATUS (ODLN)
     // ================================
@@ -2094,112 +2020,135 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             EnsureConnected();
 
-            // ── Validate: invoice DocEntry is required for Return Request ──
-            if (!request.SapBaseInvoiceDocEntry.HasValue || request.SapBaseInvoiceDocEntry.Value <= 0)
+            // ── Validate: each line must reference the base delivery ──
+            for (int i = 0; i < request.Lines.Count; i++)
             {
-                throw new InvalidOperationException(
-                    "SapBaseInvoiceDocEntry is required. Return Requests are created " +
-                    "by Copy-To from the A/R Invoice (BaseType=13).");
+                var ln = request.Lines[i];
+                if (!ln.BaseDeliveryDocEntry.HasValue || !ln.BaseDeliveryLineNum.HasValue)
+                {
+                    throw new InvalidOperationException(
+                        $"Goods Return line[{i}] (ItemCode={ln.ItemCode}) is missing " +
+                        "BaseDeliveryDocEntry/BaseDeliveryLineNum. Goods Returns must " +
+                        "be created by Copy-To from the Delivery Note (BaseType=15).");
+                }
             }
 
+            var baseDeliveryDocEntry = request.Lines[0].BaseDeliveryDocEntry!.Value;
+
             _logger.LogInformation(
-                "Creating Return Request (ORRR) — ExternalReturnId={ExternalReturnId}, " +
-                "CustomerCode={CustomerCode}, SapBaseInvoiceDocEntry={SapBaseInvoiceDocEntry}, LineCount={LineCount}",
+                "Creating Goods Return (ORDN) — ExternalReturnId={ExternalReturnId}, " +
+                "CustomerCode={CustomerCode}, BaseDeliveryDocEntry={BaseDeliveryDocEntry}, " +
+                "LineCount={LineCount}",
                 request.ExternalReturnId,
                 request.CustomerCode,
-                request.SapBaseInvoiceDocEntry,
+                baseDeliveryDocEntry,
                 request.Lines.Count);
 
-            // ── Pre-validate: ensure the A/R Invoice is open ──
-            var baseInvoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
-            var invoiceLineIndex = new Dictionary<string, int>();  // ItemCode → LineNum
+            // ── Read base Delivery to get bin allocations ──
+            var baseDelivery = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oDeliveryNotes);
+            // deliveryLineNum → list of (BinAbsEntry, Qty)
+            var deliveryBins = new Dictionary<int, List<(int binAbsEntry, double qty)>>();
             try
             {
-                if (!baseInvoice.GetByKey(request.SapBaseInvoiceDocEntry.Value))
+                if (!baseDelivery.GetByKey(baseDeliveryDocEntry))
                 {
                     throw new InvalidOperationException(
-                        $"SAP B1 A/R Invoice DocEntry={request.SapBaseInvoiceDocEntry.Value} not found.");
+                        $"SAP B1 Delivery Note DocEntry={baseDeliveryDocEntry} not found.");
                 }
 
-                if (baseInvoice.DocumentStatus != BoStatus.bost_Open)
+                // Read bin allocations from each delivery line
+                for (int ln = 0; ln < baseDelivery.Lines.Count; ln++)
                 {
-                    int closedDocNum = baseInvoice.DocNum;
-                    throw new InvalidOperationException(
-                        $"SAP B1 A/R Invoice DocEntry={request.SapBaseInvoiceDocEntry.Value} " +
-                        $"(DocNum={closedDocNum}) is closed. Cannot create a Return Request " +
-                        "when the invoice is closed — reverse the incoming payment " +
-                        "in SAP B1 first to re-open the invoice.");
-                }
+                    baseDelivery.Lines.SetCurrentLine(ln);
+                    int lineNum = baseDelivery.Lines.LineNum;
+                    var bins = new List<(int binAbsEntry, double qty)>();
 
-                // Build ItemCode → LineNum index from the invoice for Copy-To mapping
-                for (int ln = 0; ln < baseInvoice.Lines.Count; ln++)
-                {
-                    baseInvoice.Lines.SetCurrentLine(ln);
-                    string itemCode = baseInvoice.Lines.ItemCode;
-                    // Use first occurrence if item appears on multiple lines
-                    if (!invoiceLineIndex.ContainsKey(itemCode))
+                    if (baseDelivery.Lines.BinAllocations.Count > 0)
                     {
-                        invoiceLineIndex[itemCode] = baseInvoice.Lines.LineNum;
+                        for (int b = 0; b < baseDelivery.Lines.BinAllocations.Count; b++)
+                        {
+                            baseDelivery.Lines.BinAllocations.SetCurrentLine(b);
+                            bins.Add((
+                                baseDelivery.Lines.BinAllocations.BinAbsEntry,
+                                baseDelivery.Lines.BinAllocations.Quantity
+                            ));
+                        }
                     }
+
+                    deliveryBins[lineNum] = bins;
                 }
 
                 _logger.LogInformation(
-                    "A/R Invoice DocEntry={DocEntry} is open with {LineCount} lines",
-                    request.SapBaseInvoiceDocEntry.Value, invoiceLineIndex.Count);
+                    "Delivery Note DocEntry={DocEntry} has {LineCount} lines",
+                    baseDeliveryDocEntry, baseDelivery.Lines.Count);
             }
             finally
             {
-                Marshal.ReleaseComObject(baseInvoice);
+                Marshal.ReleaseComObject(baseDelivery);
             }
 
-            // ── Create Return Request (ORRR) with Copy-To from Invoice ──
-            var returnRequest = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturnRequest);
+            // ── Create Goods Return (ORDN) with Copy-To from Delivery ──
+            var goodsReturn = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oReturns);
 
-            SetGoodsReturnHeader(returnRequest, request);
+            SetGoodsReturnHeader(goodsReturn, request);
 
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 if (i > 0)
-                    returnRequest.Lines.Add();
+                    goodsReturn.Lines.Add();
 
                 var line = request.Lines[i];
 
-                returnRequest.Lines.ItemCode = line.ItemCode;
-                returnRequest.Lines.Quantity = line.Quantity;
+                goodsReturn.Lines.ItemCode = line.ItemCode;
+                goodsReturn.Lines.Quantity = line.Quantity;
 
-                // Copy-To from A/R Invoice (BaseType=13)
-                returnRequest.Lines.BaseType = (int)BoObjectTypes.oInvoices;  // 13
-                returnRequest.Lines.BaseEntry = request.SapBaseInvoiceDocEntry.Value;
+                if (!string.IsNullOrEmpty(line.WarehouseCode))
+                    goodsReturn.Lines.WarehouseCode = line.WarehouseCode;
 
-                // Resolve the invoice line number by matching ItemCode
-                if (invoiceLineIndex.TryGetValue(line.ItemCode, out int invoiceLineNum))
-                {
-                    returnRequest.Lines.BaseLine = invoiceLineNum;
-                }
-                else
-                {
-                    throw new InvalidOperationException(
-                        $"Return Request line[{i}] ItemCode={line.ItemCode} not found on " +
-                        $"A/R Invoice DocEntry={request.SapBaseInvoiceDocEntry.Value}. " +
-                        "Cannot create Copy-To reference.");
-                }
+                // Copy-To from Delivery Note (BaseType=15)
+                goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;  // 15
+                goodsReturn.Lines.BaseEntry = line.BaseDeliveryDocEntry!.Value;
+                goodsReturn.Lines.BaseLine = line.BaseDeliveryLineNum!.Value;
 
                 _logger.LogDebug(
-                    "Return Request Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
-                    "BaseType=oInvoices, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                    "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
+                    "BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
                     i, line.ItemCode, line.Quantity,
-                    request.SapBaseInvoiceDocEntry.Value, invoiceLineNum);
+                    line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
+
+                // Apply bin allocations from the original delivery line
+                int deliveryLineNum = line.BaseDeliveryLineNum!.Value;
+                if (deliveryBins.TryGetValue(deliveryLineNum, out var bins) && bins.Count > 0)
+                {
+                    for (int b = 0; b < bins.Count; b++)
+                    {
+                        if (b > 0)
+                            goodsReturn.Lines.BinAllocations.Add();
+
+                        goodsReturn.Lines.BinAllocations.BinAbsEntry = bins[b].binAbsEntry;
+                        goodsReturn.Lines.BinAllocations.Quantity = bins[b].qty;
+                        goodsReturn.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = i;
+
+                        _logger.LogDebug(
+                            "Goods Return Line[{LineIndex}] Bin[{BinIndex}]: " +
+                            "BinAbsEntry={BinAbsEntry}, Qty={Qty}",
+                            i, b, bins[b].binAbsEntry, bins[b].qty);
+                    }
+                }
             }
 
-            int result = returnRequest.Add();
+            int result = goodsReturn.Add();
 
             if (result != 0)
             {
                 _company!.GetLastError(out int errCode, out string errMsg);
-                Marshal.ReleaseComObject(returnRequest);
+                Marshal.ReleaseComObject(goodsReturn);
 
                 _logger.LogError(
-                    "Failed to create Return Request for {ExternalReturnId}: DI API error {ErrCode}: {ErrMsg}",
+                    "Failed to create Goods Return for {ExternalReturnId}: " +
+                    "DI API error {ErrCode}: {ErrMsg}",
                     request.ExternalReturnId, errCode, errMsg);
 
                 throw new InvalidOperationException(
@@ -2208,13 +2157,13 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             int docEntry = int.Parse(_company!.GetNewObjectKey());
 
-            returnRequest.GetByKey(docEntry);
-            int docNum = returnRequest.DocNum;
+            goodsReturn.GetByKey(docEntry);
+            int docNum = goodsReturn.DocNum;
 
-            Marshal.ReleaseComObject(returnRequest);
+            Marshal.ReleaseComObject(goodsReturn);
 
             _logger.LogInformation(
-                "✅ Return Request created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                "Goods Return (ORDN) created: DocEntry={DocEntry}, DocNum={DocNum}, " +
                 "ExternalReturnId={ExternalReturnId}, LineCount={LineCount}",
                 docEntry, docNum, request.ExternalReturnId, request.Lines.Count);
 
