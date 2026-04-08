@@ -70,6 +70,15 @@ public class SapCreditMemoRequest
     public int? SapSalesOrderDocEntry { get; set; }
 
     /// <summary>
+    /// SAP Return Request DocEntry (ORRR.DocEntry).
+    /// When provided, the Credit Memo is created by Copy-To from the Return
+    /// Request (BaseType=16) instead of from the A/R Invoice (BaseType=13).
+    /// This links the Credit Memo to the Return Request in the SAP B1
+    /// Relationship Map and automatically closes the Return Request.
+    /// </summary>
+    public int? SapReturnRequestDocEntry { get; set; }
+
+    /// <summary>
     /// Odoo sale.order identifier (e.g. "SO0042").
     /// Stored in SAP B1 header UDF <c>U_Odoo_SO_ID</c>.
     /// </summary>
