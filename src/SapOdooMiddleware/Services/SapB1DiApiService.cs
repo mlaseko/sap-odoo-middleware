@@ -598,14 +598,23 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     $"SAP B1 Sales Order with DocEntry={docEntry} not found.");
             }
 
-            // Guard: document must be open for updates
+            // If document is closed (fully delivered/invoiced), skip update gracefully.
             if (order.DocumentStatus != BoStatus.bost_Open)
             {
                 int closedDocNum = order.DocNum;
                 Marshal.ReleaseComObject(order);
-                throw new InvalidOperationException(
-                    $"SAP B1 Sales Order DocEntry={docEntry} (DocNum={closedDocNum}) is closed. " +
-                    "Cannot update a closed document — open it in SAP B1 first.");
+
+                _logger.LogInformation(
+                    "SAP Sales Order DocEntry={DocEntry} (DocNum={DocNum}) is closed — " +
+                    "skipping UDF update. This is expected after delivery/invoicing.",
+                    docEntry, closedDocNum);
+
+                return new SapSalesOrderResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = closedDocNum,
+                    UOdooSoId = request.ResolvedSoId
+                };
             }
 
             int docNum = order.DocNum;
@@ -1361,14 +1370,28 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     $"SAP B1 AR Invoice with DocEntry={docEntry} not found.");
             }
 
-            // Guard: document must be open for updates
+            // Guard: if document is closed (fully paid), skip the update gracefully.
+            // This is expected — once a payment is applied, SAP closes the invoice.
+            // The update automated action in Odoo may still fire on field changes,
+            // but there's nothing to update on a closed document.
             if (invoice.DocumentStatus != BoStatus.bost_Open)
             {
                 int closedDocNum = invoice.DocNum;
+                var closedLines = ReadInvoiceLines(invoice);
                 Marshal.ReleaseComObject(invoice);
-                throw new InvalidOperationException(
-                    $"SAP B1 AR Invoice DocEntry={docEntry} (DocNum={closedDocNum}) is closed. " +
-                    "Cannot update a closed document — open it in SAP B1 first.");
+
+                _logger.LogInformation(
+                    "SAP AR Invoice DocEntry={DocEntry} (DocNum={DocNum}) is closed (fully paid) — " +
+                    "skipping UDF update. This is expected after payment.",
+                    docEntry, closedDocNum);
+
+                return new SapInvoiceResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = closedDocNum,
+                    ExternalInvoiceId = request.ExternalInvoiceId,
+                    Lines = closedLines
+                };
             }
 
             int docNum = invoice.DocNum;
@@ -1830,14 +1853,24 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     $"SAP B1 AR Credit Memo with DocEntry={docEntry} not found.");
             }
 
-            // Guard: document must be open for updates
+            // If document is closed, skip update gracefully.
             if (creditMemo.DocumentStatus != BoStatus.bost_Open)
             {
                 int closedDocNum = creditMemo.DocNum;
                 Marshal.ReleaseComObject(creditMemo);
-                throw new InvalidOperationException(
-                    $"SAP B1 AR Credit Memo DocEntry={docEntry} (DocNum={closedDocNum}) is closed. " +
-                    "Cannot update a closed document — open it in SAP B1 first.");
+
+                _logger.LogInformation(
+                    "SAP AR Credit Memo DocEntry={DocEntry} (DocNum={DocNum}) is closed — " +
+                    "skipping UDF update.",
+                    docEntry, closedDocNum);
+
+                return new SapCreditMemoResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = closedDocNum,
+                    ExternalCreditMemoId = request.ExternalCreditMemoId,
+                    OdooInvoiceId = request.OdooInvoiceId
+                };
             }
 
             int docNum = creditMemo.DocNum;
@@ -2173,14 +2206,24 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     $"SAP B1 Goods Return with DocEntry={docEntry} not found.");
             }
 
-            // Guard: document must be open for updates
+            // If document is closed, skip update gracefully.
             if (goodsReturn.DocumentStatus != BoStatus.bost_Open)
             {
                 int closedDocNum = goodsReturn.DocNum;
                 Marshal.ReleaseComObject(goodsReturn);
-                throw new InvalidOperationException(
-                    $"SAP B1 Goods Return DocEntry={docEntry} (DocNum={closedDocNum}) is closed. " +
-                    "Cannot update a closed document — open it in SAP B1 first.");
+
+                _logger.LogInformation(
+                    "SAP Goods Return DocEntry={DocEntry} (DocNum={DocNum}) is closed — " +
+                    "skipping UDF update.",
+                    docEntry, closedDocNum);
+
+                return new SapGoodsReturnResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = closedDocNum,
+                    ExternalReturnId = request.ExternalReturnId,
+                    OdooPickingId = request.OdooPickingId
+                };
             }
 
             int docNum = goodsReturn.DocNum;
