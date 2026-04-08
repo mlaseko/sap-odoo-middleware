@@ -1704,6 +1704,17 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
+            // ── Close the Return Request BEFORE creating the Credit Memo ──
+            // The ORRR was created by Copy-To from the same Invoice, which
+            // "locks" the open quantity on the invoice lines.  Closing it
+            // first releases that quantity so the Credit Memo can reference
+            // the same invoice lines.
+            if (request.SapReturnRequestDocEntry.HasValue
+                && request.SapReturnRequestDocEntry.Value > 0)
+            {
+                CloseReturnRequest(request.SapReturnRequestDocEntry.Value);
+            }
+
             var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
 
             try
@@ -1728,18 +1739,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 int docEntry = int.Parse(_company!.GetNewObjectKey());
                 creditMemo.GetByKey(docEntry);
                 int docNum = creditMemo.DocNum;
-
-                Marshal.ReleaseComObject(creditMemo);
-
-                // ── Close the Return Request if provided ──
-                // SAP DI API doesn't support BaseType=oReturnRequest on credit
-                // memo lines, so we close the ORRR separately after the credit
-                // memo is created.  This keeps no orphaned open documents.
-                if (request.SapReturnRequestDocEntry.HasValue
-                    && request.SapReturnRequestDocEntry.Value > 0)
-                {
-                    CloseReturnRequest(request.SapReturnRequestDocEntry.Value);
-                }
 
                 _logger.LogInformation(
                     "AR Credit Memo created (Copy-To): DocEntry={DocEntry}, DocNum={DocNum}, " +
