@@ -882,6 +882,46 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
 
         // Set lines
+        // ── Pre-query bin stock if bin allocation is configured ──
+        var binPriority = _settings.BinLocationPriority;
+        bool useBinAllocation = binPriority != null && binPriority.Count > 0;
+        var binInfo = new Dictionary<string, (int absEntry, Dictionary<string, double> stock)>();
+
+        if (useBinAllocation)
+        {
+            var itemCodes = request.Lines.Select(l => l.ItemCode).Distinct().ToList();
+            var itemCodesForSql = string.Join(",", itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
+            var binCodesForSql = string.Join(",", binPriority!.Select(bc => $"'{bc.Replace("'", "''")}'"));
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            rs.DoQuery(
+                $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
+                $"FROM OBIN BIN " +
+                $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" " +
+                $"WHERE BIN.\"BinCode\" IN ({binCodesForSql}) " +
+                $"AND IB.\"ItemCode\" IN ({itemCodesForSql}) " +
+                $"AND IB.\"OnHandQty\" > 0");
+
+            while (!rs.EoF)
+            {
+                var binCode = (string)rs.Fields.Item("BinCode").Value;
+                var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
+                var itemCode = (string)rs.Fields.Item("ItemCode").Value;
+                var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
+
+                if (!binInfo.ContainsKey(binCode))
+                    binInfo[binCode] = (absEntry, new Dictionary<string, double>());
+                binInfo[binCode].stock[itemCode] = onHand;
+
+                rs.MoveNext();
+            }
+            Marshal.ReleaseComObject(rs);
+
+            _logger.LogInformation(
+                "Invoice bin stock query: {BinCount} bins with stock for {ItemCount} items",
+                binInfo.Count, itemCodes.Count);
+        }
+
         for (int i = 0; i < request.Lines.Count; i++)
         {
             if (i > 0)
@@ -912,6 +952,47 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 _logger.LogDebug(
                     "Manual Invoice Line[{Index}]: BaseEntry={BaseEntry}, BaseLine={BaseLine}",
                     i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
+            }
+
+            // ── Cascading bin allocation for this line ──
+            if (useBinAllocation && !line.BaseDeliveryDocEntry.HasValue)
+            {
+                double remaining = line.Quantity;
+                var allocations = new List<(int binAbsEntry, string binCode, double allocQty)>();
+
+                foreach (var binCode in binPriority!)
+                {
+                    if (remaining <= 0) break;
+                    if (!binInfo.TryGetValue(binCode, out var bin)) continue;
+                    if (!bin.stock.TryGetValue(line.ItemCode, out var available) || available <= 0) continue;
+
+                    double take = Math.Min(remaining, available);
+                    allocations.Add((bin.absEntry, binCode, take));
+                    remaining -= take;
+                    bin.stock[line.ItemCode] = available - take;
+                }
+
+                if (remaining <= 0 && allocations.Count > 0)
+                {
+                    for (int b = 0; b < allocations.Count; b++)
+                    {
+                        if (b > 0) invoice.Lines.BinAllocations.Add();
+                        invoice.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
+                        invoice.Lines.BinAllocations.Quantity = allocations[b].allocQty;
+
+                        _logger.LogInformation(
+                            "  Invoice line[{Index}] item {ItemCode}: bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}",
+                            i, line.ItemCode, allocations[b].binCode,
+                            allocations[b].binAbsEntry, allocations[b].allocQty);
+                    }
+                }
+                else if (remaining > 0)
+                {
+                    _logger.LogWarning(
+                        "Invoice line[{Index}] item {ItemCode}: insufficient bin stock " +
+                        "(need {Required}, have {Available}) — letting SAP resolve",
+                        i, line.ItemCode, line.Quantity, line.Quantity - remaining);
+                }
             }
 
             _logger.LogDebug(
