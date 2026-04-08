@@ -1704,15 +1704,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
-            // ── Close the Return Request BEFORE creating the Credit Memo ──
+            // ── Cancel the Return Request BEFORE creating the Credit Memo ──
             // The ORRR was created by Copy-To from the same Invoice, which
-            // "locks" the open quantity on the invoice lines.  Closing it
-            // first releases that quantity so the Credit Memo can reference
-            // the same invoice lines.
+            // "locks" the open quantity on the invoice lines.  Cancelling
+            // (not closing) releases that quantity so the Credit Memo can
+            // reference the same invoice lines.  Close() would auto-close
+            // the invoice lines, making them unavailable.
             if (request.SapReturnRequestDocEntry.HasValue
                 && request.SapReturnRequestDocEntry.Value > 0)
             {
-                CloseReturnRequest(request.SapReturnRequestDocEntry.Value);
+                CancelReturnRequest(request.SapReturnRequestDocEntry.Value);
             }
 
             var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
@@ -1919,13 +1920,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     /// <summary>
-    /// Closes an open Return Request (ORRR) in SAP B1 after a Credit Memo
-    /// has been created.  SAP DI API does not support line-level
-    /// BaseType=oReturnRequest on credit memo lines, so we close the ORRR
-    /// separately to prevent orphaned open documents.
+    /// Cancels an open Return Request (ORRR) in SAP B1 before a Credit Memo
+    /// is created from the same Invoice.  The ORRR "locks" the open quantity
+    /// on the invoice lines — cancelling it releases those quantities so the
+    /// Credit Memo can reference them.  Using Cancel (not Close) keeps the
+    /// Invoice lines open; Close would auto-close the invoice lines.
     /// Non-fatal: logs a warning on failure rather than throwing.
     /// </summary>
-    private void CloseReturnRequest(int returnRequestDocEntry)
+    private void CancelReturnRequest(int returnRequestDocEntry)
     {
         try
         {
@@ -1936,7 +1938,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 if (!returnReq.GetByKey(returnRequestDocEntry))
                 {
                     _logger.LogWarning(
-                        "Return Request DocEntry={DocEntry} not found — cannot close",
+                        "Return Request DocEntry={DocEntry} not found — cannot cancel",
                         returnRequestDocEntry);
                     return;
                 }
@@ -1944,25 +1946,25 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 if (returnReq.DocumentStatus != BoStatus.bost_Open)
                 {
                     _logger.LogInformation(
-                        "Return Request DocEntry={DocEntry} is already closed",
+                        "Return Request DocEntry={DocEntry} is already closed/cancelled",
                         returnRequestDocEntry);
                     return;
                 }
 
-                int result = returnReq.Close();
+                int result = returnReq.Cancel();
                 if (result != 0)
                 {
                     _company!.GetLastError(out int errCode, out string errMsg);
                     _logger.LogWarning(
-                        "Failed to close Return Request DocEntry={DocEntry}: " +
+                        "Failed to cancel Return Request DocEntry={DocEntry}: " +
                         "DI API error {ErrCode}: {ErrMsg}",
                         returnRequestDocEntry, errCode, errMsg);
                 }
                 else
                 {
                     _logger.LogInformation(
-                        "Return Request DocEntry={DocEntry} closed successfully " +
-                        "after Credit Memo creation",
+                        "Return Request DocEntry={DocEntry} cancelled — " +
+                        "invoice line quantities released for Credit Memo",
                         returnRequestDocEntry);
                 }
             }
@@ -1974,7 +1976,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "Non-fatal: could not close Return Request DocEntry={DocEntry}",
+                "Non-fatal: could not cancel Return Request DocEntry={DocEntry}",
                 returnRequestDocEntry);
         }
     }
