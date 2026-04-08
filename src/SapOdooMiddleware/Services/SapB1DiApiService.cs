@@ -384,11 +384,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             int docNum = order.DocNum;
 
             // Capture line info before releasing the COM object (used for pick list linkage).
-            var lineCaptures = new List<(int lineNum, double qty)>();
+            var lineCaptures = new List<(int lineNum, double qty, string itemCode)>();
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 order.Lines.SetCurrentLine(i);
-                lineCaptures.Add((order.Lines.LineNum, order.Lines.Quantity));
+                lineCaptures.Add((order.Lines.LineNum, order.Lines.Quantity, order.Lines.ItemCode));
             }
 
             Marshal.ReleaseComObject(order);
@@ -408,35 +408,151 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                 try
                 {
+                    var binPriority = _settings.BinLocationPriority;
+                    bool useBinAllocation = binPriority != null && binPriority.Count > 0;
+
+                    // ── Resolve bin AbsEntry values and stock levels ──
+                    // Maps: BinCode → (AbsEntry, { ItemCode → AvailableQty })
+                    var binInfo = new Dictionary<string, (int absEntry, Dictionary<string, double> stock)>();
+
+                    if (useBinAllocation)
+                    {
+                        // Collect all unique item codes from SO lines
+                        var itemCodes = lineCaptures.Select(lc => lc.itemCode).Distinct().ToList();
+                        var itemCodesForSql = string.Join(",", itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
+                        var binCodesForSql = string.Join(",", binPriority!.Select(bc => $"'{bc.Replace("'", "''")}'"));
+
+                        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+                        rs.DoQuery(
+                            $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
+                            $"FROM OBIN BIN " +
+                            $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" " +
+                            $"WHERE BIN.\"BinCode\" IN ({binCodesForSql}) " +
+                            $"AND IB.\"ItemCode\" IN ({itemCodesForSql}) " +
+                            $"AND IB.\"OnHandQty\" > 0");
+
+                        while (!rs.EoF)
+                        {
+                            var binCode = (string)rs.Fields.Item("BinCode").Value;
+                            var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
+                            var itemCode = (string)rs.Fields.Item("ItemCode").Value;
+                            var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
+
+                            if (!binInfo.ContainsKey(binCode))
+                                binInfo[binCode] = (absEntry, new Dictionary<string, double>());
+                            binInfo[binCode].stock[itemCode] = onHand;
+
+                            rs.MoveNext();
+                        }
+                        Marshal.ReleaseComObject(rs);
+
+                        _logger.LogInformation(
+                            "Bin stock query returned data for {BinCount} bins across {ItemCount} items",
+                            binInfo.Count, itemCodes.Count);
+                    }
+
+                    // ── Build pick list with cascading bin allocation ──
                     var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
                     pickList.PickDate = DateTime.Now;
 
+                    bool anyLineAllocated = false;
+                    int pickLineIndex = 0;
+
                     for (int i = 0; i < lineCaptures.Count; i++)
                     {
-                        if (i > 0) pickList.Lines.Add();
+                        var (lineNum, qty, itemCode) = lineCaptures[i];
+
+                        if (!useBinAllocation)
+                        {
+                            // Legacy behavior: no bin allocation
+                            if (pickLineIndex > 0) pickList.Lines.Add();
+                            pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
+                            pickList.Lines.OrderEntry = docEntry;
+                            pickList.Lines.OrderRowID = lineNum;
+                            pickList.Lines.ReleasedQuantity = qty;
+                            anyLineAllocated = true;
+                            pickLineIndex++;
+                            continue;
+                        }
+
+                        // Cascading allocation across priority bins
+                        double remaining = qty;
+                        var allocations = new List<(int binAbsEntry, string binCode, double allocQty)>();
+
+                        foreach (var binCode in binPriority!)
+                        {
+                            if (remaining <= 0) break;
+
+                            if (!binInfo.TryGetValue(binCode, out var bin)) continue;
+                            if (!bin.stock.TryGetValue(itemCode, out var available) || available <= 0) continue;
+
+                            double take = Math.Min(remaining, available);
+                            allocations.Add((bin.absEntry, binCode, take));
+                            remaining -= take;
+                            // Reduce available so subsequent lines don't over-allocate
+                            bin.stock[itemCode] = available - take;
+                        }
+
+                        if (remaining > 0)
+                        {
+                            // Not enough stock across all bins — skip this line entirely
+                            _logger.LogWarning(
+                                "Skipping pick list for item {ItemCode} (line {LineNum}): " +
+                                "need {Required}, only {Available} available across priority bins",
+                                itemCode, lineNum, qty, qty - remaining);
+                            continue;
+                        }
+
+                        // Add pick list line with bin allocations
+                        if (pickLineIndex > 0) pickList.Lines.Add();
                         pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
                         pickList.Lines.OrderEntry = docEntry;
-                        pickList.Lines.OrderRowID = lineCaptures[i].lineNum;
-                        pickList.Lines.ReleasedQuantity = lineCaptures[i].qty;
+                        pickList.Lines.OrderRowID = lineNum;
+                        pickList.Lines.ReleasedQuantity = qty;
+
+                        for (int b = 0; b < allocations.Count; b++)
+                        {
+                            if (b > 0) pickList.Lines.BinAllocations.Add();
+                            pickList.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
+                            pickList.Lines.BinAllocations.Quantity = allocations[b].allocQty;
+
+                            _logger.LogInformation(
+                                "  Item {ItemCode} line {LineNum}: bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}",
+                                itemCode, lineNum, allocations[b].binCode,
+                                allocations[b].binAbsEntry, allocations[b].allocQty);
+                        }
+
+                        anyLineAllocated = true;
+                        pickLineIndex++;
                     }
 
-                    int plResult = pickList.Add();
-
-                    if (plResult != 0)
+                    if (!anyLineAllocated)
                     {
-                        _company!.GetLastError(out int plErrCode, out string plErrMsg);
                         _logger.LogWarning(
-                            "Pick list creation failed (ErrCode={ErrCode}): {ErrMsg}", plErrCode, plErrMsg);
+                            "No lines could be fully allocated from priority bins — skipping pick list creation for DocEntry={DocEntry}",
+                            docEntry);
+                        Marshal.ReleaseComObject(pickList);
                     }
                     else
                     {
-                        int pickListEntry = int.Parse(_company!.GetNewObjectKey());
-                        _logger.LogInformation(
-                            "✅ Pick list created: AbsEntry={PickListEntry}", pickListEntry);
-                        response.PickListEntry = pickListEntry;
-                    }
+                        int plResult = pickList.Add();
 
-                    Marshal.ReleaseComObject(pickList);
+                        if (plResult != 0)
+                        {
+                            _company!.GetLastError(out int plErrCode, out string plErrMsg);
+                            _logger.LogWarning(
+                                "Pick list creation failed (ErrCode={ErrCode}): {ErrMsg}", plErrCode, plErrMsg);
+                        }
+                        else
+                        {
+                            int pickListEntry = int.Parse(_company!.GetNewObjectKey());
+                            _logger.LogInformation(
+                                "Pick list created: AbsEntry={PickListEntry}", pickListEntry);
+                            response.PickListEntry = pickListEntry;
+                        }
+
+                        Marshal.ReleaseComObject(pickList);
+                    }
                 }
                 catch (Exception ex)
                 {
