@@ -694,7 +694,27 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             if (request.CopyFromDelivery)
             {
-                return CreateInvoiceCopyFromDelivery(invoice, request);
+                try
+                {
+                    return CreateInvoiceCopyFromDelivery(invoice, request);
+                }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("-5002"))
+                {
+                    // -5002 = "One of the base documents has already been closed"
+                    // The delivery was manually closed in SAP B1.  Fall back to
+                    // the manual invoice path which doesn't reference the delivery
+                    // as a base document.
+                    _logger.LogWarning(
+                        "Copy-From-Delivery failed with -5002 (base document closed) " +
+                        "for Delivery DocEntry={DeliveryDocEntry}. " +
+                        "Falling back to manual invoice creation.",
+                        request.SapDeliveryDocEntry);
+
+                    // Need a fresh Documents object — the failed one may be dirty.
+                    Marshal.ReleaseComObject(invoice);
+                    invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+                    return CreateInvoiceManual(invoice, request);
+                }
             }
             else
             {
