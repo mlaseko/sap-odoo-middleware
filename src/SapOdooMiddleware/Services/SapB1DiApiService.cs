@@ -384,11 +384,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             int docNum = order.DocNum;
 
             // Capture line info before releasing the COM object (used for pick list linkage).
-            var lineCaptures = new List<(int lineNum, double qty, string itemCode)>();
+            var lineCaptures = new List<(int lineNum, double qty, string itemCode, string whsCode)>();
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 order.Lines.SetCurrentLine(i);
-                lineCaptures.Add((order.Lines.LineNum, order.Lines.Quantity, order.Lines.ItemCode));
+                lineCaptures.Add((order.Lines.LineNum, order.Lines.Quantity, order.Lines.ItemCode, order.Lines.WarehouseCode));
             }
 
             Marshal.ReleaseComObject(order);
@@ -412,8 +412,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     bool useBinAllocation = binPriority != null && binPriority.Count > 0;
 
                     // ── Resolve bin AbsEntry values and stock levels ──
-                    // Maps: BinCode → (AbsEntry, { ItemCode → AvailableQty })
-                    var binInfo = new Dictionary<string, (int absEntry, Dictionary<string, double> stock)>();
+                    // Maps: BinCode → (AbsEntry, WhsCode, { ItemCode → AvailableQty })
+                    var binInfo = new Dictionary<string, (int absEntry, string whsCode, Dictionary<string, double> stock)>();
 
                     if (useBinAllocation)
                     {
@@ -424,7 +424,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                         var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
                         rs.DoQuery(
-                            $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
+                            $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
                             $"FROM OBIN BIN " +
                             $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" " +
                             $"WHERE BIN.\"BinCode\" IN ({binCodesForSql}) " +
@@ -435,11 +435,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                         {
                             var binCode = (string)rs.Fields.Item("BinCode").Value;
                             var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
+                            var whsCode = (string)rs.Fields.Item("WhsCode").Value;
                             var itemCode = (string)rs.Fields.Item("ItemCode").Value;
                             var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
 
                             if (!binInfo.ContainsKey(binCode))
-                                binInfo[binCode] = (absEntry, new Dictionary<string, double>());
+                                binInfo[binCode] = (absEntry, whsCode, new Dictionary<string, double>());
                             binInfo[binCode].stock[itemCode] = onHand;
 
                             rs.MoveNext();
@@ -460,7 +461,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                     for (int i = 0; i < lineCaptures.Count; i++)
                     {
-                        var (lineNum, qty, itemCode) = lineCaptures[i];
+                        var (lineNum, qty, itemCode, lineWhsCode) = lineCaptures[i];
 
                         if (!useBinAllocation)
                         {
@@ -484,6 +485,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                             if (remaining <= 0) break;
 
                             if (!binInfo.TryGetValue(binCode, out var bin)) continue;
+                            // Only use bins that belong to the same warehouse as the SO line
+                            if (!string.IsNullOrEmpty(lineWhsCode)
+                                && !string.Equals(bin.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
+                                continue;
                             if (!bin.stock.TryGetValue(itemCode, out var available) || available <= 0) continue;
 
                             double take = Math.Min(remaining, available);
@@ -909,7 +914,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         // ── Pre-query bin stock if bin allocation is configured ──
         var binPriority = _settings.BinLocationPriority;
         bool useBinAllocation = binPriority != null && binPriority.Count > 0;
-        var binInfo = new Dictionary<string, (int absEntry, Dictionary<string, double> stock)>();
+        var binInfo = new Dictionary<string, (int absEntry, string whsCode, Dictionary<string, double> stock)>();
 
         if (useBinAllocation)
         {
@@ -919,7 +924,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
             rs.DoQuery(
-                $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
+                $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
                 $"FROM OBIN BIN " +
                 $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" " +
                 $"WHERE BIN.\"BinCode\" IN ({binCodesForSql}) " +
@@ -930,11 +935,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             {
                 var binCode = (string)rs.Fields.Item("BinCode").Value;
                 var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
+                var whsCode = (string)rs.Fields.Item("WhsCode").Value;
                 var itemCode = (string)rs.Fields.Item("ItemCode").Value;
                 var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
 
                 if (!binInfo.ContainsKey(binCode))
-                    binInfo[binCode] = (absEntry, new Dictionary<string, double>());
+                    binInfo[binCode] = (absEntry, whsCode, new Dictionary<string, double>());
                 binInfo[binCode].stock[itemCode] = onHand;
 
                 rs.MoveNext();
@@ -981,6 +987,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             // ── Cascading bin allocation for this line ──
             if (useBinAllocation && !line.BaseDeliveryDocEntry.HasValue)
             {
+                // Resolve the warehouse for this line — explicit, default, or SAP fallback
+                string lineWhsCode = !string.IsNullOrEmpty(line.WarehouseCode)
+                    ? line.WarehouseCode
+                    : _settings.DefaultWarehouseCode ?? "";
+
                 double remaining = line.Quantity;
                 var allocations = new List<(int binAbsEntry, string binCode, double allocQty)>();
 
@@ -988,6 +999,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 {
                     if (remaining <= 0) break;
                     if (!binInfo.TryGetValue(binCode, out var bin)) continue;
+                    // Only use bins that belong to the same warehouse as the line
+                    if (!string.IsNullOrEmpty(lineWhsCode)
+                        && !string.Equals(bin.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
+                        continue;
                     if (!bin.stock.TryGetValue(line.ItemCode, out var available) || available <= 0) continue;
 
                     double take = Math.Min(remaining, available);
