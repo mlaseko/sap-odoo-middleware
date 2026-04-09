@@ -764,12 +764,18 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(invoice.UserFields, "U_Odoo_LastSync", syncDate, "Invoice header");
         TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
 
-        // Copy lines from the delivery document
-        // Each invoice line references its source delivery line via BaseType/BaseEntry/BaseLine
+        // Copy lines from the delivery document.
+        // Each invoice line references its source delivery line via BaseType/BaseEntry/BaseLine.
+        // We set line fields explicitly (ItemCode, Quantity, Price, WarehouseCode) instead
+        // of relying on SAP's automatic copy, because auto-copy also inherits bin
+        // allocations from the delivery.  When the pick list allocated stock from a
+        // bin in a different warehouse (e.g. COCWHSE bin on a MainWHSE line), the
+        // inherited bin/warehouse mismatch causes DI API error -10.  Invoices don't
+        // move stock so bin allocations are unnecessary.
         int deliveryLineCount = delivery.Lines.Count;
 
         _logger.LogInformation(
-            "Copying {DeliveryLineCount} line(s) from Delivery DocEntry={DeliveryDocEntry} to Invoice",
+            "Copying {DeliveryLineCount} line(s) from Delivery DocEntry={DeliveryDocEntry} to Invoice (explicit lines, no bin allocations)",
             deliveryLineCount, deliveryDocEntry);
 
         for (int i = 0; i < deliveryLineCount; i++)
@@ -779,19 +785,27 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (i > 0)
                 invoice.Lines.Add();
 
-            // Set base document reference (copy-from link)
+            // Set line data explicitly from the delivery
+            invoice.Lines.ItemCode = delivery.Lines.ItemCode;
+            invoice.Lines.Quantity = delivery.Lines.Quantity;
+            invoice.Lines.UnitPrice = delivery.Lines.UnitPrice;
+            invoice.Lines.WarehouseCode = delivery.Lines.WarehouseCode;
+
+            // Set base document reference to maintain the document chain
             invoice.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
             invoice.Lines.BaseEntry = deliveryDocEntry;
             invoice.Lines.BaseLine = delivery.Lines.LineNum;
 
             _logger.LogDebug(
                 "Invoice Line[{Index}]: BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}, " +
-                "ItemCode={ItemCode}, Qty={Qty}",
+                "ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Warehouse={Warehouse}",
                 i,
                 deliveryDocEntry,
                 delivery.Lines.LineNum,
                 delivery.Lines.ItemCode,
-                delivery.Lines.Quantity);
+                delivery.Lines.Quantity,
+                delivery.Lines.UnitPrice,
+                delivery.Lines.WarehouseCode);
         }
 
         // Capture the originating Sales Order DocEntry from the delivery for the response
