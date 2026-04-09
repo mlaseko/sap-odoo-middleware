@@ -119,7 +119,6 @@ public class CreditMemosController : ControllerBase
                 OdooInvoiceId = odooInvoiceId,
                 SapDocEntry = result.DocEntry,
                 SapSalesOrderDocEntry = request.SapSalesOrderDocEntry,
-                SapDeliveryDocEntry = request.SapBaseDeliveryDocEntry,
                 SapBaseInvoiceDocEntry = request.SapBaseInvoiceDocEntry
             });
 
