@@ -1782,76 +1782,142 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             EnsureConnected();
 
-            // ── Enforce Copy-To: every line must reference the base invoice ──
-            for (int i = 0; i < request.Lines.Count; i++)
+            int invoiceDocEntry = request.SapBaseInvoiceDocEntry
+                ?? throw new InvalidOperationException(
+                    "SapBaseInvoiceDocEntry is required. Credit Memos " +
+                    "must be created by Copy-From an open AR Invoice.");
+
+            _logger.LogInformation(
+                "Creating AR Credit Memo copied from Invoice — " +
+                "ExternalCreditMemoId={ExternalCreditMemoId}, " +
+                "CustomerCode={CustomerCode}, SapBaseInvoiceDocEntry={InvoiceDocEntry}, " +
+                "LineCount={LineCount}",
+                request.ExternalCreditMemoId,
+                request.CustomerCode,
+                invoiceDocEntry,
+                request.Lines.Count);
+
+            // ── Load source Invoice from SAP and validate it's open ──
+            var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+
+            if (!invoice.GetByKey(invoiceDocEntry))
             {
-                var line = request.Lines[i];
-                if (!line.BaseInvoiceDocEntry.HasValue || !line.BaseInvoiceLineNum.HasValue)
-                {
-                    throw new InvalidOperationException(
-                        $"Credit Memo line[{i}] (ItemCode={line.ItemCode}) is missing " +
-                        "BaseInvoiceDocEntry/BaseInvoiceLineNum. Credit memos must be " +
-                        "created by copying from the original AR Invoice (Copy-To).");
-                }
+                Marshal.ReleaseComObject(invoice);
+                throw new InvalidOperationException(
+                    $"SAP B1 AR Invoice DocEntry={invoiceDocEntry} not found.");
+            }
+
+            if (invoice.DocumentStatus != BoStatus.bost_Open)
+            {
+                int closedDocNum = invoice.DocNum;
+                Marshal.ReleaseComObject(invoice);
+                throw new InvalidOperationException(
+                    $"SAP B1 AR Invoice DocEntry={invoiceDocEntry} (DocNum={closedDocNum}) " +
+                    "is closed. Cannot create a Credit Memo against a closed invoice — " +
+                    "reverse the incoming payment in SAP B1 to re-open it first.");
             }
 
             _logger.LogInformation(
-                "Creating AR Credit Memo — ExternalCreditMemoId={ExternalCreditMemoId}, " +
-                "CustomerCode={CustomerCode}, SapBaseInvoiceDocEntry={SapBaseInvoiceDocEntry}, " +
-                "SapBaseDeliveryDocEntry={SapBaseDeliveryDocEntry}, " +
-                "SapReturnRequestDocEntry={SapReturnRequestDocEntry}, LineCount={LineCount}",
-                request.ExternalCreditMemoId,
-                request.CustomerCode,
-                request.SapBaseInvoiceDocEntry,
-                request.SapBaseDeliveryDocEntry,
-                request.SapReturnRequestDocEntry,
-                request.Lines.Count);
+                "Loaded source Invoice: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                "CardCode={CardCode}, Status=Open, LineCount={LineCount}",
+                invoice.DocEntry, invoice.DocNum, invoice.CardCode,
+                invoice.Lines.Count);
 
-            // ── Pre-validate: ensure base invoice(s) are open ──
-            var baseInvoiceDocEntries = request.Lines
-                .Select(l => l.BaseInvoiceDocEntry!.Value)
-                .Distinct()
-                .ToList();
-
-            foreach (var baseDocEntry in baseInvoiceDocEntries)
+            // Build ItemCode → list of (LineNum, Qty, Price, WhsCode) from invoice
+            var invoiceLineIndex = new Dictionary<string, List<(int lineNum, double qty, double price, string whsCode)>>();
+            for (int s = 0; s < invoice.Lines.Count; s++)
             {
-                var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
-                try
-                {
-                    if (invoice.GetByKey(baseDocEntry))
-                    {
-                        if (invoice.DocumentStatus != BoStatus.bost_Open)
-                        {
-                            int closedDocNum = invoice.DocNum;
-                            throw new InvalidOperationException(
-                                $"SAP B1 AR Invoice DocEntry={baseDocEntry} (DocNum={closedDocNum}) " +
-                                "is closed. Cannot create a Credit Memo against a closed invoice — " +
-                                "open the invoice in SAP B1 first.");
-                        }
-                    }
-                    // If invoice not found, let SAP DI API handle the error naturally
-                }
-                finally
-                {
-                    Marshal.ReleaseComObject(invoice);
-                }
+                invoice.Lines.SetCurrentLine(s);
+                string itemCode = invoice.Lines.ItemCode;
+                if (!invoiceLineIndex.ContainsKey(itemCode))
+                    invoiceLineIndex[itemCode] = new List<(int, double, double, string)>();
+                invoiceLineIndex[itemCode].Add((
+                    invoice.Lines.LineNum,
+                    invoice.Lines.Quantity,
+                    invoice.Lines.UnitPrice,
+                    invoice.Lines.WarehouseCode));
             }
+            Marshal.ReleaseComObject(invoice);
 
+            // ── Create Credit Memo (ORIN) ──
             var creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
 
             try
             {
-                PopulateCreditMemo(creditMemo, request);
+                // Header
+                creditMemo.CardCode = request.CustomerCode;
+                creditMemo.NumAtCard = request.ExternalCreditMemoId;
+
+                if (request.DocDate.HasValue)
+                    creditMemo.DocDate = request.DocDate.Value;
+                if (request.DueDate.HasValue)
+                    creditMemo.DocDueDate = request.DueDate.Value;
+                if (!string.IsNullOrEmpty(request.Currency))
+                    creditMemo.DocCurrency = request.Currency;
+
+                // UDFs
+                TrySetUserField(creditMemo.UserFields, "U_Odoo_Invoice_ID",
+                    request.ExternalCreditMemoId, "Credit Memo header");
+                if (!string.IsNullOrEmpty(request.UOdooSoId))
+                    TrySetUserField(creditMemo.UserFields, "U_Odoo_SO_ID",
+                        request.UOdooSoId, "Credit Memo header");
+                var syncDate = DateTime.UtcNow.Date;
+                TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync",
+                    syncDate, "Credit Memo header");
+                TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir",
+                    SyncDirectionOdooToSap, "Credit Memo header");
+
+                // Lines — Copy-From Invoice
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0)
+                        creditMemo.Lines.Add();
+
+                    var line = request.Lines[i];
+
+                    // Match credit line to invoice line by ItemCode
+                    if (!invoiceLineIndex.TryGetValue(line.ItemCode, out var candidates)
+                        || candidates.Count == 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Credit Memo line[{i}] ItemCode={line.ItemCode} not found " +
+                            $"on Invoice DocEntry={invoiceDocEntry}.");
+                    }
+
+                    var match = candidates[0];
+                    candidates.RemoveAt(0);
+
+                    creditMemo.Lines.ItemCode = line.ItemCode;
+                    creditMemo.Lines.Quantity = line.Quantity;
+                    creditMemo.Lines.UnitPrice = line.Price;
+
+                    if (line.DiscountPercent.HasValue)
+                        creditMemo.Lines.DiscountPercent = line.DiscountPercent.Value;
+
+                    if (!string.IsNullOrEmpty(line.WarehouseCode))
+                        creditMemo.Lines.WarehouseCode = line.WarehouseCode;
+
+                    // Copy-From Invoice (BaseType=13)
+                    creditMemo.Lines.BaseType = (int)BoObjectTypes.oInvoices;
+                    creditMemo.Lines.BaseEntry = invoiceDocEntry;
+                    creditMemo.Lines.BaseLine = match.lineNum;
+
+                    _logger.LogDebug(
+                        "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
+                        "BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                        i, line.ItemCode, line.Quantity,
+                        invoiceDocEntry, match.lineNum);
+                }
 
                 int result = creditMemo.Add();
 
                 if (result != 0)
                 {
                     _company!.GetLastError(out int errCode, out string errMsg);
-                    Marshal.ReleaseComObject(creditMemo);
 
                     _logger.LogError(
-                        "Failed to create AR Credit Memo for {ExternalCreditMemoId}: DI API error {ErrCode}: {ErrMsg}",
+                        "Failed to create AR Credit Memo for {ExternalCreditMemoId}: " +
+                        "DI API error {ErrCode}: {ErrMsg}",
                         request.ExternalCreditMemoId, errCode, errMsg);
 
                     throw new InvalidOperationException(
@@ -1863,9 +1929,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 int docNum = creditMemo.DocNum;
 
                 _logger.LogInformation(
-                    "AR Credit Memo created (Copy-To): DocEntry={DocEntry}, DocNum={DocNum}, " +
-                    "ExternalCreditMemoId={ExternalCreditMemoId}, LineCount={LineCount}",
-                    docEntry, docNum, request.ExternalCreditMemoId, request.Lines.Count);
+                    "AR Credit Memo created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "ExternalCreditMemoId={ExternalCreditMemoId}, " +
+                    "BaseInvoiceDocEntry={BaseInvoiceDocEntry}, LineCount={LineCount}",
+                    docEntry, docNum, request.ExternalCreditMemoId,
+                    invoiceDocEntry, request.Lines.Count);
 
                 return new SapCreditMemoResponse
                 {
@@ -1875,86 +1943,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     OdooInvoiceId = request.OdooInvoiceId
                 };
             }
-            catch
+            finally
             {
                 Marshal.ReleaseComObject(creditMemo);
-                throw;
             }
         }
         finally
         {
             _lock.Release();
-        }
-    }
-
-    /// <summary>
-    /// Populates the credit memo DI API object with header, UDFs, and lines.
-    /// Every line is created by Copy-To from the original AR Invoice (BaseType=13).
-    /// The base invoice must be open (validated by CreateCreditMemoAsync before this call).
-    /// </summary>
-    private void PopulateCreditMemo(Documents creditMemo, SapCreditMemoRequest request)
-    {
-        // Header fields
-        creditMemo.CardCode = request.CustomerCode;
-        creditMemo.NumAtCard = request.ExternalCreditMemoId;
-
-        if (request.DocDate.HasValue)
-            creditMemo.DocDate = request.DocDate.Value;
-
-        if (request.DueDate.HasValue)
-            creditMemo.DocDueDate = request.DueDate.Value;
-
-        if (!string.IsNullOrEmpty(request.Currency))
-            creditMemo.DocCurrency = request.Currency;
-
-        // UDFs
-        TrySetUserField(creditMemo.UserFields, "U_Odoo_Invoice_ID", request.ExternalCreditMemoId, "Credit Memo header");
-
-        if (!string.IsNullOrEmpty(request.UOdooSoId))
-            TrySetUserField(creditMemo.UserFields, "U_Odoo_SO_ID", request.UOdooSoId, "Credit Memo header");
-
-        var syncDate = DateTime.UtcNow.Date;
-        TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync", syncDate, "Credit Memo header");
-        TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Credit Memo header");
-
-        // Lines — always Copy-To from original invoice
-        for (int i = 0; i < request.Lines.Count; i++)
-        {
-            if (i > 0)
-                creditMemo.Lines.Add();
-
-            var line = request.Lines[i];
-
-            creditMemo.Lines.ItemCode = line.ItemCode;
-            creditMemo.Lines.Quantity = line.Quantity;
-            creditMemo.Lines.UnitPrice = line.Price;
-
-            if (line.DiscountPercent.HasValue)
-                creditMemo.Lines.DiscountPercent = line.DiscountPercent.Value;
-
-            // Warehouse: only set when the caller supplies an explicit value.
-            // SAP auto-resolves each item's default warehouse from the Item Master,
-            // which handles both inventory and service-type items correctly.
-            if (!string.IsNullOrEmpty(line.WarehouseCode))
-                creditMemo.Lines.WarehouseCode = line.WarehouseCode;
-
-            // Copy-To from AR Invoice (BaseType=13) — mandatory
-            creditMemo.Lines.BaseType = (int)BoObjectTypes.oInvoices;  // 13
-            creditMemo.Lines.BaseEntry = line.BaseInvoiceDocEntry!.Value;
-            creditMemo.Lines.BaseLine = line.BaseInvoiceLineNum!.Value;
-
-            _logger.LogDebug(
-                "Credit Memo Line[{Index}]: BaseType=oInvoices, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
-                i, line.BaseInvoiceDocEntry.Value, line.BaseInvoiceLineNum.Value);
-
-            // Note: ActualBaseEntry/ActualBaseLine are NOT set here.
-            // SAP resolves the delivery chain internally through the
-            // Invoice's own base references.  Setting them explicitly
-            // with incorrect line numbers causes DI API error -5002.
-
-            _logger.LogDebug(
-                "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
-                i, line.ItemCode, line.Quantity, line.Price);
         }
     }
 
@@ -2153,75 +2149,53 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             EnsureConnected();
 
-            // ── Validate: each line must reference the base delivery ──
-            for (int i = 0; i < request.Lines.Count; i++)
-            {
-                var ln = request.Lines[i];
-                if (!ln.BaseDeliveryDocEntry.HasValue || !ln.BaseDeliveryLineNum.HasValue)
-                {
-                    throw new InvalidOperationException(
-                        $"Goods Return line[{i}] (ItemCode={ln.ItemCode}) is missing " +
-                        "BaseDeliveryDocEntry/BaseDeliveryLineNum. Goods Returns must " +
-                        "be created by Copy-To from the Delivery Note (BaseType=15).");
-                }
-            }
-
-            var baseDeliveryDocEntry = request.Lines[0].BaseDeliveryDocEntry!.Value;
+            int deliveryDocEntry = request.SapBaseDeliveryDocEntry
+                ?? throw new InvalidOperationException(
+                    "SapBaseDeliveryDocEntry is required. Goods Returns " +
+                    "must be created by Copy-From a Delivery Note.");
 
             _logger.LogInformation(
-                "Creating Goods Return (ORDN) — ExternalReturnId={ExternalReturnId}, " +
-                "CustomerCode={CustomerCode}, BaseDeliveryDocEntry={BaseDeliveryDocEntry}, " +
-                "LineCount={LineCount}",
+                "Creating Goods Return (ORDN) copied from Delivery — " +
+                "ExternalReturnId={ExternalReturnId}, CustomerCode={CustomerCode}, " +
+                "SapBaseDeliveryDocEntry={DeliveryDocEntry}, LineCount={LineCount}",
                 request.ExternalReturnId,
                 request.CustomerCode,
-                baseDeliveryDocEntry,
+                deliveryDocEntry,
                 request.Lines.Count);
 
-            // ── Read base Delivery to get bin allocations ──
-            var baseDelivery = (Documents)_company!.GetBusinessObject(
+            // ── Load source Delivery from SAP ──
+            var delivery = (Documents)_company!.GetBusinessObject(
                 BoObjectTypes.oDeliveryNotes);
-            // deliveryLineNum → list of (BinAbsEntry, Qty)
-            var deliveryBins = new Dictionary<int, List<(int binAbsEntry, double qty)>>();
-            try
+
+            if (!delivery.GetByKey(deliveryDocEntry))
             {
-                if (!baseDelivery.GetByKey(baseDeliveryDocEntry))
-                {
-                    throw new InvalidOperationException(
-                        $"SAP B1 Delivery Note DocEntry={baseDeliveryDocEntry} not found.");
-                }
-
-                // Read bin allocations from each delivery line
-                for (int ln = 0; ln < baseDelivery.Lines.Count; ln++)
-                {
-                    baseDelivery.Lines.SetCurrentLine(ln);
-                    int lineNum = baseDelivery.Lines.LineNum;
-                    var bins = new List<(int binAbsEntry, double qty)>();
-
-                    if (baseDelivery.Lines.BinAllocations.Count > 0)
-                    {
-                        for (int b = 0; b < baseDelivery.Lines.BinAllocations.Count; b++)
-                        {
-                            baseDelivery.Lines.BinAllocations.SetCurrentLine(b);
-                            bins.Add((
-                                baseDelivery.Lines.BinAllocations.BinAbsEntry,
-                                baseDelivery.Lines.BinAllocations.Quantity
-                            ));
-                        }
-                    }
-
-                    deliveryBins[lineNum] = bins;
-                }
-
-                _logger.LogInformation(
-                    "Delivery Note DocEntry={DocEntry} has {LineCount} lines",
-                    baseDeliveryDocEntry, baseDelivery.Lines.Count);
-            }
-            finally
-            {
-                Marshal.ReleaseComObject(baseDelivery);
+                Marshal.ReleaseComObject(delivery);
+                throw new InvalidOperationException(
+                    $"SAP B1 Delivery Note DocEntry={deliveryDocEntry} not found.");
             }
 
-            // ── Create Goods Return (ORDN) with Copy-To from Delivery ──
+            _logger.LogInformation(
+                "Loaded source Delivery: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                "CardCode={CardCode}, Status={Status}, LineCount={LineCount}",
+                delivery.DocEntry, delivery.DocNum, delivery.CardCode,
+                delivery.DocumentStatus, delivery.Lines.Count);
+
+            // Build ItemCode → list of (LineNum, Qty, WhsCode) from delivery
+            var deliveryLineIndex = new Dictionary<string, List<(int lineNum, double qty, string whsCode)>>();
+            for (int d = 0; d < delivery.Lines.Count; d++)
+            {
+                delivery.Lines.SetCurrentLine(d);
+                string itemCode = delivery.Lines.ItemCode;
+                if (!deliveryLineIndex.ContainsKey(itemCode))
+                    deliveryLineIndex[itemCode] = new List<(int, double, string)>();
+                deliveryLineIndex[itemCode].Add((
+                    delivery.Lines.LineNum,
+                    delivery.Lines.Quantity,
+                    delivery.Lines.WarehouseCode));
+            }
+            Marshal.ReleaseComObject(delivery);
+
+            // ── Create Goods Return (ORDN) ──
             var goodsReturn = (Documents)_company!.GetBusinessObject(
                 BoObjectTypes.oReturns);
 
@@ -2234,42 +2208,34 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                 var line = request.Lines[i];
 
+                // Match return line to delivery line by ItemCode
+                if (!deliveryLineIndex.TryGetValue(line.ItemCode, out var candidates)
+                    || candidates.Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Goods Return line[{i}] ItemCode={line.ItemCode} not found " +
+                        $"on Delivery DocEntry={deliveryDocEntry}.");
+                }
+
+                var match = candidates[0];
+                candidates.RemoveAt(0);
+
                 goodsReturn.Lines.ItemCode = line.ItemCode;
                 goodsReturn.Lines.Quantity = line.Quantity;
+                goodsReturn.Lines.WarehouseCode = !string.IsNullOrEmpty(line.WarehouseCode)
+                    ? line.WarehouseCode
+                    : match.whsCode;
 
-                if (!string.IsNullOrEmpty(line.WarehouseCode))
-                    goodsReturn.Lines.WarehouseCode = line.WarehouseCode;
-
-                // Copy-To from Delivery Note (BaseType=15)
-                goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;  // 15
-                goodsReturn.Lines.BaseEntry = line.BaseDeliveryDocEntry!.Value;
-                goodsReturn.Lines.BaseLine = line.BaseDeliveryLineNum!.Value;
+                // Copy-From Delivery (BaseType=15)
+                goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
+                goodsReturn.Lines.BaseEntry = deliveryDocEntry;
+                goodsReturn.Lines.BaseLine = match.lineNum;
 
                 _logger.LogDebug(
                     "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
-                    "BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                    "BaseEntry={BaseEntry}, BaseLine={BaseLine}, WhsCode={WhsCode}",
                     i, line.ItemCode, line.Quantity,
-                    line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
-
-                // Apply bin allocations from the original delivery line
-                int deliveryLineNum = line.BaseDeliveryLineNum!.Value;
-                if (deliveryBins.TryGetValue(deliveryLineNum, out var bins) && bins.Count > 0)
-                {
-                    for (int b = 0; b < bins.Count; b++)
-                    {
-                        if (b > 0)
-                            goodsReturn.Lines.BinAllocations.Add();
-
-                        goodsReturn.Lines.BinAllocations.BinAbsEntry = bins[b].binAbsEntry;
-                        goodsReturn.Lines.BinAllocations.Quantity = bins[b].qty;
-                        goodsReturn.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = i;
-
-                        _logger.LogDebug(
-                            "Goods Return Line[{LineIndex}] Bin[{BinIndex}]: " +
-                            "BinAbsEntry={BinAbsEntry}, Qty={Qty}",
-                            i, b, bins[b].binAbsEntry, bins[b].qty);
-                    }
-                }
+                    deliveryDocEntry, match.lineNum, goodsReturn.Lines.WarehouseCode);
             }
 
             int result = goodsReturn.Add();

@@ -4,12 +4,10 @@ namespace SapOdooMiddleware.Models.Sap;
 
 /// <summary>
 /// Request payload sent from Odoo to create a Goods Return (ORDN) in SAP B1.
-/// The goods return reverses a Delivery Note (ODLN) using the SAP "Copy-To" mechanism.
-/// Every line <b>must</b> reference the original Delivery Note via
-/// <see cref="SapGoodsReturnLineRequest.BaseDeliveryDocEntry"/> and
-/// <see cref="SapGoodsReturnLineRequest.BaseDeliveryLineNum"/> to maintain the
-/// full document chain.  The related AR Invoice must be open (not closed/cancelled)
-/// — validated via <see cref="SapBaseInvoiceDocEntry"/> when provided.
+/// The goods return reverses a Delivery Note (ODLN) using the Copy-From mechanism.
+/// <see cref="SapBaseDeliveryDocEntry"/> identifies the source delivery; the
+/// middleware loads the delivery from SAP and matches return lines by ItemCode.
+/// Works with both open and closed deliveries.
 /// </summary>
 public class SapGoodsReturnRequest
 {
@@ -32,17 +30,17 @@ public class SapGoodsReturnRequest
     public DateTime? DeliveryDate { get; set; }
 
     /// <summary>
+    /// SAP Delivery Note DocEntry (ODLN.DocEntry) to copy from (required).
+    /// The middleware loads this delivery from SAP and matches return lines
+    /// by ItemCode to resolve the correct BaseLine for each return line.
+    /// </summary>
+    [Required]
+    public int? SapBaseDeliveryDocEntry { get; set; }
+
+    /// <summary>
     /// SAP Sales Order DocEntry (ORDR.DocEntry) for traceability.
     /// </summary>
     public int? SalesOrderDocEntry { get; set; }
-
-    /// <summary>
-    /// SAP AR Invoice DocEntry (OINV.DocEntry) for the invoice linked to
-    /// this delivery.  Used to validate that the invoice is still open
-    /// before creating the goods return — a closed (fully paid) invoice
-    /// means the return flow should not proceed.
-    /// </summary>
-    public int? SapBaseInvoiceDocEntry { get; set; }
 
     /// <summary>
     /// Odoo sale.order identifier (e.g. "SO0042").
@@ -57,15 +55,16 @@ public class SapGoodsReturnRequest
     public int? OdooPickingId { get; set; }
 
     /// <summary>
-    /// Return line items.
+    /// Return line items. ItemCode + Quantity are required; the middleware
+    /// resolves the delivery line number from SAP automatically.
     /// </summary>
     public List<SapGoodsReturnLineRequest> Lines { get; set; } = [];
 }
 
 /// <summary>
-/// Goods return line item.  <see cref="BaseDeliveryDocEntry"/> and
-/// <see cref="BaseDeliveryLineNum"/> are <b>required</b> — every line is created
-/// by Copy-To from the original Delivery Note line (DLN1), maintaining the document chain.
+/// Goods return line item.  Only ItemCode and Quantity are required — the
+/// middleware resolves the base delivery line number by matching ItemCode
+/// against the source delivery loaded from SAP.
 /// </summary>
 public class SapGoodsReturnLineRequest
 {
@@ -79,18 +78,4 @@ public class SapGoodsReturnLineRequest
 
     /// <summary>SAP warehouse code for this line. Maps to RDN1.WhsCode.</summary>
     public string? WarehouseCode { get; set; }
-
-    /// <summary>
-    /// Original Delivery Note DocEntry for Copy-To per line (required).
-    /// Maps to RDN1 BaseEntry with BaseType=15 (Delivery Note).
-    /// </summary>
-    [Required]
-    public int? BaseDeliveryDocEntry { get; set; }
-
-    /// <summary>
-    /// Original Delivery Note line number for Copy-To per line (required).
-    /// Maps to RDN1 BaseLine.
-    /// </summary>
-    [Required]
-    public int? BaseDeliveryLineNum { get; set; }
 }

@@ -4,11 +4,10 @@ namespace SapOdooMiddleware.Models.Sap;
 
 /// <summary>
 /// Request payload sent from Odoo to create an AR Credit Memo (ORIN) in SAP B1.
-/// The credit memo reverses an AR Invoice using the SAP "Copy-To" mechanism.
-/// Every line <b>must</b> reference the original AR Invoice via
-/// <see cref="SapCreditMemoLineRequest.BaseInvoiceDocEntry"/> and
-/// <see cref="SapCreditMemoLineRequest.BaseInvoiceLineNum"/> to maintain the
-/// full document chain.  The base invoice must be open (not closed/cancelled).
+/// The credit memo reverses an open AR Invoice using the Copy-From mechanism.
+/// <see cref="SapBaseInvoiceDocEntry"/> identifies the source invoice; the
+/// middleware loads the invoice from SAP, validates it is open, and matches
+/// credit lines by ItemCode to resolve the correct BaseLine automatically.
 /// </summary>
 public class SapCreditMemoRequest
 {
@@ -51,32 +50,17 @@ public class SapCreditMemoRequest
     public double? VatSum { get; set; }
 
     /// <summary>
-    /// SAP AR Invoice DocEntry (OINV.DocEntry) from which to copy this credit memo.
-    /// When provided, each line sets BaseType=13, BaseEntry, BaseLine to link back
-    /// to the original invoice.
+    /// SAP AR Invoice DocEntry (OINV.DocEntry) to copy from (required).
+    /// The middleware loads this invoice from SAP, verifies it is open,
+    /// and matches credit lines by ItemCode to resolve BaseLine automatically.
     /// </summary>
+    [Required]
     public int? SapBaseInvoiceDocEntry { get; set; }
-
-    /// <summary>
-    /// SAP Delivery Note DocEntry (ODLN.DocEntry) from the original document chain.
-    /// Required when the invoice was created via copy-from-delivery — SAP B1 needs
-    /// ActualBaseEntry / ActualBaseLine referencing the delivery to allow the credit.
-    /// </summary>
-    public int? SapBaseDeliveryDocEntry { get; set; }
 
     /// <summary>
     /// SAP Sales Order DocEntry (ORDR.DocEntry) for traceability.
     /// </summary>
     public int? SapSalesOrderDocEntry { get; set; }
-
-    /// <summary>
-    /// SAP Return Request DocEntry (ORRR.DocEntry).
-    /// When provided, the Credit Memo is created by Copy-To from the Return
-    /// Request (BaseType=16) instead of from the A/R Invoice (BaseType=13).
-    /// This links the Credit Memo to the Return Request in the SAP B1
-    /// Relationship Map and automatically closes the Return Request.
-    /// </summary>
-    public int? SapReturnRequestDocEntry { get; set; }
 
     /// <summary>
     /// Odoo sale.order identifier (e.g. "SO0042").
@@ -92,15 +76,16 @@ public class SapCreditMemoRequest
     public int? OdooInvoiceId { get; set; }
 
     /// <summary>
-    /// Credit memo line items.
+    /// Credit memo line items. Only ItemCode, Quantity, and Price are required;
+    /// the middleware resolves the invoice line number from SAP automatically.
     /// </summary>
     public List<SapCreditMemoLineRequest> Lines { get; set; } = [];
 }
 
 /// <summary>
-/// Credit memo line item.  <see cref="BaseInvoiceDocEntry"/> and
-/// <see cref="BaseInvoiceLineNum"/> are <b>required</b> — every line is created
-/// by Copy-To from the original AR Invoice line (INV1), maintaining the document chain.
+/// Credit memo line item. Only ItemCode, Quantity, and Price are required —
+/// the middleware resolves the base invoice line number by matching ItemCode
+/// against the source invoice loaded from SAP.
 /// </summary>
 public class SapCreditMemoLineRequest
 {
@@ -123,30 +108,4 @@ public class SapCreditMemoLineRequest
 
     /// <summary>SAP warehouse code for this line. Maps to RIN1.WhsCode.</summary>
     public string? WarehouseCode { get; set; }
-
-    /// <summary>
-    /// Original AR Invoice DocEntry for Copy-To per line (required).
-    /// Maps to RIN1 BaseEntry with BaseType=13 (AR Invoice).
-    /// </summary>
-    [Required]
-    public int? BaseInvoiceDocEntry { get; set; }
-
-    /// <summary>
-    /// Original AR Invoice line number for Copy-To per line (required).
-    /// Maps to RIN1 BaseLine.
-    /// </summary>
-    [Required]
-    public int? BaseInvoiceLineNum { get; set; }
-
-    /// <summary>
-    /// Original Delivery Note DocEntry for ActualBaseEntry.
-    /// Required when the invoice was created from a delivery (SO → ODLN → OINV chain).
-    /// </summary>
-    public int? BaseDeliveryDocEntry { get; set; }
-
-    /// <summary>
-    /// Original Delivery Note line number for ActualBaseLine.
-    /// Required when the invoice was created from a delivery.
-    /// </summary>
-    public int? BaseDeliveryLineNum { get; set; }
 }
