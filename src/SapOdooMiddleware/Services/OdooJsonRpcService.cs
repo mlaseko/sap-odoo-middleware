@@ -110,7 +110,7 @@ public class OdooJsonRpcService : IOdooService
             });
         _logger.LogInformation("Validated picking id={PickingId}", pickingId);
 
-        // 6. Write SAP delivery DocEntry and date onto the picking
+        // 6. Write SAP delivery DocEntry, date, and pick list ID onto the picking
         var writeValues = new JsonObject();
 
         // x_sap_delivery_docentry is an integer field in Odoo
@@ -123,8 +123,18 @@ public class OdooJsonRpcService : IOdooService
         if (request.DeliveryDate.HasValue)
             writeValues["x_sap_delivery_date"] = request.DeliveryDate.Value.ToString("yyyy-MM-dd HH:mm:ss");
 
+        // Propagate x_sap_picklist_id from the sale order to the picking
+        var soData = await ReadAsync("sale.order", soDbId, new JsonArray
+        {
+            JsonValue.Create("x_sap_picklist_id")
+        });
+        var pickListId = soData?["x_sap_picklist_id"]?.GetValue<int>() ?? 0;
+        if (pickListId > 0)
+            writeValues["x_sap_picklist_id"] = pickListId;
+
         await WriteAsync("stock.picking", pickingId, writeValues);
-        _logger.LogInformation("Wrote SAP delivery DocEntry={DocEntry} onto picking id={PickingId}", request.SapDeliveryNo, pickingId);
+        _logger.LogInformation("Wrote SAP delivery DocEntry={DocEntry}, PickListId={PickListId} onto picking id={PickingId}",
+            request.SapDeliveryNo, pickListId, pickingId);
 
         // 7. Read back picking state and name
         var pickingData = await ReadAsync("stock.picking", pickingId, new JsonArray
