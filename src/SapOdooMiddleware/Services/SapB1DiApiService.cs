@@ -1829,6 +1829,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             {
                 invoice.Lines.SetCurrentLine(s);
                 string itemCode = invoice.Lines.ItemCode;
+
+                _logger.LogInformation(
+                    "Invoice Line[{LineNum}]: ItemCode={ItemCode}, Qty={Qty}, " +
+                    "OpenQty={OpenQty}, Price={Price}, WhsCode={WhsCode}",
+                    invoice.Lines.LineNum, itemCode,
+                    invoice.Lines.Quantity, invoice.Lines.RemainingOpenQuantity,
+                    invoice.Lines.UnitPrice, invoice.Lines.WarehouseCode);
+
                 if (!invoiceLineIndex.ContainsKey(itemCode))
                     invoiceLineIndex[itemCode] = new List<(int, double, double, string)>();
                 invoiceLineIndex[itemCode].Add((
@@ -1902,10 +1910,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     creditMemo.Lines.BaseEntry = invoiceDocEntry;
                     creditMemo.Lines.BaseLine = match.lineNum;
 
-                    _logger.LogDebug(
+                    _logger.LogInformation(
                         "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
-                        "BaseEntry={BaseEntry}, BaseLine={BaseLine}",
-                        i, line.ItemCode, line.Quantity,
+                        "Price={Price}, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                        i, line.ItemCode, line.Quantity, line.Price,
                         invoiceDocEntry, match.lineNum);
                 }
 
@@ -1915,13 +1923,85 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 {
                     _company!.GetLastError(out int errCode, out string errMsg);
 
-                    _logger.LogError(
-                        "Failed to create AR Credit Memo for {ExternalCreditMemoId}: " +
-                        "DI API error {ErrCode}: {ErrMsg}",
-                        request.ExternalCreditMemoId, errCode, errMsg);
+                    // ── Fallback: invoice line open qty consumed (-2028) ──
+                    if (errCode == -2028)
+                    {
+                        _logger.LogWarning(
+                            "Copy-From Invoice failed for {ExternalCreditMemoId} " +
+                            "(invoice DocEntry={InvoiceDocEntry}): error {ErrCode}: {ErrMsg}. " +
+                            "Invoice line open quantity may be consumed by a prior credit memo. " +
+                            "Retrying as standalone credit memo without base references.",
+                            request.ExternalCreditMemoId, invoiceDocEntry, errCode, errMsg);
 
-                    throw new InvalidOperationException(
-                        $"SAP DI API error {errCode}: {errMsg}");
+                        Marshal.ReleaseComObject(creditMemo);
+                        creditMemo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
+
+                        // Re-set header
+                        creditMemo.CardCode = request.CustomerCode;
+                        creditMemo.NumAtCard = request.ExternalCreditMemoId;
+                        if (request.DocDate.HasValue)
+                            creditMemo.DocDate = request.DocDate.Value;
+                        if (request.DueDate.HasValue)
+                            creditMemo.DocDueDate = request.DueDate.Value;
+                        if (!string.IsNullOrEmpty(request.Currency))
+                            creditMemo.DocCurrency = request.Currency;
+                        TrySetUserField(creditMemo.UserFields, "U_Odoo_Invoice_ID",
+                            request.ExternalCreditMemoId, "Credit Memo header");
+                        if (!string.IsNullOrEmpty(request.UOdooSoId))
+                            TrySetUserField(creditMemo.UserFields, "U_Odoo_SO_ID",
+                                request.UOdooSoId, "Credit Memo header");
+                        TrySetUserField(creditMemo.UserFields, "U_Odoo_LastSync",
+                            DateTime.UtcNow.Date, "Credit Memo header");
+                        TrySetUserField(creditMemo.UserFields, "U_Odoo_SyncDir",
+                            SyncDirectionOdooToSap, "Credit Memo header");
+
+                        // Lines — standalone (no base references)
+                        for (int j = 0; j < request.Lines.Count; j++)
+                        {
+                            if (j > 0)
+                                creditMemo.Lines.Add();
+
+                            var fallbackLine = request.Lines[j];
+                            creditMemo.Lines.ItemCode = fallbackLine.ItemCode;
+                            creditMemo.Lines.Quantity = fallbackLine.Quantity;
+                            creditMemo.Lines.UnitPrice = fallbackLine.Price;
+
+                            if (fallbackLine.DiscountPercent.HasValue)
+                                creditMemo.Lines.DiscountPercent = fallbackLine.DiscountPercent.Value;
+                            if (!string.IsNullOrEmpty(fallbackLine.WarehouseCode))
+                                creditMemo.Lines.WarehouseCode = fallbackLine.WarehouseCode;
+                        }
+
+                        result = creditMemo.Add();
+
+                        if (result != 0)
+                        {
+                            _company!.GetLastError(out errCode, out errMsg);
+
+                            _logger.LogError(
+                                "Standalone fallback also failed for {ExternalCreditMemoId}: " +
+                                "DI API error {ErrCode}: {ErrMsg}",
+                                request.ExternalCreditMemoId, errCode, errMsg);
+
+                            throw new InvalidOperationException(
+                                $"SAP DI API error {errCode}: {errMsg}");
+                        }
+
+                        _logger.LogInformation(
+                            "Credit Memo created via standalone fallback (no base references) " +
+                            "for {ExternalCreditMemoId}",
+                            request.ExternalCreditMemoId);
+                    }
+                    else
+                    {
+                        _logger.LogError(
+                            "Failed to create AR Credit Memo for {ExternalCreditMemoId}: " +
+                            "DI API error {ErrCode}: {ErrMsg}",
+                            request.ExternalCreditMemoId, errCode, errMsg);
+
+                        throw new InvalidOperationException(
+                            $"SAP DI API error {errCode}: {errMsg}");
+                    }
                 }
 
                 int docEntry = int.Parse(_company!.GetNewObjectKey());
@@ -2186,6 +2266,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             {
                 delivery.Lines.SetCurrentLine(d);
                 string itemCode = delivery.Lines.ItemCode;
+
+                _logger.LogInformation(
+                    "Delivery Line[{LineNum}]: ItemCode={ItemCode}, Qty={Qty}, " +
+                    "OpenQty={OpenQty}, WhsCode={WhsCode}",
+                    delivery.Lines.LineNum, itemCode,
+                    delivery.Lines.Quantity, delivery.Lines.RemainingOpenQuantity,
+                    delivery.Lines.WarehouseCode);
+
                 if (!deliveryLineIndex.ContainsKey(itemCode))
                     deliveryLineIndex[itemCode] = new List<(int, double, string)>();
                 deliveryLineIndex[itemCode].Add((
@@ -2195,21 +2283,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             }
             Marshal.ReleaseComObject(delivery);
 
-            // ── Create Goods Return (ORDN) ──
-            var goodsReturn = (Documents)_company!.GetBusinessObject(
-                BoObjectTypes.oReturns);
-
-            SetGoodsReturnHeader(goodsReturn, request);
+            // ── Pre-match return lines to delivery lines by ItemCode ──
+            var matchedLines = new List<(SapGoodsReturnLineRequest line, int baseLineNum, string whsCode)>();
+            var matchIndex = deliveryLineIndex.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new List<(int lineNum, double qty, string whsCode)>(kvp.Value));
 
             for (int i = 0; i < request.Lines.Count; i++)
             {
-                if (i > 0)
-                    goodsReturn.Lines.Add();
-
                 var line = request.Lines[i];
-
-                // Match return line to delivery line by ItemCode
-                if (!deliveryLineIndex.TryGetValue(line.ItemCode, out var candidates)
+                if (!matchIndex.TryGetValue(line.ItemCode, out var candidates)
                     || candidates.Count == 0)
                 {
                     throw new InvalidOperationException(
@@ -2220,22 +2303,39 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 var match = candidates[0];
                 candidates.RemoveAt(0);
 
-                goodsReturn.Lines.ItemCode = line.ItemCode;
-                goodsReturn.Lines.Quantity = line.Quantity;
-                goodsReturn.Lines.WarehouseCode = !string.IsNullOrEmpty(line.WarehouseCode)
+                string whsCode = !string.IsNullOrEmpty(line.WarehouseCode)
                     ? line.WarehouseCode
                     : match.whsCode;
+                matchedLines.Add((line, match.lineNum, whsCode));
+            }
+
+            // ── Attempt 1: Copy-From Delivery (ORDN) ──
+            var goodsReturn = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oReturns);
+
+            SetGoodsReturnHeader(goodsReturn, request);
+
+            for (int i = 0; i < matchedLines.Count; i++)
+            {
+                if (i > 0)
+                    goodsReturn.Lines.Add();
+
+                var (line, baseLineNum, whsCode) = matchedLines[i];
+
+                goodsReturn.Lines.ItemCode = line.ItemCode;
+                goodsReturn.Lines.Quantity = line.Quantity;
+                goodsReturn.Lines.WarehouseCode = whsCode;
 
                 // Copy-From Delivery (BaseType=15)
                 goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
                 goodsReturn.Lines.BaseEntry = deliveryDocEntry;
-                goodsReturn.Lines.BaseLine = match.lineNum;
+                goodsReturn.Lines.BaseLine = baseLineNum;
 
-                _logger.LogDebug(
+                _logger.LogInformation(
                     "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
                     "BaseEntry={BaseEntry}, BaseLine={BaseLine}, WhsCode={WhsCode}",
                     i, line.ItemCode, line.Quantity,
-                    deliveryDocEntry, match.lineNum, goodsReturn.Lines.WarehouseCode);
+                    deliveryDocEntry, baseLineNum, whsCode);
             }
 
             int result = goodsReturn.Add();
@@ -2245,13 +2345,66 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 _company!.GetLastError(out int errCode, out string errMsg);
                 Marshal.ReleaseComObject(goodsReturn);
 
-                _logger.LogError(
-                    "Failed to create Goods Return for {ExternalReturnId}: " +
-                    "DI API error {ErrCode}: {ErrMsg}",
-                    request.ExternalReturnId, errCode, errMsg);
+                // ── Fallback: delivery line open qty consumed (-2028 / -5002) ──
+                if (errCode == -2028 || errCode == -5002)
+                {
+                    _logger.LogWarning(
+                        "Copy-From Delivery failed for {ExternalReturnId} " +
+                        "(delivery DocEntry={DeliveryDocEntry}): error {ErrCode}: {ErrMsg}. " +
+                        "Delivery line open quantity may be consumed by a prior " +
+                        "invoice or return. Retrying as standalone goods return " +
+                        "without base document references.",
+                        request.ExternalReturnId, deliveryDocEntry, errCode, errMsg);
 
-                throw new InvalidOperationException(
-                    $"SAP DI API error {errCode}: {errMsg}");
+                    goodsReturn = (Documents)_company!.GetBusinessObject(
+                        BoObjectTypes.oReturns);
+
+                    SetGoodsReturnHeader(goodsReturn, request);
+
+                    for (int i = 0; i < matchedLines.Count; i++)
+                    {
+                        if (i > 0)
+                            goodsReturn.Lines.Add();
+
+                        var (line, _, whsCode) = matchedLines[i];
+
+                        goodsReturn.Lines.ItemCode = line.ItemCode;
+                        goodsReturn.Lines.Quantity = line.Quantity;
+                        goodsReturn.Lines.WarehouseCode = whsCode;
+                        // No BaseType/BaseEntry/BaseLine — standalone
+                    }
+
+                    result = goodsReturn.Add();
+
+                    if (result != 0)
+                    {
+                        _company!.GetLastError(out errCode, out errMsg);
+                        Marshal.ReleaseComObject(goodsReturn);
+
+                        _logger.LogError(
+                            "Standalone fallback also failed for {ExternalReturnId}: " +
+                            "DI API error {ErrCode}: {ErrMsg}",
+                            request.ExternalReturnId, errCode, errMsg);
+
+                        throw new InvalidOperationException(
+                            $"SAP DI API error {errCode}: {errMsg}");
+                    }
+
+                    _logger.LogInformation(
+                        "Goods Return created via standalone fallback (no base references) " +
+                        "for {ExternalReturnId}",
+                        request.ExternalReturnId);
+                }
+                else
+                {
+                    _logger.LogError(
+                        "Failed to create Goods Return for {ExternalReturnId}: " +
+                        "DI API error {ErrCode}: {ErrMsg}",
+                        request.ExternalReturnId, errCode, errMsg);
+
+                    throw new InvalidOperationException(
+                        $"SAP DI API error {errCode}: {errMsg}");
+                }
             }
 
             int docEntry = int.Parse(_company!.GetNewObjectKey());
