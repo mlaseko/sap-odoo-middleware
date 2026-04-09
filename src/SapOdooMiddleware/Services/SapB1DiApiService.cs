@@ -723,7 +723,27 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     // Need a fresh Documents object — the failed one may be dirty.
                     Marshal.ReleaseComObject(invoice);
                     invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
-                    return CreateInvoiceManual(invoice, request);
+
+                    try
+                    {
+                        return CreateInvoiceManual(invoice, request);
+                    }
+                    catch (InvalidOperationException ex2) when (ex2.Message.Contains("-5002"))
+                    {
+                        // The Sales Order is also closed.  Last resort: create a
+                        // standalone invoice with no base document references at all.
+                        _logger.LogWarning(
+                            "SO-based fallback also failed with -5002 (SO DocEntry={SoDocEntry} is closed). " +
+                            "Creating standalone invoice with no base document references.",
+                            request.SapSalesOrderDocEntry);
+
+                        // Clear the SO reference so the manual path skips base linking entirely.
+                        request.SapSalesOrderDocEntry = null;
+
+                        Marshal.ReleaseComObject(invoice);
+                        invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+                        return CreateInvoiceManual(invoice, request);
+                    }
                 }
             }
             else
