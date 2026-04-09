@@ -1829,6 +1829,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             {
                 invoice.Lines.SetCurrentLine(s);
                 string itemCode = invoice.Lines.ItemCode;
+
+                _logger.LogInformation(
+                    "Invoice Line[{LineNum}]: ItemCode={ItemCode}, Qty={Qty}, " +
+                    "OpenQty={OpenQty}, Price={Price}, WhsCode={WhsCode}",
+                    invoice.Lines.LineNum, itemCode,
+                    invoice.Lines.Quantity, invoice.Lines.RemainingOpenQuantity,
+                    invoice.Lines.UnitPrice, invoice.Lines.WarehouseCode);
+
                 if (!invoiceLineIndex.ContainsKey(itemCode))
                     invoiceLineIndex[itemCode] = new List<(int, double, double, string)>();
                 invoiceLineIndex[itemCode].Add((
@@ -1902,10 +1910,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     creditMemo.Lines.BaseEntry = invoiceDocEntry;
                     creditMemo.Lines.BaseLine = match.lineNum;
 
-                    _logger.LogDebug(
+                    _logger.LogInformation(
                         "Credit Memo Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
-                        "BaseEntry={BaseEntry}, BaseLine={BaseLine}",
-                        i, line.ItemCode, line.Quantity,
+                        "Price={Price}, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                        i, line.ItemCode, line.Quantity, line.Price,
                         invoiceDocEntry, match.lineNum);
                 }
 
@@ -2186,6 +2194,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             {
                 delivery.Lines.SetCurrentLine(d);
                 string itemCode = delivery.Lines.ItemCode;
+
+                _logger.LogInformation(
+                    "Delivery Line[{LineNum}]: ItemCode={ItemCode}, Qty={Qty}, " +
+                    "OpenQty={OpenQty}, WhsCode={WhsCode}",
+                    delivery.Lines.LineNum, itemCode,
+                    delivery.Lines.Quantity, delivery.Lines.RemainingOpenQuantity,
+                    delivery.Lines.WarehouseCode);
+
                 if (!deliveryLineIndex.ContainsKey(itemCode))
                     deliveryLineIndex[itemCode] = new List<(int, double, string)>();
                 deliveryLineIndex[itemCode].Add((
@@ -2195,21 +2211,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             }
             Marshal.ReleaseComObject(delivery);
 
-            // ── Create Goods Return (ORDN) ──
-            var goodsReturn = (Documents)_company!.GetBusinessObject(
-                BoObjectTypes.oReturns);
-
-            SetGoodsReturnHeader(goodsReturn, request);
+            // ── Pre-match return lines to delivery lines by ItemCode ──
+            var matchedLines = new List<(SapGoodsReturnLineRequest line, int baseLineNum, string whsCode)>();
+            var matchIndex = deliveryLineIndex.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new List<(int lineNum, double qty, string whsCode)>(kvp.Value));
 
             for (int i = 0; i < request.Lines.Count; i++)
             {
-                if (i > 0)
-                    goodsReturn.Lines.Add();
-
                 var line = request.Lines[i];
-
-                // Match return line to delivery line by ItemCode
-                if (!deliveryLineIndex.TryGetValue(line.ItemCode, out var candidates)
+                if (!matchIndex.TryGetValue(line.ItemCode, out var candidates)
                     || candidates.Count == 0)
                 {
                     throw new InvalidOperationException(
@@ -2220,22 +2231,39 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 var match = candidates[0];
                 candidates.RemoveAt(0);
 
-                goodsReturn.Lines.ItemCode = line.ItemCode;
-                goodsReturn.Lines.Quantity = line.Quantity;
-                goodsReturn.Lines.WarehouseCode = !string.IsNullOrEmpty(line.WarehouseCode)
+                string whsCode = !string.IsNullOrEmpty(line.WarehouseCode)
                     ? line.WarehouseCode
                     : match.whsCode;
+                matchedLines.Add((line, match.lineNum, whsCode));
+            }
+
+            // ── Attempt 1: Copy-From Delivery (ORDN) ──
+            var goodsReturn = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oReturns);
+
+            SetGoodsReturnHeader(goodsReturn, request);
+
+            for (int i = 0; i < matchedLines.Count; i++)
+            {
+                if (i > 0)
+                    goodsReturn.Lines.Add();
+
+                var (line, baseLineNum, whsCode) = matchedLines[i];
+
+                goodsReturn.Lines.ItemCode = line.ItemCode;
+                goodsReturn.Lines.Quantity = line.Quantity;
+                goodsReturn.Lines.WarehouseCode = whsCode;
 
                 // Copy-From Delivery (BaseType=15)
                 goodsReturn.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
                 goodsReturn.Lines.BaseEntry = deliveryDocEntry;
-                goodsReturn.Lines.BaseLine = match.lineNum;
+                goodsReturn.Lines.BaseLine = baseLineNum;
 
-                _logger.LogDebug(
+                _logger.LogInformation(
                     "Goods Return Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, " +
                     "BaseEntry={BaseEntry}, BaseLine={BaseLine}, WhsCode={WhsCode}",
                     i, line.ItemCode, line.Quantity,
-                    deliveryDocEntry, match.lineNum, goodsReturn.Lines.WarehouseCode);
+                    deliveryDocEntry, baseLineNum, whsCode);
             }
 
             int result = goodsReturn.Add();
