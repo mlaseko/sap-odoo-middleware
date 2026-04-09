@@ -702,13 +702,23 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 {
                     // -5002 = "One of the base documents has already been closed"
                     // The delivery was manually closed in SAP B1.  Fall back to
-                    // the manual invoice path which doesn't reference the delivery
-                    // as a base document.
+                    // the manual invoice path, but clear the delivery base
+                    // references on each line (they would also trigger -5002)
+                    // and use the Sales Order as the base document instead so
+                    // the relationship map still shows SO → Invoice.
                     _logger.LogWarning(
                         "Copy-From-Delivery failed with -5002 (base document closed) " +
                         "for Delivery DocEntry={DeliveryDocEntry}. " +
-                        "Falling back to manual invoice creation.",
+                        "Falling back to manual invoice creation based on Sales Order.",
                         request.SapDeliveryDocEntry);
+
+                    // Strip delivery base references from every line so the
+                    // manual path won't try to link back to the closed delivery.
+                    foreach (var line in request.Lines)
+                    {
+                        line.BaseDeliveryDocEntry = null;
+                        line.BaseDeliveryLineNum = null;
+                    }
 
                     // Need a fresh Documents object — the failed one may be dirty.
                     Marshal.ReleaseComObject(invoice);
@@ -972,6 +982,42 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 binInfo.Count, itemCodes.Count);
         }
 
+        // ── Pre-load SO line numbers for SO-based linking ──
+        // When delivery references are absent but a Sales Order DocEntry
+        // is available, we map each invoice line to the corresponding SO
+        // line by ItemCode so the relationship map shows SO → Invoice.
+        Dictionary<string, List<int>>? soLineMap = null;
+        bool needSoFallback = request.SapSalesOrderDocEntry.HasValue
+            && request.SapSalesOrderDocEntry.Value > 0
+            && request.Lines.Any(l => !l.BaseDeliveryDocEntry.HasValue);
+
+        if (needSoFallback)
+        {
+            soLineMap = new Dictionary<string, List<int>>();
+            var soDoc = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
+            if (soDoc.GetByKey(request.SapSalesOrderDocEntry.Value))
+            {
+                for (int s = 0; s < soDoc.Lines.Count; s++)
+                {
+                    soDoc.Lines.SetCurrentLine(s);
+                    string itemCode = soDoc.Lines.ItemCode;
+                    if (!soLineMap.ContainsKey(itemCode))
+                        soLineMap[itemCode] = new List<int>();
+                    soLineMap[itemCode].Add(soDoc.Lines.LineNum);
+                }
+                _logger.LogInformation(
+                    "Loaded SO DocEntry={SoDocEntry} for base-document fallback: {LineCount} lines",
+                    request.SapSalesOrderDocEntry.Value, soDoc.Lines.Count);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Could not load SO DocEntry={SoDocEntry} for base-document fallback",
+                    request.SapSalesOrderDocEntry.Value);
+            }
+            Marshal.ReleaseComObject(soDoc);
+        }
+
         for (int i = 0; i < request.Lines.Count; i++)
         {
             if (i > 0)
@@ -992,7 +1038,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (!string.IsNullOrEmpty(line.AccountCode))
                 invoice.Lines.AccountCode = line.AccountCode;
 
-            // If a base delivery reference is provided at line level, set it
+            // Link to base document — prefer Delivery, fall back to Sales Order.
             if (line.BaseDeliveryDocEntry.HasValue && line.BaseDeliveryLineNum.HasValue)
             {
                 invoice.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
@@ -1000,8 +1046,26 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 invoice.Lines.BaseLine = line.BaseDeliveryLineNum.Value;
 
                 _logger.LogDebug(
-                    "Manual Invoice Line[{Index}]: BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                    "Manual Invoice Line[{Index}]: BaseType=Delivery, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
                     i, line.BaseDeliveryDocEntry.Value, line.BaseDeliveryLineNum.Value);
+            }
+            else if (request.SapSalesOrderDocEntry.HasValue && request.SapSalesOrderDocEntry.Value > 0)
+            {
+                // Delivery reference unavailable (e.g. delivery was closed).
+                // Link to the Sales Order instead so the relationship map
+                // shows SO → Invoice.  Match by ItemCode + line index.
+                if (soLineMap != null && soLineMap.TryGetValue(line.ItemCode, out var soLineNums) && soLineNums.Count > 0)
+                {
+                    int soLine = soLineNums[0];
+                    soLineNums.RemoveAt(0);
+                    invoice.Lines.BaseType = (int)BoObjectTypes.oOrders;
+                    invoice.Lines.BaseEntry = request.SapSalesOrderDocEntry.Value;
+                    invoice.Lines.BaseLine = soLine;
+
+                    _logger.LogDebug(
+                        "Manual Invoice Line[{Index}]: BaseType=SalesOrder, BaseEntry={BaseEntry}, BaseLine={BaseLine}",
+                        i, request.SapSalesOrderDocEntry.Value, soLine);
+                }
             }
 
             // ── Cascading bin allocation for this line ──
