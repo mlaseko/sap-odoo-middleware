@@ -11,6 +11,7 @@ namespace SapOdooMiddleware.Tests;
 public class CogsJournalsControllerTests
 {
     private readonly Mock<IOdooService> _odooServiceMock = new();
+    private readonly Mock<ISapB1Service> _sapServiceMock = new();
     private readonly Mock<ILogger<CogsJournalsController>> _loggerMock = new();
     private readonly CogsJournalsController _controller;
 
@@ -18,6 +19,7 @@ public class CogsJournalsControllerTests
     {
         _controller = new CogsJournalsController(
             _odooServiceMock.Object,
+            _sapServiceMock.Object,
             _loggerMock.Object);
     }
 
