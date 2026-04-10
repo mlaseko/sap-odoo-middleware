@@ -90,4 +90,8 @@ internal sealed class SapB1DiApiServiceStub : ISapB1Service
     public Task<List<string>> EnsureUdfsAsync() =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<SapDocumentLookupResponse?> LookupDocumentAsync(string documentType, string odooRef) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 }
