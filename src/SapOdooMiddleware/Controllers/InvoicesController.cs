@@ -81,7 +81,7 @@ public class InvoicesController : ControllerBase
                 await WriteBackToOdoo(request.OdooInvoiceId.Value, result);
 
                 // Step 3: Create COGS journal entry using the same cost data
-                await CreateCogsJournal(result);
+                await CreateCogsJournal(request.OdooInvoiceId.Value, result);
             }
             else
             {
@@ -218,9 +218,11 @@ public class InvoicesController : ControllerBase
     /// <summary>
     /// Creates the COGS journal entry in Odoo using cost data from the SAP invoice response.
     /// Converts GrossBuyPrice per line into UnitCost for the COGS request.
+    /// Passes <paramref name="odooInvoiceId"/> so the COGS service can locate the
+    /// invoice directly, without depending on x_sap_invoice_docentry write-back.
     /// Failures are logged but do NOT fail the overall request.
     /// </summary>
-    private async Task CreateCogsJournal(SapInvoiceResponse result)
+    private async Task CreateCogsJournal(int odooInvoiceId, SapInvoiceResponse result)
     {
         if (result.Lines.Count == 0)
         {
@@ -233,13 +235,14 @@ public class InvoicesController : ControllerBase
         try
         {
             _logger.LogInformation(
-                "Starting COGS journal creation — SapDocEntry={SapDocEntry}, LineCount={LineCount}",
-                result.DocEntry, result.Lines.Count);
+                "Starting COGS journal creation — SapDocEntry={SapDocEntry}, OdooInvoiceId={OdooInvoiceId}, LineCount={LineCount}",
+                result.DocEntry, odooInvoiceId, result.Lines.Count);
 
             var cogsRequest = new CogsJournalRequest
             {
                 DocEntry = result.DocEntry,
                 DocNum = result.DocNum,
+                OdooInvoiceId = odooInvoiceId,
                 Lines = result.Lines.Select(l => new CogsJournalLineRequest
                 {
                     LineNum = l.LineNum,

@@ -332,33 +332,66 @@ public class OdooJsonRpcService : IOdooService
         if (!_settings.UseBearerAuth)
             await EnsureAuthenticatedAsync();
 
-        // 4.2 — Find the Odoo invoice by x_sap_invoice_docentry
-        var invoiceRecords = await SearchReadAsync("account.move", new JsonArray
+        // 4.2 — Find the Odoo invoice.
+        // When OdooInvoiceId is provided (invoice flow), read it directly —
+        // this avoids depending on x_sap_invoice_docentry having been written
+        // back already.  Otherwise fall back to searching by DocEntry (used
+        // by the standalone and from-sap COGS endpoints).
+        int invoiceId;
+        string invoiceName;
+        string invoiceDate;
+
+        if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)
         {
-            new JsonArray { JsonValue.Create("move_type"), JsonValue.Create("in"), new JsonArray { JsonValue.Create("out_invoice"), JsonValue.Create("out_refund") } },
-            new JsonArray { JsonValue.Create("x_sap_invoice_docentry"), JsonValue.Create("="), JsonValue.Create(request.DocEntry) }
-        }, new JsonArray
+            invoiceId = request.OdooInvoiceId.Value;
+            var invoiceRecord = await ReadAsync("account.move", invoiceId, new JsonArray
+            {
+                JsonValue.Create("name"),
+                JsonValue.Create("invoice_date")
+            });
+
+            if (invoiceRecord == null)
+                throw new InvalidOperationException(
+                    $"Odoo invoice id={invoiceId} not found.");
+
+            invoiceName = invoiceRecord["name"]?.GetValue<string>() ?? "";
+            invoiceDate = invoiceRecord["invoice_date"]?.GetValue<string>()
+                ?? request.DocDate?.ToString("yyyy-MM-dd")
+                ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
+
+            _logger.LogInformation(
+                "Using provided OdooInvoiceId={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}",
+                invoiceId, invoiceName, request.DocEntry);
+        }
+        else
         {
-            JsonValue.Create("id"),
-            JsonValue.Create("name"),
-            JsonValue.Create("invoice_date")
-        });
+            var invoiceRecords = await SearchReadAsync("account.move", new JsonArray
+            {
+                new JsonArray { JsonValue.Create("move_type"), JsonValue.Create("in"), new JsonArray { JsonValue.Create("out_invoice"), JsonValue.Create("out_refund") } },
+                new JsonArray { JsonValue.Create("x_sap_invoice_docentry"), JsonValue.Create("="), JsonValue.Create(request.DocEntry) }
+            }, new JsonArray
+            {
+                JsonValue.Create("id"),
+                JsonValue.Create("name"),
+                JsonValue.Create("invoice_date")
+            });
 
-        if (invoiceRecords.Count == 0)
-            throw new InvalidOperationException(
-                $"Odoo invoice not found for SAP DocEntry={request.DocEntry}. " +
-                "Ensure x_sap_invoice_docentry has been written back to Odoo.");
+            if (invoiceRecords.Count == 0)
+                throw new InvalidOperationException(
+                    $"Odoo invoice not found for SAP DocEntry={request.DocEntry}. " +
+                    "Ensure x_sap_invoice_docentry has been written back to Odoo.");
 
-        var invoice = invoiceRecords[0];
-        int invoiceId = invoice["id"]!.GetValue<int>();
-        string invoiceName = invoice["name"]?.GetValue<string>() ?? "";
-        string invoiceDate = invoice["invoice_date"]?.GetValue<string>()
-            ?? request.DocDate?.ToString("yyyy-MM-dd")
-            ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
+            var invoice = invoiceRecords[0];
+            invoiceId = invoice["id"]!.GetValue<int>();
+            invoiceName = invoice["name"]?.GetValue<string>() ?? "";
+            invoiceDate = invoice["invoice_date"]?.GetValue<string>()
+                ?? request.DocDate?.ToString("yyyy-MM-dd")
+                ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
 
-        _logger.LogInformation(
-            "Found Odoo invoice id={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}",
-            invoiceId, invoiceName, request.DocEntry);
+            _logger.LogInformation(
+                "Found Odoo invoice id={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}",
+                invoiceId, invoiceName, request.DocEntry);
+        }
 
         // 4.3 — Match SAP lines to Odoo invoice lines
         var odooLines = await SearchReadAsync("account.move.line", new JsonArray
