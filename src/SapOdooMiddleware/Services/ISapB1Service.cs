@@ -127,4 +127,17 @@ public interface ISapB1Service
     /// Verifies connectivity to the SAP B1 DI API and returns non-secret connection details.
     /// </summary>
     Task<SapB1PingResponse> PingAsync();
+
+    /// <summary>
+    /// Looks up a SAP document by its Odoo reference stored in a UDF.
+    /// Used by the SAP Field Sync page to find missing SAP identifiers.
+    /// Returns null if no matching document is found.
+    /// </summary>
+    /// <param name="documentType">
+    /// One of: sales-order, delivery, invoice, payment, return, credit-memo.
+    /// </param>
+    /// <param name="odooRef">
+    /// The Odoo document name (e.g. "SO0042", "WH/OUT/000106", "INV/2026/00001").
+    /// </param>
+    Task<SapDocumentLookupResponse?> LookupDocumentAsync(string documentType, string odooRef);
 }
