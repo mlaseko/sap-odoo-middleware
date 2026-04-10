@@ -19,6 +19,13 @@ public class CogsJournalRequest
     public DateTime? DocDate { get; set; }
 
     /// <summary>
+    /// Odoo account.move ID of the customer invoice. When provided, the COGS
+    /// service uses this directly instead of searching by <c>x_sap_invoice_docentry</c>,
+    /// avoiding a dependency on the write-back having completed first.
+    /// </summary>
+    public int? OdooInvoiceId { get; set; }
+
+    /// <summary>
     /// Line-level cost data from SAP INV1.
     /// Each entry provides the item cost for one invoice line.
     /// </summary>
