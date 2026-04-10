@@ -2553,6 +2553,50 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    // ================================
+    // READ INVOICE COSTS (for COGS retry)
+    // ================================
+    public async Task<SapInvoiceResponse> ReadInvoiceCostsAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Reading AR Invoice costs from SAP — DocEntry={DocEntry}", docEntry);
+
+            var invoice = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInvoices);
+
+            if (!invoice.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(invoice);
+                throw new InvalidOperationException(
+                    $"SAP B1 AR Invoice with DocEntry={docEntry} not found.");
+            }
+
+            int docNum = invoice.DocNum;
+            var lines = ReadInvoiceLines(invoice);
+
+            Marshal.ReleaseComObject(invoice);
+
+            _logger.LogInformation(
+                "AR Invoice costs read — DocEntry={DocEntry}, DocNum={DocNum}, LineCount={LineCount}",
+                docEntry, docNum, lines.Count);
+
+            return new SapInvoiceResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                Lines = lines
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private int? LookupPickListForSalesOrder(int soDocEntry)
     {
         try

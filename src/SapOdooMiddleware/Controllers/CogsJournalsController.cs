@@ -16,13 +16,16 @@ namespace SapOdooMiddleware.Controllers;
 public class CogsJournalsController : ControllerBase
 {
     private readonly IOdooService _odooService;
+    private readonly ISapB1Service _sapService;
     private readonly ILogger<CogsJournalsController> _logger;
 
     public CogsJournalsController(
         IOdooService odooService,
+        ISapB1Service sapService,
         ILogger<CogsJournalsController> logger)
     {
         _odooService = odooService;
+        _sapService = sapService;
         _logger = logger;
     }
 
@@ -60,6 +63,72 @@ public class CogsJournalsController : ControllerBase
             _logger.LogError(ex,
                 "Failed to create COGS journal entry for SAP DocEntry={DocEntry}",
                 request.DocEntry);
+
+            return StatusCode(500, ApiResponse<CogsJournalResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// POST /api/cogs-journals/from-sap/{docEntry}
+    /// Reads line-level cost data (GrossBuyPrice) directly from the SAP AR
+    /// Invoice and creates the COGS journal entry in Odoo.
+    ///
+    /// Use this when the COGS was missed during the original invoice sync —
+    /// the caller only needs to supply the SAP DocEntry; costs are read live
+    /// from SAP B1 via the DI API.
+    /// </summary>
+    [HttpPost("from-sap/{docEntry:int}")]
+    public async Task<IActionResult> CreateFromSap(int docEntry)
+    {
+        _logger.LogInformation(
+            "COGS from-SAP request — reading invoice costs for DocEntry={DocEntry}",
+            docEntry);
+
+        try
+        {
+            // Step 1: Read invoice line costs from SAP B1
+            var invoiceData = await _sapService.ReadInvoiceCostsAsync(docEntry);
+
+            if (invoiceData.Lines.Count == 0)
+            {
+                _logger.LogInformation(
+                    "No lines with cost data in SAP invoice DocEntry={DocEntry} — skipping",
+                    docEntry);
+
+                return Ok(ApiResponse<CogsJournalResponse>.Ok(new CogsJournalResponse
+                {
+                    SapDocEntry = docEntry,
+                    Action = "skipped",
+                }));
+            }
+
+            // Step 2: Build COGS request from SAP data
+            var cogsRequest = new CogsJournalRequest
+            {
+                DocEntry = invoiceData.DocEntry,
+                DocNum = invoiceData.DocNum,
+                Lines = invoiceData.Lines.Select(l => new CogsJournalLineRequest
+                {
+                    LineNum = l.LineNum,
+                    ItemCode = l.ItemCode,
+                    Quantity = l.Quantity,
+                    UnitCost = l.GrossBuyPrice,
+                }).ToList(),
+            };
+
+            // Step 3: Create COGS journal entry in Odoo
+            var result = await _odooService.CreateOrUpdateCogsJournalAsync(cogsRequest);
+
+            _logger.LogInformation(
+                "COGS from-SAP {Action}: DocEntry={DocEntry}, JeId={JeId}, TotalCogs={TotalCogs}",
+                result.Action, docEntry, result.CogsJournalEntryId, result.TotalCogs);
+
+            return Ok(ApiResponse<CogsJournalResponse>.Ok(result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "COGS from-SAP failed for DocEntry={DocEntry}", docEntry);
 
             return StatusCode(500, ApiResponse<CogsJournalResponse>.Fail(ex.Message));
         }

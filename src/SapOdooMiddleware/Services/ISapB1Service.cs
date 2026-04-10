@@ -140,4 +140,11 @@ public interface ISapB1Service
     /// The Odoo document name (e.g. "SO0042", "WH/OUT/000106", "INV/2026/00001").
     /// </param>
     Task<SapDocumentLookupResponse?> LookupDocumentAsync(string documentType, string odooRef);
+
+    /// <summary>
+    /// Reads an existing AR Invoice (OINV) from SAP B1 by DocEntry and returns
+    /// the header identifiers plus line-level cost data (GrossBuyPrice) needed
+    /// for COGS journal creation.  Does NOT modify the document.
+    /// </summary>
+    Task<SapInvoiceResponse> ReadInvoiceCostsAsync(int docEntry);
 }
