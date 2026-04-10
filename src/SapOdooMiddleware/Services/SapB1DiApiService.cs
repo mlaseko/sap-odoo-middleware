@@ -2452,6 +2452,180 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     /// <summary>
+    // ═══════════════════════════════════════════════════════════════════
+    //  Document Lookup by Odoo Reference (UDF search)
+    // ═══════════════════════════════════════════════════════════════════
+
+    public async Task<SapDocumentLookupResponse?> LookupDocumentAsync(
+        string documentType, string odooRef)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Looking up SAP document — type={DocumentType}, odooRef={OdooRef}",
+                documentType, odooRef);
+
+            // Determine SAP table and UDF based on document type
+            var (table, udfColumn, statusColumn) = documentType switch
+            {
+                "sales-order" => ("ORDR", "U_Odoo_SO_ID", "DocStatus"),
+                "delivery"    => ("ODLN", "U_Odoo_Delivery_ID", "DocStatus"),
+                "invoice"     => ("OINV", "U_Odoo_Invoice_ID", "DocStatus"),
+                "payment"     => ("ORCT", "U_Odoo_Payment_ID", "Canceled"),
+                "return"      => ("ORDN", "U_Odoo_Delivery_ID", "DocStatus"),
+                "credit-memo" => ("ORIN", "U_Odoo_Invoice_ID", "DocStatus"),
+                _ => throw new InvalidOperationException(
+                    $"Unknown document type: {documentType}")
+            };
+
+            // Query SAP for the document by UDF
+            var rs = (Recordset)_company!.GetBusinessObject(
+                BoObjectTypes.BoRecordset);
+
+            string sql = $"SELECT T0.\"DocEntry\", T0.\"DocNum\", " +
+                         $"T0.\"{statusColumn}\", T0.\"CardCode\" " +
+                         $"FROM \"{table}\" T0 " +
+                         $"WHERE T0.\"{udfColumn}\" = '{odooRef.Replace("'", "''")}'";
+
+            rs.DoQuery(sql);
+
+            if (rs.EoF)
+            {
+                Marshal.ReleaseComObject(rs);
+                _logger.LogInformation(
+                    "No SAP document found for type={DocumentType}, " +
+                    "odooRef={OdooRef}", documentType, odooRef);
+                return null;
+            }
+
+            int docEntry = (int)rs.Fields.Item("DocEntry").Value;
+            int docNum = (int)rs.Fields.Item("DocNum").Value;
+            string cardCode = (string)rs.Fields.Item("CardCode").Value;
+
+            // Parse status — payments use "Canceled" (Y/N), others use DocStatus (O/C)
+            string status;
+            if (documentType == "payment")
+            {
+                string canceled = (string)rs.Fields.Item("Canceled").Value;
+                status = canceled == "Y" ? "cancelled" : "active";
+            }
+            else
+            {
+                string docStatus = (string)rs.Fields.Item("DocStatus").Value;
+                status = docStatus == "O" ? "open" : "closed";
+            }
+
+            Marshal.ReleaseComObject(rs);
+
+            // Look up pick list entry for sales orders and deliveries
+            int? pickListEntry = null;
+            if (documentType == "sales-order")
+            {
+                pickListEntry = LookupPickListForSalesOrder(docEntry);
+            }
+            else if (documentType == "delivery")
+            {
+                pickListEntry = LookupPickListForDelivery(docEntry);
+            }
+
+            _logger.LogInformation(
+                "SAP document found — type={DocumentType}, odooRef={OdooRef}, " +
+                "DocEntry={DocEntry}, DocNum={DocNum}, Status={Status}, " +
+                "PickListEntry={PickListEntry}",
+                documentType, odooRef, docEntry, docNum, status, pickListEntry);
+
+            return new SapDocumentLookupResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                Status = status,
+                CardCode = cardCode,
+                OdooRef = odooRef,
+                PickListEntry = pickListEntry
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    private int? LookupPickListForSalesOrder(int soDocEntry)
+    {
+        try
+        {
+            var rs = (Recordset)_company!.GetBusinessObject(
+                BoObjectTypes.BoRecordset);
+
+            rs.DoQuery(
+                $"SELECT DISTINCT T0.\"AbsEntry\" " +
+                $"FROM \"PKL1\" T0 " +
+                $"WHERE T0.\"OrderEntry\" = {soDocEntry} " +
+                $"AND T0.\"BaseObject\" = '17'");
+
+            if (rs.EoF)
+            {
+                Marshal.ReleaseComObject(rs);
+                return null;
+            }
+
+            int absEntry = (int)rs.Fields.Item("AbsEntry").Value;
+            Marshal.ReleaseComObject(rs);
+            return absEntry;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to look up pick list for SO DocEntry={DocEntry}",
+                soDocEntry);
+            return null;
+        }
+    }
+
+    private int? LookupPickListForDelivery(int deliveryDocEntry)
+    {
+        try
+        {
+            var rs = (Recordset)_company!.GetBusinessObject(
+                BoObjectTypes.BoRecordset);
+
+            // Trace delivery → base SO → pick list
+            rs.DoQuery(
+                $"SELECT DISTINCT T1.\"AbsEntry\" " +
+                $"FROM \"DLN1\" T0 " +
+                $"INNER JOIN \"PKL1\" T1 " +
+                $"ON T1.\"OrderEntry\" = T0.\"BaseEntry\" " +
+                $"AND T1.\"BaseObject\" = '17' " +
+                $"WHERE T0.\"DocEntry\" = {deliveryDocEntry} " +
+                $"AND T0.\"BaseType\" = 17");
+
+            if (rs.EoF)
+            {
+                Marshal.ReleaseComObject(rs);
+                return null;
+            }
+
+            int absEntry = (int)rs.Fields.Item("AbsEntry").Value;
+            Marshal.ReleaseComObject(rs);
+            return absEntry;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to look up pick list for Delivery DocEntry={DocEntry}",
+                deliveryDocEntry);
+            return null;
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  Private helpers
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// <summary>
     /// Attempts to set a User-Defined Field (UDF) on the given <paramref name="userFields"/> object.
     /// Logs a warning (instead of throwing) when the field does not exist in the SAP B1 schema.
     /// </summary>
