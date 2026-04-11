@@ -340,6 +340,7 @@ public class OdooJsonRpcService : IOdooService
         int invoiceId;
         string invoiceName;
         string invoiceDate;
+        int currencyDecimals = 2; // default, overridden below
 
         if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)
         {
@@ -347,7 +348,8 @@ public class OdooJsonRpcService : IOdooService
             var invoiceRecord = await ReadAsync("account.move", invoiceId, new JsonArray
             {
                 JsonValue.Create("name"),
-                JsonValue.Create("invoice_date")
+                JsonValue.Create("invoice_date"),
+                JsonValue.Create("currency_id")
             });
 
             if (invoiceRecord == null)
@@ -359,9 +361,16 @@ public class OdooJsonRpcService : IOdooService
                 ?? request.DocDate?.ToString("yyyy-MM-dd")
                 ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
 
+            // Read currency decimal places
+            if (invoiceRecord["currency_id"] is JsonArray currArr && currArr.Count >= 1)
+            {
+                int currId = currArr[0]!.GetValue<int>();
+                currencyDecimals = await GetCurrencyDecimalsAsync(currId);
+            }
+
             _logger.LogInformation(
-                "Using provided OdooInvoiceId={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}",
-                invoiceId, invoiceName, request.DocEntry);
+                "Using provided OdooInvoiceId={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}, CurrencyDecimals={Decimals}",
+                invoiceId, invoiceName, request.DocEntry, currencyDecimals);
         }
         else
         {
@@ -373,7 +382,8 @@ public class OdooJsonRpcService : IOdooService
             {
                 JsonValue.Create("id"),
                 JsonValue.Create("name"),
-                JsonValue.Create("invoice_date")
+                JsonValue.Create("invoice_date"),
+                JsonValue.Create("currency_id")
             });
 
             if (invoiceRecords.Count == 0)
@@ -388,9 +398,16 @@ public class OdooJsonRpcService : IOdooService
                 ?? request.DocDate?.ToString("yyyy-MM-dd")
                 ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
 
+            // Read currency decimal places
+            if (invoice["currency_id"] is JsonArray currArr && currArr.Count >= 1)
+            {
+                int currId = currArr[0]!.GetValue<int>();
+                currencyDecimals = await GetCurrencyDecimalsAsync(currId);
+            }
+
             _logger.LogInformation(
-                "Found Odoo invoice id={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}",
-                invoiceId, invoiceName, request.DocEntry);
+                "Found Odoo invoice id={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}, CurrencyDecimals={Decimals}",
+                invoiceId, invoiceName, request.DocEntry, currencyDecimals);
         }
 
         // 4.3 — Match SAP lines to Odoo invoice lines
@@ -474,9 +491,9 @@ public class OdooJsonRpcService : IOdooService
 
             double lineCogs;
             if (sapLine.StockSum.HasValue)
-                lineCogs = Math.Round(sapLine.StockSum.Value, 2);
+                lineCogs = Math.Round(sapLine.StockSum.Value, currencyDecimals);
             else if (sapLine.UnitCost.HasValue)
-                lineCogs = Math.Round(sapLine.UnitCost.Value * sapLine.Quantity, 2);
+                lineCogs = Math.Round(sapLine.UnitCost.Value * sapLine.Quantity, currencyDecimals);
             else
                 lineCogs = 0;
 
@@ -580,7 +597,7 @@ public class OdooJsonRpcService : IOdooService
             // Update the JE header with new ref, date, and hash. Write new lines via line_ids.
             var jeUpdatePayload = BuildJeWritePayload(
                 invoiceName, request.DocEntry, invoiceDate, hash, invoiceId,
-                cogsLines, existingLineIds);
+                cogsLines, existingLineIds, currencyDecimals);
 
             await WriteAsync("account.move", cogsJeId, jeUpdatePayload);
 
@@ -610,7 +627,7 @@ public class OdooJsonRpcService : IOdooService
 
             var jePayload = BuildJeCreatePayload(
                 invoiceName, request.DocEntry, invoiceDate, hash, invoiceId,
-                cogsLines, totalCogs);
+                cogsLines, totalCogs, currencyDecimals);
 
             _logger.LogInformation(
                 "COGS JE payload: {Payload}", jePayload.ToJsonString());
@@ -716,6 +733,30 @@ public class OdooJsonRpcService : IOdooService
     }
 
     /// <summary>
+    /// Reads the decimal_places for a currency from Odoo.
+    /// Falls back to 2 if the read fails.
+    /// </summary>
+    private async Task<int> GetCurrencyDecimalsAsync(int currencyId)
+    {
+        try
+        {
+            var curr = await ReadAsync("res.currency", currencyId, new JsonArray
+            {
+                JsonValue.Create("decimal_places")
+            });
+            if (curr != null && curr["decimal_places"] != null)
+                return curr["decimal_places"]!.GetValue<int>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                "Could not read decimal_places for currency id={CurrencyId}: {Error}. Defaulting to 2.",
+                currencyId, ex.Message);
+        }
+        return 2;
+    }
+
+    /// <summary>
     /// Returns true if the analytic_distribution JSON is a non-null, non-false value.
     /// Odoo returns false (as a JSON boolean/string) when no analytics are set.
     /// </summary>
@@ -764,7 +805,7 @@ public class OdooJsonRpcService : IOdooService
     private JsonObject BuildJeCreatePayload(
         string invoiceName, int docEntry, string date, string hash, int invoiceId,
         List<(double LineCogs, string ItemCode, int? SapLineNum, JsonNode? AnalyticDistribution, string ProductName)> cogsLines,
-        double totalCogs)
+        double totalCogs, int currencyDecimals = 2)
     {
         var lineCommands = new JsonArray();
         double debitSum = 0;
@@ -772,7 +813,7 @@ public class OdooJsonRpcService : IOdooService
         // Debit lines (one per invoice line)
         foreach (var (lineCogs, itemCode, sapLineNum, analyticDist, productName) in cogsLines)
         {
-            var rounded = Math.Round(lineCogs, 2);
+            var rounded = Math.Round(lineCogs, currencyDecimals);
             debitSum += rounded;
             var lineNumLabel = sapLineNum.HasValue ? sapLineNum.Value.ToString() : "?";
             var debitLine = new JsonObject
@@ -798,7 +839,7 @@ public class OdooJsonRpcService : IOdooService
         {
             ["account_id"] = _settings.CogsClearingAccountId,
             ["debit"] = 0,
-            ["credit"] = Math.Round(debitSum, 2),
+            ["credit"] = Math.Round(debitSum, currencyDecimals),
             ["name"] = $"COGS Clearing | INV {invoiceName}"
         };
         lineCommands.Add(new JsonArray { 0, 0, creditLine });
@@ -818,7 +859,7 @@ public class OdooJsonRpcService : IOdooService
     private JsonObject BuildJeWritePayload(
         string invoiceName, int docEntry, string date, string hash, int invoiceId,
         List<(double LineCogs, string ItemCode, int? SapLineNum, JsonNode? AnalyticDistribution, string ProductName)> cogsLines,
-        List<int> existingLineIds)
+        List<int> existingLineIds, int currencyDecimals = 2)
     {
         var lineCommands = new JsonArray();
 
@@ -832,7 +873,7 @@ public class OdooJsonRpcService : IOdooService
         double debitSum = 0;
         foreach (var (lineCogs, itemCode, sapLineNum, analyticDist, productName) in cogsLines)
         {
-            var rounded = Math.Round(lineCogs, 2);
+            var rounded = Math.Round(lineCogs, currencyDecimals);
             debitSum += rounded;
             var lineNumLabel = sapLineNum.HasValue ? sapLineNum.Value.ToString() : "?";
             var debitLine = new JsonObject
@@ -856,7 +897,7 @@ public class OdooJsonRpcService : IOdooService
         {
             ["account_id"] = _settings.CogsClearingAccountId,
             ["debit"] = 0,
-            ["credit"] = Math.Round(debitSum, 2),
+            ["credit"] = Math.Round(debitSum, currencyDecimals),
             ["name"] = $"COGS Clearing | INV {invoiceName}"
         };
         lineCommands.Add(new JsonArray { 0, 0, creditLine });
