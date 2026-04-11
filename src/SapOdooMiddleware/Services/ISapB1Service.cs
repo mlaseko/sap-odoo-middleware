@@ -69,6 +69,12 @@ public interface ISapB1Service
     Task<SapDeliveryStatusResponse> GetDeliveryStatusAsync(int docEntry);
 
     /// <summary>
+    /// Reads a Delivery Note and returns all unique Odoo SO refs
+    /// from the base documents. Used for multi-SO delivery handling.
+    /// </summary>
+    Task<List<string>> ReadDeliveryBaseSoRefsAsync(int docEntry);
+
+    /// <summary>
     /// Returns the document status (open/closed) of a Return Request (ORRR) in SAP B1.
     /// Odoo gates return validation on this — the picking can only be validated
     /// once the Return Request is closed (SAP has processed the inventory adjustment).

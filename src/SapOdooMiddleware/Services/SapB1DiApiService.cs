@@ -640,6 +640,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header update.",
                 syncDate, SyncDirectionOdooToSap);
 
+            // Update line quantities when lines are provided
+            if (request.Lines.Count > 0)
+            {
+                _UpdateSalesOrderLines(order, request);
+            }
+
             int result = order.Update();
 
             if (result != 0)
@@ -666,6 +672,62 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         finally
         {
             _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Updates SAP SO line quantities to match the incoming request.
+    /// Matches lines by ItemCode. For matched lines, updates Quantity
+    /// and UnitPrice. New items are appended as additional lines.
+    /// </summary>
+    private void _UpdateSalesOrderLines(Documents order, SapSalesOrderRequest request)
+    {
+        int sapLineCount = order.Lines.Count;
+
+        // Build a map of existing SAP lines by ItemCode
+        var sapLines = new Dictionary<string, int>();
+        for (int i = 0; i < sapLineCount; i++)
+        {
+            order.Lines.SetCurrentLine(i);
+            var ic = order.Lines.ItemCode ?? "";
+            if (!sapLines.ContainsKey(ic))
+                sapLines[ic] = i;
+        }
+
+        foreach (var reqLine in request.Lines)
+        {
+            if (sapLines.TryGetValue(reqLine.ItemCode, out int sapIdx))
+            {
+                // Update existing line
+                order.Lines.SetCurrentLine(sapIdx);
+                double oldQty = order.Lines.Quantity;
+                if (Math.Abs(oldQty - reqLine.Quantity) > 0.001)
+                {
+                    order.Lines.Quantity = reqLine.Quantity;
+                    _logger.LogInformation(
+                        "SO line updated: ItemCode={ItemCode}, Qty {OldQty} -> {NewQty}",
+                        reqLine.ItemCode, oldQty, reqLine.Quantity);
+                }
+                if (Math.Abs(order.Lines.UnitPrice - reqLine.UnitPrice) > 0.001)
+                {
+                    order.Lines.UnitPrice = reqLine.UnitPrice;
+                }
+            }
+            else
+            {
+                // New line — append
+                order.Lines.Add();
+                order.Lines.ItemCode = reqLine.ItemCode;
+                order.Lines.Quantity = reqLine.Quantity;
+                order.Lines.UnitPrice = reqLine.UnitPrice;
+
+                if (!string.IsNullOrEmpty(reqLine.WarehouseCode))
+                    order.Lines.WarehouseCode = reqLine.WarehouseCode;
+
+                _logger.LogInformation(
+                    "SO line added: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
+                    reqLine.ItemCode, reqLine.Quantity, reqLine.UnitPrice);
+            }
         }
     }
 
@@ -2084,6 +2146,78 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     DocNum = docNum,
                     Status = status
                 };
+            }
+            catch
+            {
+                Marshal.ReleaseComObject(delivery);
+                throw;
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads a SAP Delivery Note and returns all unique Odoo SO
+    /// references from the base documents (one per line's BaseEntry).
+    /// Used for multi-SO delivery callback handling.
+    /// </summary>
+    public async Task<List<string>> ReadDeliveryBaseSoRefsAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+
+            try
+            {
+                if (!delivery.GetByKey(docEntry))
+                {
+                    Marshal.ReleaseComObject(delivery);
+                    return [];
+                }
+
+                var soDocEntries = new HashSet<int>();
+                int lineCount = delivery.Lines.Count;
+                for (int i = 0; i < lineCount; i++)
+                {
+                    delivery.Lines.SetCurrentLine(i);
+                    if (delivery.Lines.BaseType == (int)BoObjectTypes.oOrders
+                        && delivery.Lines.BaseEntry > 0)
+                    {
+                        soDocEntries.Add(delivery.Lines.BaseEntry);
+                    }
+                }
+
+                var soRefs = new List<string>();
+                foreach (int soDocEntry in soDocEntries)
+                {
+                    var so = (Documents)_company.GetBusinessObject(BoObjectTypes.oOrders);
+                    try
+                    {
+                        if (so.GetByKey(soDocEntry))
+                        {
+                            string odooRef = "";
+                            try { odooRef = so.UserFields.Fields.Item("U_Odoo_SO_ID").Value?.ToString() ?? ""; }
+                            catch { /* UDF not found */ }
+                            if (!string.IsNullOrEmpty(odooRef))
+                                soRefs.Add(odooRef);
+                        }
+                    }
+                    finally { Marshal.ReleaseComObject(so); }
+                }
+
+                Marshal.ReleaseComObject(delivery);
+
+                _logger.LogInformation(
+                    "Delivery DocEntry={DocEntry}: found {Count} base SO refs: [{Refs}]",
+                    docEntry, soRefs.Count, string.Join(", ", soRefs));
+
+                return soRefs;
             }
             catch
             {

@@ -148,27 +148,79 @@ public class WebhookQueueProcessor : BackgroundService
 
         try
         {
-            var request = new DeliveryUpdateRequest
-            {
-                UOdooSoId = entry.OdooSoId,
-                SapDeliveryNo = entry.DocEntry.ToString(),
-                DeliveryDate = entry.DeliveryDate,
-                Status = "delivered"
-            };
-
             using var scope = _scopeFactory.CreateScope();
             var odooService = scope.ServiceProvider.GetRequiredService<IOdooService>();
-            var response = await odooService.ConfirmDeliveryAsync(request);
 
-            string responseBody = System.Text.Json.JsonSerializer.Serialize(response);
+            // Collect all SO refs to confirm — start with the primary one
+            var soRefsToConfirm = new List<string> { entry.OdooSoId };
+
+            // Check if the SAP delivery references multiple SOs
+            try
+            {
+                var sapService = scope.ServiceProvider.GetRequiredService<ISapB1Service>();
+                var allRefs = await sapService.ReadDeliveryBaseSoRefsAsync(entry.DocEntry);
+                foreach (var r in allRefs)
+                {
+                    if (!soRefsToConfirm.Contains(r))
+                        soRefsToConfirm.Add(r);
+                }
+                if (soRefsToConfirm.Count > 1)
+                {
+                    _logger.LogInformation(
+                        "WebhookQueueProcessor: Multi-SO delivery detected. " +
+                        "DocEntry={DocEntry}, SO refs: [{Refs}]",
+                        entry.DocEntry, string.Join(", ", soRefsToConfirm));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "WebhookQueueProcessor: Could not read delivery base docs " +
+                    "for DocEntry={DocEntry}. Proceeding with primary SO only.",
+                    entry.DocEntry);
+            }
+
+            // Confirm each SO's picking
+            var responses = new List<DeliveryUpdateResponse>();
+            foreach (var soRef in soRefsToConfirm)
+            {
+                try
+                {
+                    var request = new DeliveryUpdateRequest
+                    {
+                        UOdooSoId = soRef,
+                        SapDeliveryNo = entry.DocEntry.ToString(),
+                        DeliveryDate = entry.DeliveryDate,
+                        Status = "delivered"
+                    };
+                    var response = await odooService.ConfirmDeliveryAsync(request);
+                    responses.Add(response);
+
+                    _logger.LogInformation(
+                        "WebhookQueueProcessor: Delivery confirmed for SO={SoRef}, " +
+                        "PickingId={PickingId}, PickingName={PickingName}.",
+                        soRef, response.PickingId, response.PickingName);
+                }
+                catch (Exception soEx)
+                {
+                    _logger.LogWarning(soEx,
+                        "WebhookQueueProcessor: Failed to confirm delivery for SO={SoRef} " +
+                        "(DocEntry={DocEntry}). Continuing with remaining SOs.",
+                        soRef, entry.DocEntry);
+                }
+            }
+
+            if (responses.Count == 0)
+                throw new InvalidOperationException(
+                    $"No pickings confirmed for any SO in delivery DocEntry={entry.DocEntry}");
+
+            string responseBody = System.Text.Json.JsonSerializer.Serialize(responses);
             await MarkDoneAsync(connection, entry.Id, responseBody, stoppingToken);
 
             _logger.LogInformation(
-                "WebhookQueueProcessor: Odoo delivery confirmed for queue entry Id={Id}. " +
-                "OdooSoId={OdooSoId}, PickingId={PickingId}, PickingName={PickingName}, " +
-                "State={State}, SapDeliveryNo={SapDeliveryNo}.",
-                entry.Id, response.UOdooSoId, response.PickingId, response.PickingName,
-                response.State, response.SapDeliveryNo);
+                "WebhookQueueProcessor: Queue entry Id={Id} done. " +
+                "{Count}/{Total} SOs confirmed for DocEntry={DocEntry}.",
+                entry.Id, responses.Count, soRefsToConfirm.Count, entry.DocEntry);
         }
         catch (Exception ex)
         {
