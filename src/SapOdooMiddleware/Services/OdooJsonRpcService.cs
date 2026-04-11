@@ -463,14 +463,32 @@ public class OdooJsonRpcService : IOdooService
 
         foreach (var (sapLine, odooLine) in matchedLines)
         {
+            // Skip lines with zero quantity (e.g. service/text lines in SAP)
+            if (sapLine.Quantity == 0)
+            {
+                _logger.LogInformation(
+                    "Skipping zero-quantity COGS line: ItemCode={ItemCode}, SapLine={SapLine}",
+                    sapLine.ItemCode, sapLine.LineNum);
+                continue;
+            }
+
             double lineCogs;
             if (sapLine.StockSum.HasValue)
                 lineCogs = Math.Round(sapLine.StockSum.Value, 2);
             else if (sapLine.UnitCost.HasValue)
                 lineCogs = Math.Round(sapLine.UnitCost.Value * sapLine.Quantity, 2);
             else
-                throw new InvalidOperationException(
-                    $"SAP line ItemCode={sapLine.ItemCode} has neither UnitCost nor StockSum.");
+                lineCogs = 0;
+
+            // Skip lines with zero cost — they produce empty JE lines
+            // that Odoo rejects as unbalanced
+            if (lineCogs == 0)
+            {
+                _logger.LogInformation(
+                    "Skipping zero-cost COGS line: ItemCode={ItemCode}, Qty={Qty}, SapLine={SapLine}",
+                    sapLine.ItemCode, sapLine.Quantity, sapLine.LineNum);
+                continue;
+            }
 
             var analyticDist = odooLine?["analytic_distribution"];
             string productName = "";
@@ -579,9 +597,23 @@ public class OdooJsonRpcService : IOdooService
                 "Creating new COGS JE for invoice id={InvoiceId} name={InvoiceName}, DocEntry={DocEntry}",
                 invoiceId, invoiceName, request.DocEntry);
 
+            // Log line-level detail for diagnostics
+            foreach (var (lc, ic, ln, _, pn) in cogsLines)
+            {
+                _logger.LogInformation(
+                    "COGS line: ItemCode={ItemCode}, Qty from request, LineCogs={LineCogs}, SapLine={SapLine}, Product={Product}",
+                    ic, Math.Round(lc, 2), ln, pn);
+            }
+            _logger.LogInformation(
+                "COGS totals: DebitLines={Count}, TotalCogs={TotalCogs}, RoundedTotal={Rounded}",
+                cogsLines.Count, totalCogs, Math.Round(totalCogs, 2));
+
             var jePayload = BuildJeCreatePayload(
                 invoiceName, request.DocEntry, invoiceDate, hash, invoiceId,
                 cogsLines, totalCogs);
+
+            _logger.LogInformation(
+                "COGS JE payload: {Payload}", jePayload.ToJsonString());
 
             cogsJeId = await CreateAsync("account.move", jePayload);
 
@@ -1094,8 +1126,17 @@ public class OdooJsonRpcService : IOdooService
                 var errorJson = JsonNode.Parse(responseBody);
                 errorMessage = errorJson?["error"]?["data"]?["message"]?.GetValue<string>()
                     ?? errorJson?["error"]?["message"]?.GetValue<string>()
-                    ?? errorJson?["error"]?.GetValue<string>()
                     ?? $"HTTP {(int)response.StatusCode}";
+
+                // Include traceback excerpt for debugging
+                var tb = errorJson?["error"]?["data"]?["debug"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(tb))
+                {
+                    // Last 3 lines of the traceback
+                    var tbLines = tb.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                    var tail = string.Join(" | ", tbLines.TakeLast(3));
+                    errorMessage += $" [{tail}]";
+                }
             }
             catch (JsonException)
             {
