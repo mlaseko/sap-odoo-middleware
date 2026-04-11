@@ -332,58 +332,25 @@ public class OdooJsonRpcService : IOdooService
         if (!_settings.UseBearerAuth)
             await EnsureAuthenticatedAsync();
 
-        // 4.2 — Find the Odoo invoice.
-        // When OdooInvoiceId is provided (invoice flow), read it directly —
-        // this avoids depending on x_sap_invoice_docentry having been written
-        // back already.  Otherwise fall back to searching by DocEntry (used
-        // by the standalone and from-sap COGS endpoints).
+        // Resolve invoice ID — use OdooInvoiceId directly when available,
+        // otherwise search by x_sap_invoice_docentry.
         int invoiceId;
-        string invoiceName;
-        string invoiceDate;
-        int currencyDecimals = 2; // default, overridden below
 
         if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)
         {
             invoiceId = request.OdooInvoiceId.Value;
-            var invoiceRecord = await ReadAsync("account.move", invoiceId, new JsonArray
-            {
-                JsonValue.Create("name"),
-                JsonValue.Create("invoice_date"),
-                JsonValue.Create("currency_id")
-            });
-
-            if (invoiceRecord == null)
-                throw new InvalidOperationException(
-                    $"Odoo invoice id={invoiceId} not found.");
-
-            invoiceName = invoiceRecord["name"]?.GetValue<string>() ?? "";
-            invoiceDate = invoiceRecord["invoice_date"]?.GetValue<string>()
-                ?? request.DocDate?.ToString("yyyy-MM-dd")
-                ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
-
-            // Read currency decimal places
-            if (invoiceRecord["currency_id"] is JsonArray currArr && currArr.Count >= 1)
-            {
-                int currId = currArr[0]!.GetValue<int>();
-                currencyDecimals = await GetCurrencyDecimalsAsync(currId);
-            }
-
             _logger.LogInformation(
-                "Using provided OdooInvoiceId={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}, CurrencyDecimals={Decimals}",
-                invoiceId, invoiceName, request.DocEntry, currencyDecimals);
+                "COGS: using OdooInvoiceId={InvoiceId} for DocEntry={DocEntry}",
+                invoiceId, request.DocEntry);
         }
         else
         {
-            var invoiceRecords = await SearchReadAsync("account.move", new JsonArray
+            var invoiceRecords = await SearchAsync("account.move", new JsonArray
             {
-                new JsonArray { JsonValue.Create("move_type"), JsonValue.Create("in"), new JsonArray { JsonValue.Create("out_invoice"), JsonValue.Create("out_refund") } },
-                new JsonArray { JsonValue.Create("x_sap_invoice_docentry"), JsonValue.Create("="), JsonValue.Create(request.DocEntry) }
-            }, new JsonArray
-            {
-                JsonValue.Create("id"),
-                JsonValue.Create("name"),
-                JsonValue.Create("invoice_date"),
-                JsonValue.Create("currency_id")
+                new JsonArray { JsonValue.Create("move_type"), JsonValue.Create("in"),
+                    new JsonArray { JsonValue.Create("out_invoice"), JsonValue.Create("out_refund") } },
+                new JsonArray { JsonValue.Create("x_sap_invoice_docentry"), JsonValue.Create("="),
+                    JsonValue.Create(request.DocEntry) }
             });
 
             if (invoiceRecords.Count == 0)
@@ -391,265 +358,90 @@ public class OdooJsonRpcService : IOdooService
                     $"Odoo invoice not found for SAP DocEntry={request.DocEntry}. " +
                     "Ensure x_sap_invoice_docentry has been written back to Odoo.");
 
-            var invoice = invoiceRecords[0];
-            invoiceId = invoice["id"]!.GetValue<int>();
-            invoiceName = invoice["name"]?.GetValue<string>() ?? "";
-            invoiceDate = invoice["invoice_date"]?.GetValue<string>()
-                ?? request.DocDate?.ToString("yyyy-MM-dd")
-                ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
-
-            // Read currency decimal places
-            if (invoice["currency_id"] is JsonArray currArr && currArr.Count >= 1)
-            {
-                int currId = currArr[0]!.GetValue<int>();
-                currencyDecimals = await GetCurrencyDecimalsAsync(currId);
-            }
-
+            invoiceId = invoiceRecords[0];
             _logger.LogInformation(
-                "Found Odoo invoice id={InvoiceId} name={InvoiceName} for SAP DocEntry={DocEntry}, CurrencyDecimals={Decimals}",
-                invoiceId, invoiceName, request.DocEntry, currencyDecimals);
+                "COGS: found invoice id={InvoiceId} for DocEntry={DocEntry}",
+                invoiceId, request.DocEntry);
         }
 
-        // 4.3 — Match SAP lines to Odoo invoice lines
-        var odooLines = await SearchReadAsync("account.move.line", new JsonArray
+        // Build cost lines — skip zero-qty / zero-cost
+        var sapLines = new JsonArray();
+        foreach (var line in request.Lines)
         {
-            new JsonArray { JsonValue.Create("move_id"), JsonValue.Create("="), JsonValue.Create(invoiceId) },
-            new JsonArray { JsonValue.Create("display_type"), JsonValue.Create("="), JsonValue.Create("product") }
-        }, new JsonArray
-        {
-            JsonValue.Create("id"),
-            JsonValue.Create("product_id"),
-            JsonValue.Create("quantity"),
-            JsonValue.Create("analytic_distribution"),
-            JsonValue.Create("x_sap_invoice_linenum")
-        });
+            if (line.Quantity == 0) continue;
+            double unitCost = line.UnitCost ?? 0;
+            if (line.StockSum.HasValue)
+                unitCost = line.StockSum.Value / line.Quantity;
+            if (unitCost == 0) continue;
 
-        _logger.LogInformation(
-            "Found {Count} product line(s) on Odoo invoice id={InvoiceId}",
-            odooLines.Count, invoiceId);
-
-        // Resolve x_sap_item_code from product.product (the field lives on the
-        // product variant, not on account.move.line).
-        var productIds = odooLines
-            .Select(l => l["product_id"] is JsonArray arr && arr.Count >= 1
-                ? arr[0]?.GetValue<int>() : (int?)null)
-            .Where(id => id.HasValue)
-            .Select(id => id!.Value)
-            .Distinct()
-            .ToList();
-
-        var productItemCodes = new Dictionary<int, string>();
-        if (productIds.Count > 0)
-        {
-            var domainArray = new JsonArray();
-            var idsArray = new JsonArray();
-            foreach (var pid in productIds)
-                idsArray.Add(JsonValue.Create(pid));
-            domainArray.Add(new JsonArray { JsonValue.Create("id"), JsonValue.Create("in"), idsArray });
-
-            var products = await SearchReadAsync("product.product", domainArray, new JsonArray
+            sapLines.Add(new JsonObject
             {
-                JsonValue.Create("id"),
-                JsonValue.Create("x_sap_item_code")
+                ["item_code"] = line.ItemCode,
+                ["quantity"] = line.Quantity,
+                ["unit_cost"] = unitCost,
+                ["line_num"] = line.LineNum,
             });
-
-            foreach (var p in products)
-            {
-                int pid = p["id"]!.GetValue<int>();
-                string itemCode = p["x_sap_item_code"]?.GetValue<string>() ?? "";
-                productItemCodes[pid] = itemCode;
-            }
         }
 
-        // Inject resolved item codes into odoo line objects for matching
-        foreach (var line in odooLines)
+        if (sapLines.Count == 0)
         {
-            if (line["product_id"] is JsonArray productArr && productArr.Count >= 1)
-            {
-                int pid = productArr[0]!.GetValue<int>();
-                line["x_sap_item_code"] = JsonValue.Create(
-                    productItemCodes.GetValueOrDefault(pid, ""));
-            }
-        }
-
-        var matchedLines = MatchLinesToOdoo(request.Lines, odooLines);
-
-        // 4.1 — Compute line COGS
-        var cogsLines = new List<(double LineCogs, string ItemCode, int? SapLineNum, JsonNode? AnalyticDistribution, string ProductName)>();
-        double totalCogs = 0;
-
-        foreach (var (sapLine, odooLine) in matchedLines)
-        {
-            // Skip lines with zero quantity (e.g. service/text lines in SAP)
-            if (sapLine.Quantity == 0)
-            {
-                _logger.LogInformation(
-                    "Skipping zero-quantity COGS line: ItemCode={ItemCode}, SapLine={SapLine}",
-                    sapLine.ItemCode, sapLine.LineNum);
-                continue;
-            }
-
-            double lineCogs;
-            if (sapLine.StockSum.HasValue)
-                lineCogs = Math.Round(sapLine.StockSum.Value, currencyDecimals);
-            else if (sapLine.UnitCost.HasValue)
-                lineCogs = Math.Round(sapLine.UnitCost.Value * sapLine.Quantity, currencyDecimals);
-            else
-                lineCogs = 0;
-
-            // Skip lines with zero cost — they produce empty JE lines
-            // that Odoo rejects as unbalanced
-            if (lineCogs == 0)
-            {
-                _logger.LogInformation(
-                    "Skipping zero-cost COGS line: ItemCode={ItemCode}, Qty={Qty}, SapLine={SapLine}",
-                    sapLine.ItemCode, sapLine.Quantity, sapLine.LineNum);
-                continue;
-            }
-
-            var analyticDist = odooLine?["analytic_distribution"];
-            string productName = "";
-            if (odooLine?["product_id"] is JsonArray productArr && productArr.Count >= 2)
-                productName = productArr[1]?.GetValue<string>() ?? sapLine.ItemCode;
-            else
-                productName = sapLine.ItemCode;
-
-            cogsLines.Add((lineCogs, sapLine.ItemCode, sapLine.LineNum, analyticDist, productName));
-            totalCogs += lineCogs;
-        }
-
-        if (totalCogs == 0)
-        {
-            _logger.LogWarning("Total COGS is zero for SAP DocEntry={DocEntry}. Skipping JE creation.", request.DocEntry);
+            _logger.LogWarning("No COGS lines with cost data for DocEntry={DocEntry}. Skipping.", request.DocEntry);
             return new CogsJournalResponse
             {
                 SapDocEntry = request.DocEntry,
                 OdooInvoiceId = invoiceId,
-                OdooInvoiceName = invoiceName,
                 Action = "skipped",
                 TotalCogs = 0
             };
         }
 
-        // 4.7 — Generate hash
         string hash = ComputeCogsHash(request);
 
-        // 4.5 — Idempotency check
-        var existingJeIds = await SearchAsync("account.move", new JsonArray
+        // Call Odoo's native create_cogs_journal method — Odoo handles
+        // all JE creation, balancing, currency, and posting internally.
+        var rpcVals = new JsonObject
         {
-            new JsonArray { JsonValue.Create("journal_id"), JsonValue.Create("="), JsonValue.Create(_settings.CogsJournalId) },
-            new JsonArray { JsonValue.Create("x_cogs_for_invoice_id"), JsonValue.Create("="), JsonValue.Create(invoiceId) }
-        });
+            ["invoice_id"] = invoiceId,
+            ["doc_entry"] = request.DocEntry,
+            ["journal_id"] = _settings.CogsJournalId,
+            ["cogs_account_id"] = _settings.CogsAccountId,
+            ["clearing_account_id"] = _settings.CogsClearingAccountId,
+            ["cogs_hash"] = hash,
+            ["lines"] = sapLines,
+        };
 
-        string action;
-        int cogsJeId;
+        _logger.LogInformation(
+            "Calling Odoo create_cogs_journal for invoice={InvoiceId}, DocEntry={DocEntry}, Lines={LineCount}",
+            invoiceId, request.DocEntry, sapLines.Count);
 
-        if (existingJeIds.Count > 0)
+        JsonNode? result;
+        if (_settings.UseBearerAuth)
         {
-            cogsJeId = existingJeIds[0];
-
-            // Read existing hash
-            var existingJe = await ReadAsync("account.move", cogsJeId, new JsonArray
-            {
-                JsonValue.Create("x_cogs_import_hash"),
-                JsonValue.Create("state")
-            });
-
-            string existingHash = existingJe?["x_cogs_import_hash"]?.GetValue<string>() ?? "";
-
-            if (existingHash == hash)
-            {
-                _logger.LogInformation(
-                    "COGS JE id={JeId} already exists with same hash — skipping. DocEntry={DocEntry}",
-                    cogsJeId, request.DocEntry);
-
-                return new CogsJournalResponse
-                {
-                    SapDocEntry = request.DocEntry,
-                    OdooInvoiceId = invoiceId,
-                    OdooInvoiceName = invoiceName,
-                    CogsJournalEntryId = cogsJeId,
-                    Action = "skipped",
-                    Hash = hash,
-                    DebitLineCount = cogsLines.Count,
-                    TotalCogs = totalCogs
-                };
-            }
-
-            // Hash differs — update: Policy A (draft → replace lines → repost)
-            _logger.LogInformation(
-                "COGS JE id={JeId} exists but hash differs — updating. DocEntry={DocEntry}",
-                cogsJeId, request.DocEntry);
-
-            string state = existingJe?["state"]?.GetValue<string>() ?? "";
-            if (state == "posted")
-            {
-                await ExecuteMethodAsync("account.move", "button_draft", new JsonArray { cogsJeId });
-                _logger.LogDebug("Reset COGS JE id={JeId} to draft for update", cogsJeId);
-            }
-
-            // Delete existing lines
-            var existingLineIds = await SearchAsync("account.move.line", new JsonArray
-            {
-                new JsonArray { JsonValue.Create("move_id"), JsonValue.Create("="), JsonValue.Create(cogsJeId) }
-            });
-
-            // Update the JE header with new ref, date, and hash. Write new lines via line_ids.
-            var jeUpdatePayload = BuildJeWritePayload(
-                invoiceName, request.DocEntry, invoiceDate, hash, invoiceId,
-                cogsLines, existingLineIds, currencyDecimals);
-
-            await WriteAsync("account.move", cogsJeId, jeUpdatePayload);
-
-            // Post the JE
-            await ExecuteMethodAsync("account.move", "action_post", new JsonArray { cogsJeId });
-            _logger.LogInformation("Updated and posted COGS JE id={JeId}", cogsJeId);
-
-            action = "updated";
+            result = await SendJson2Async("account.move", "create_cogs_journal",
+                new JsonObject { ["vals"] = rpcVals });
         }
         else
         {
-            // 4.6 — Create new COGS JE
-            _logger.LogInformation(
-                "Creating new COGS JE for invoice id={InvoiceId} name={InvoiceName}, DocEntry={DocEntry}",
-                invoiceId, invoiceName, request.DocEntry);
-
-            // Log line-level detail for diagnostics
-            foreach (var (lc, ic, ln, _, pn) in cogsLines)
-            {
-                _logger.LogInformation(
-                    "COGS line: ItemCode={ItemCode}, Qty from request, LineCogs={LineCogs}, SapLine={SapLine}, Product={Product}",
-                    ic, Math.Round(lc, 2), ln, pn);
-            }
-            _logger.LogInformation(
-                "COGS totals: DebitLines={Count}, TotalCogs={TotalCogs}, RoundedTotal={Rounded}",
-                cogsLines.Count, totalCogs, Math.Round(totalCogs, 2));
-
-            var jePayload = BuildJeCreatePayload(
-                invoiceName, request.DocEntry, invoiceDate, hash, invoiceId,
-                cogsLines, totalCogs, currencyDecimals);
-
-            _logger.LogInformation(
-                "COGS JE payload: {Payload}", jePayload.ToJsonString());
-
-            cogsJeId = await CreateAsync("account.move", jePayload);
-
-            // Post the JE
-            await ExecuteMethodAsync("account.move", "action_post", new JsonArray { cogsJeId });
-            _logger.LogInformation("Created and posted COGS JE id={JeId}", cogsJeId);
-
-            action = "created";
+            result = await CallObjectMethodAsync("account.move", "create_cogs_journal",
+                new JsonArray { rpcVals });
         }
+
+        var resultObj = result?.AsObject();
+        string action = resultObj?["action"]?.GetValue<string>() ?? "unknown";
+        int cogsJeId = resultObj?["cogs_journal_entry_id"]?.GetValue<int>() ?? 0;
+        double totalCogs = resultObj?["total_cogs"]?.GetValue<double>() ?? 0;
+
+        _logger.LogInformation(
+            "COGS {Action}: JeId={JeId}, TotalCogs={TotalCogs}, DocEntry={DocEntry}",
+            action, cogsJeId, totalCogs, request.DocEntry);
 
         return new CogsJournalResponse
         {
             SapDocEntry = request.DocEntry,
             OdooInvoiceId = invoiceId,
-            OdooInvoiceName = invoiceName,
             CogsJournalEntryId = cogsJeId,
             Action = action,
             Hash = hash,
-            DebitLineCount = cogsLines.Count,
             TotalCogs = totalCogs
         };
     }
@@ -805,13 +597,11 @@ public class OdooJsonRpcService : IOdooService
     private JsonObject BuildJeCreatePayload(
         string invoiceName, int docEntry, string date, string hash, int invoiceId,
         List<(double LineCogs, string ItemCode, int? SapLineNum, JsonNode? AnalyticDistribution, string ProductName)> cogsLines,
-        double totalCogs, int currencyDecimals = 2)
+        double totalCogs, int currencyDecimals = 2, int currencyId = 0)
     {
         var lineCommands = new JsonArray();
         double debitSum = 0;
 
-        // Debit lines (one per invoice line)
-        // Use balance (positive = debit) for Odoo 19 compatibility.
         foreach (var (lineCogs, itemCode, sapLineNum, analyticDist, productName) in cogsLines)
         {
             var rounded = Math.Round(lineCogs, currencyDecimals);
@@ -821,8 +611,11 @@ public class OdooJsonRpcService : IOdooService
             {
                 ["account_id"] = _settings.CogsAccountId,
                 ["balance"] = rounded,
+                ["amount_currency"] = rounded,
                 ["name"] = $"COGS | {productName} | INV {invoiceName} | SAP line {lineNumLabel}"
             };
+            if (currencyId > 0)
+                debitLine["currency_id"] = currencyId;
 
             if (IsValidAnalyticDistribution(analyticDist))
             {
@@ -832,13 +625,16 @@ public class OdooJsonRpcService : IOdooService
             lineCommands.Add(new JsonArray { 0, 0, debitLine });
         }
 
-        // One credit line (negative balance = credit)
+        var creditTotal = Math.Round(debitSum, currencyDecimals);
         var creditLine = new JsonObject
         {
             ["account_id"] = _settings.CogsClearingAccountId,
-            ["balance"] = -Math.Round(debitSum, currencyDecimals),
+            ["balance"] = -creditTotal,
+            ["amount_currency"] = -creditTotal,
             ["name"] = $"COGS Clearing | INV {invoiceName}"
         };
+        if (currencyId > 0)
+            creditLine["currency_id"] = currencyId;
         lineCommands.Add(new JsonArray { 0, 0, creditLine });
 
         return new JsonObject
@@ -856,17 +652,15 @@ public class OdooJsonRpcService : IOdooService
     private JsonObject BuildJeWritePayload(
         string invoiceName, int docEntry, string date, string hash, int invoiceId,
         List<(double LineCogs, string ItemCode, int? SapLineNum, JsonNode? AnalyticDistribution, string ProductName)> cogsLines,
-        List<int> existingLineIds, int currencyDecimals = 2)
+        List<int> existingLineIds, int currencyDecimals = 2, int currencyId = 0)
     {
         var lineCommands = new JsonArray();
 
-        // Delete existing lines: (2, id, 0) = delete
         foreach (int lineId in existingLineIds)
         {
             lineCommands.Add(new JsonArray { 2, lineId, 0 });
         }
 
-        // Recreate debit lines (positive balance = debit)
         double debitSum = 0;
         foreach (var (lineCogs, itemCode, sapLineNum, analyticDist, productName) in cogsLines)
         {
@@ -877,8 +671,11 @@ public class OdooJsonRpcService : IOdooService
             {
                 ["account_id"] = _settings.CogsAccountId,
                 ["balance"] = rounded,
+                ["amount_currency"] = rounded,
                 ["name"] = $"COGS | {productName} | INV {invoiceName} | SAP line {lineNumLabel}"
             };
+            if (currencyId > 0)
+                debitLine["currency_id"] = currencyId;
 
             if (IsValidAnalyticDistribution(analyticDist))
             {
@@ -888,13 +685,16 @@ public class OdooJsonRpcService : IOdooService
             lineCommands.Add(new JsonArray { 0, 0, debitLine });
         }
 
-        // Recreate credit line (negative balance = credit)
+        var creditTotal = Math.Round(debitSum, currencyDecimals);
         var creditLine = new JsonObject
         {
             ["account_id"] = _settings.CogsClearingAccountId,
-            ["balance"] = -Math.Round(debitSum, currencyDecimals),
+            ["balance"] = -creditTotal,
+            ["amount_currency"] = -creditTotal,
             ["name"] = $"COGS Clearing | INV {invoiceName}"
         };
+        if (currencyId > 0)
+            creditLine["currency_id"] = currencyId;
         lineCommands.Add(new JsonArray { 0, 0, creditLine });
 
         return new JsonObject
