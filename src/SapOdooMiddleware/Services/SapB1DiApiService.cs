@@ -773,12 +773,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     "Pick list AbsEntry={PklEntry} is still Released — closing and recreating.",
                     existingPklEntry.Value);
 
-                // Close the old pick list
+                // Close the old pick list via Close() method
+                // (Status property is read-only in SAP DI API)
                 var pkl = (PickLists)_company.GetBusinessObject(BoObjectTypes.oPickLists);
                 if (pkl.GetByKey(existingPklEntry.Value))
                 {
-                    pkl.Status = BoPickStatus.ps_Closed;
-                    int closeResult = pkl.Update();
+                    int closeResult = pkl.Close();
                     if (closeResult != 0)
                     {
                         _company.GetLastError(out int ec, out string em);
