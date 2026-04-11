@@ -640,6 +640,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header update.",
                 syncDate, SyncDirectionOdooToSap);
 
+            // Update line quantities when lines are provided
+            if (request.Lines.Count > 0)
+            {
+                _UpdateSalesOrderLines(order, request);
+            }
+
             int result = order.Update();
 
             if (result != 0)
@@ -656,6 +662,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "✅ SAP SO updated: DocEntry={DocEntry}, DocNum={DocNum}",
                 docEntry, docNum);
 
+            // Refresh pick list if lines were updated
+            if (request.Lines.Count > 0 && _settings.AutoCreatePickList)
+            {
+                _RefreshPickListForSO(docEntry, request);
+            }
+
             return new SapSalesOrderResponse
             {
                 DocEntry = docEntry,
@@ -666,6 +678,202 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         finally
         {
             _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Updates SAP SO line quantities to match the incoming request.
+    /// Matches lines by ItemCode. For matched lines, updates Quantity
+    /// and UnitPrice. New items are appended as additional lines.
+    /// </summary>
+    private void _UpdateSalesOrderLines(Documents order, SapSalesOrderRequest request)
+    {
+        int sapLineCount = order.Lines.Count;
+
+        // Build a map of existing SAP lines by ItemCode
+        var sapLines = new Dictionary<string, int>();
+        for (int i = 0; i < sapLineCount; i++)
+        {
+            order.Lines.SetCurrentLine(i);
+            var ic = order.Lines.ItemCode ?? "";
+            if (!sapLines.ContainsKey(ic))
+                sapLines[ic] = i;
+        }
+
+        foreach (var reqLine in request.Lines)
+        {
+            if (sapLines.TryGetValue(reqLine.ItemCode, out int sapIdx))
+            {
+                // Update existing line
+                order.Lines.SetCurrentLine(sapIdx);
+                double oldQty = order.Lines.Quantity;
+                if (Math.Abs(oldQty - reqLine.Quantity) > 0.001)
+                {
+                    order.Lines.Quantity = reqLine.Quantity;
+                    _logger.LogInformation(
+                        "SO line updated: ItemCode={ItemCode}, Qty {OldQty} -> {NewQty}",
+                        reqLine.ItemCode, oldQty, reqLine.Quantity);
+                }
+                if (Math.Abs(order.Lines.UnitPrice - reqLine.UnitPrice) > 0.001)
+                {
+                    order.Lines.UnitPrice = reqLine.UnitPrice;
+                }
+            }
+            else
+            {
+                // New line — append
+                order.Lines.Add();
+                order.Lines.ItemCode = reqLine.ItemCode;
+                order.Lines.Quantity = reqLine.Quantity;
+                order.Lines.UnitPrice = reqLine.UnitPrice;
+
+                if (!string.IsNullOrEmpty(reqLine.WarehouseCode))
+                    order.Lines.WarehouseCode = reqLine.WarehouseCode;
+
+                _logger.LogInformation(
+                    "SO line added: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
+                    reqLine.ItemCode, reqLine.Quantity, reqLine.UnitPrice);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Closes an existing open pick list for the SO and creates a new
+    /// one with current SO line quantities.  If the pick list has
+    /// already been picked (status != Released), it is left untouched.
+    /// </summary>
+    private void _RefreshPickListForSO(int soDocEntry, SapSalesOrderRequest request)
+    {
+        try
+        {
+            int? existingPklEntry = LookupPickListForSalesOrder(soDocEntry);
+            if (!existingPklEntry.HasValue)
+            {
+                _logger.LogInformation(
+                    "No existing pick list for SO DocEntry={DocEntry} — creating new one.",
+                    soDocEntry);
+                _CreatePickListForSO(soDocEntry, request);
+                return;
+            }
+
+            // Check pick list status
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            rs.DoQuery(
+                $"SELECT \"Status\" FROM \"OPKL\" WHERE \"AbsEntry\" = {existingPklEntry.Value}");
+
+            string pklStatus = "N"; // default unknown
+            if (!rs.EoF)
+                pklStatus = rs.Fields.Item("Status").Value?.ToString() ?? "N";
+            Marshal.ReleaseComObject(rs);
+
+            // Status: R = Released (open), P = Picked, C = Closed/Partially Delivered
+            if (pklStatus == "R")
+            {
+                _logger.LogInformation(
+                    "Pick list AbsEntry={PklEntry} is still Released — closing and recreating.",
+                    existingPklEntry.Value);
+
+                // Close the old pick list
+                var pkl = (PickLists)_company.GetBusinessObject(BoObjectTypes.oPickLists);
+                if (pkl.GetByKey(existingPklEntry.Value))
+                {
+                    pkl.Status = BoPickStatus.ps_Closed;
+                    int closeResult = pkl.Update();
+                    if (closeResult != 0)
+                    {
+                        _company.GetLastError(out int ec, out string em);
+                        _logger.LogWarning(
+                            "Failed to close pick list AbsEntry={PklEntry}: {Err}",
+                            existingPklEntry.Value, em);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Closed old pick list AbsEntry={PklEntry}.",
+                            existingPklEntry.Value);
+                    }
+                }
+                Marshal.ReleaseComObject(pkl);
+
+                // Create new pick list with updated quantities
+                _CreatePickListForSO(soDocEntry, request);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Pick list AbsEntry={PklEntry} status={Status} (already picked/closed) "
+                    + "— leaving it. New pick list will be created for additional qty if needed.",
+                    existingPklEntry.Value, pklStatus);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Pick list refresh failed for SO DocEntry={DocEntry}. "
+                + "SO lines were updated successfully — pick list may need manual attention.",
+                soDocEntry);
+        }
+    }
+
+    /// <summary>
+    /// Creates a new pick list for the given SO using current line data.
+    /// </summary>
+    private void _CreatePickListForSO(int soDocEntry, SapSalesOrderRequest request)
+    {
+        try
+        {
+            // Re-read the SO to get current line numbers and quantities
+            var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
+            if (!order.GetByKey(soDocEntry))
+            {
+                Marshal.ReleaseComObject(order);
+                return;
+            }
+
+            int lineCount = order.Lines.Count;
+            var pickList = (PickLists)_company.GetBusinessObject(BoObjectTypes.oPickLists);
+            pickList.PickDate = DateTime.Now;
+
+            for (int i = 0; i < lineCount; i++)
+            {
+                order.Lines.SetCurrentLine(i);
+
+                // Skip fully delivered lines (open qty = 0)
+                double openQty = order.Lines.RemainingOpenQuantity;
+                if (openQty <= 0)
+                    continue;
+
+                if (i > 0) pickList.Lines.Add();
+                pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
+                pickList.Lines.OrderEntry = soDocEntry;
+                pickList.Lines.OrderRowID = order.Lines.LineNum;
+                pickList.Lines.ReleasedQuantity = openQty;
+            }
+
+            Marshal.ReleaseComObject(order);
+
+            int plResult = pickList.Add();
+            if (plResult != 0)
+            {
+                _company.GetLastError(out int ec, out string em);
+                _logger.LogWarning(
+                    "New pick list creation failed for SO DocEntry={DocEntry}: {Err}",
+                    soDocEntry, em);
+            }
+            else
+            {
+                int newPklEntry = int.Parse(_company.GetNewObjectKey());
+                _logger.LogInformation(
+                    "New pick list created: AbsEntry={PklEntry} for SO DocEntry={DocEntry}",
+                    newPklEntry, soDocEntry);
+            }
+            Marshal.ReleaseComObject(pickList);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to create new pick list for SO DocEntry={DocEntry}.",
+                soDocEntry);
         }
     }
 
@@ -2084,6 +2292,78 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     DocNum = docNum,
                     Status = status
                 };
+            }
+            catch
+            {
+                Marshal.ReleaseComObject(delivery);
+                throw;
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads a SAP Delivery Note and returns all unique Odoo SO
+    /// references from the base documents (one per line's BaseEntry).
+    /// Used for multi-SO delivery callback handling.
+    /// </summary>
+    public async Task<List<string>> ReadDeliveryBaseSoRefsAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+
+            try
+            {
+                if (!delivery.GetByKey(docEntry))
+                {
+                    Marshal.ReleaseComObject(delivery);
+                    return [];
+                }
+
+                var soDocEntries = new HashSet<int>();
+                int lineCount = delivery.Lines.Count;
+                for (int i = 0; i < lineCount; i++)
+                {
+                    delivery.Lines.SetCurrentLine(i);
+                    if (delivery.Lines.BaseType == (int)BoObjectTypes.oOrders
+                        && delivery.Lines.BaseEntry > 0)
+                    {
+                        soDocEntries.Add(delivery.Lines.BaseEntry);
+                    }
+                }
+
+                var soRefs = new List<string>();
+                foreach (int soDocEntry in soDocEntries)
+                {
+                    var so = (Documents)_company.GetBusinessObject(BoObjectTypes.oOrders);
+                    try
+                    {
+                        if (so.GetByKey(soDocEntry))
+                        {
+                            string odooRef = "";
+                            try { odooRef = so.UserFields.Fields.Item("U_Odoo_SO_ID").Value?.ToString() ?? ""; }
+                            catch { /* UDF not found */ }
+                            if (!string.IsNullOrEmpty(odooRef))
+                                soRefs.Add(odooRef);
+                        }
+                    }
+                    finally { Marshal.ReleaseComObject(so); }
+                }
+
+                Marshal.ReleaseComObject(delivery);
+
+                _logger.LogInformation(
+                    "Delivery DocEntry={DocEntry}: found {Count} base SO refs: [{Refs}]",
+                    docEntry, soRefs.Count, string.Join(", ", soRefs));
+
+                return soRefs;
             }
             catch
             {
