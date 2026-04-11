@@ -579,9 +579,23 @@ public class OdooJsonRpcService : IOdooService
                 "Creating new COGS JE for invoice id={InvoiceId} name={InvoiceName}, DocEntry={DocEntry}",
                 invoiceId, invoiceName, request.DocEntry);
 
+            // Log line-level detail for diagnostics
+            foreach (var (lc, ic, ln, _, pn) in cogsLines)
+            {
+                _logger.LogInformation(
+                    "COGS line: ItemCode={ItemCode}, Qty from request, LineCogs={LineCogs}, SapLine={SapLine}, Product={Product}",
+                    ic, Math.Round(lc, 2), ln, pn);
+            }
+            _logger.LogInformation(
+                "COGS totals: DebitLines={Count}, TotalCogs={TotalCogs}, RoundedTotal={Rounded}",
+                cogsLines.Count, totalCogs, Math.Round(totalCogs, 2));
+
             var jePayload = BuildJeCreatePayload(
                 invoiceName, request.DocEntry, invoiceDate, hash, invoiceId,
                 cogsLines, totalCogs);
+
+            _logger.LogInformation(
+                "COGS JE payload: {Payload}", jePayload.ToJsonString());
 
             cogsJeId = await CreateAsync("account.move", jePayload);
 
@@ -1094,8 +1108,17 @@ public class OdooJsonRpcService : IOdooService
                 var errorJson = JsonNode.Parse(responseBody);
                 errorMessage = errorJson?["error"]?["data"]?["message"]?.GetValue<string>()
                     ?? errorJson?["error"]?["message"]?.GetValue<string>()
-                    ?? errorJson?["error"]?.GetValue<string>()
                     ?? $"HTTP {(int)response.StatusCode}";
+
+                // Include traceback excerpt for debugging
+                var tb = errorJson?["error"]?["data"]?["debug"]?.GetValue<string>();
+                if (!string.IsNullOrEmpty(tb))
+                {
+                    // Last 3 lines of the traceback
+                    var tbLines = tb.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+                    var tail = string.Join(" | ", tbLines.TakeLast(3));
+                    errorMessage += $" [{tail}]";
+                }
             }
             catch (JsonException)
             {
