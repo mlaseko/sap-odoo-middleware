@@ -463,14 +463,32 @@ public class OdooJsonRpcService : IOdooService
 
         foreach (var (sapLine, odooLine) in matchedLines)
         {
+            // Skip lines with zero quantity (e.g. service/text lines in SAP)
+            if (sapLine.Quantity == 0)
+            {
+                _logger.LogInformation(
+                    "Skipping zero-quantity COGS line: ItemCode={ItemCode}, SapLine={SapLine}",
+                    sapLine.ItemCode, sapLine.LineNum);
+                continue;
+            }
+
             double lineCogs;
             if (sapLine.StockSum.HasValue)
                 lineCogs = Math.Round(sapLine.StockSum.Value, 2);
             else if (sapLine.UnitCost.HasValue)
                 lineCogs = Math.Round(sapLine.UnitCost.Value * sapLine.Quantity, 2);
             else
-                throw new InvalidOperationException(
-                    $"SAP line ItemCode={sapLine.ItemCode} has neither UnitCost nor StockSum.");
+                lineCogs = 0;
+
+            // Skip lines with zero cost — they produce empty JE lines
+            // that Odoo rejects as unbalanced
+            if (lineCogs == 0)
+            {
+                _logger.LogInformation(
+                    "Skipping zero-cost COGS line: ItemCode={ItemCode}, Qty={Qty}, SapLine={SapLine}",
+                    sapLine.ItemCode, sapLine.Quantity, sapLine.LineNum);
+                continue;
+            }
 
             var analyticDist = odooLine?["analytic_distribution"];
             string productName = "";
