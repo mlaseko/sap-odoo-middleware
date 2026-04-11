@@ -811,6 +811,7 @@ public class OdooJsonRpcService : IOdooService
         double debitSum = 0;
 
         // Debit lines (one per invoice line)
+        // Use balance (positive = debit) for Odoo 19 compatibility.
         foreach (var (lineCogs, itemCode, sapLineNum, analyticDist, productName) in cogsLines)
         {
             var rounded = Math.Round(lineCogs, currencyDecimals);
@@ -819,27 +820,23 @@ public class OdooJsonRpcService : IOdooService
             var debitLine = new JsonObject
             {
                 ["account_id"] = _settings.CogsAccountId,
-                ["debit"] = rounded,
-                ["credit"] = 0,
+                ["balance"] = rounded,
                 ["name"] = $"COGS | {productName} | INV {invoiceName} | SAP line {lineNumLabel}"
             };
 
-            // 4.4 — Apply analytic distribution from the invoice line
             if (IsValidAnalyticDistribution(analyticDist))
             {
                 debitLine["analytic_distribution"] = analyticDist!.DeepClone();
             }
 
-            // Command (0, 0, vals) = create new line
             lineCommands.Add(new JsonArray { 0, 0, debitLine });
         }
 
-        // One credit line — use rounded sum of actual debits to guarantee balance
+        // One credit line (negative balance = credit)
         var creditLine = new JsonObject
         {
             ["account_id"] = _settings.CogsClearingAccountId,
-            ["debit"] = 0,
-            ["credit"] = Math.Round(debitSum, currencyDecimals),
+            ["balance"] = -Math.Round(debitSum, currencyDecimals),
             ["name"] = $"COGS Clearing | INV {invoiceName}"
         };
         lineCommands.Add(new JsonArray { 0, 0, creditLine });
@@ -869,7 +866,7 @@ public class OdooJsonRpcService : IOdooService
             lineCommands.Add(new JsonArray { 2, lineId, 0 });
         }
 
-        // Recreate debit lines
+        // Recreate debit lines (positive balance = debit)
         double debitSum = 0;
         foreach (var (lineCogs, itemCode, sapLineNum, analyticDist, productName) in cogsLines)
         {
@@ -879,8 +876,7 @@ public class OdooJsonRpcService : IOdooService
             var debitLine = new JsonObject
             {
                 ["account_id"] = _settings.CogsAccountId,
-                ["debit"] = rounded,
-                ["credit"] = 0,
+                ["balance"] = rounded,
                 ["name"] = $"COGS | {productName} | INV {invoiceName} | SAP line {lineNumLabel}"
             };
 
@@ -892,12 +888,11 @@ public class OdooJsonRpcService : IOdooService
             lineCommands.Add(new JsonArray { 0, 0, debitLine });
         }
 
-        // Recreate credit line — use rounded sum of actual debits
+        // Recreate credit line (negative balance = credit)
         var creditLine = new JsonObject
         {
             ["account_id"] = _settings.CogsClearingAccountId,
-            ["debit"] = 0,
-            ["credit"] = Math.Round(debitSum, currencyDecimals),
+            ["balance"] = -Math.Round(debitSum, currencyDecimals),
             ["name"] = $"COGS Clearing | INV {invoiceName}"
         };
         lineCommands.Add(new JsonArray { 0, 0, creditLine });
