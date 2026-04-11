@@ -662,6 +662,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "✅ SAP SO updated: DocEntry={DocEntry}, DocNum={DocNum}",
                 docEntry, docNum);
 
+            // Refresh pick list if lines were updated
+            if (request.Lines.Count > 0 && _settings.AutoCreatePickList)
+            {
+                _RefreshPickListForSO(docEntry, request);
+            }
+
             return new SapSalesOrderResponse
             {
                 DocEntry = docEntry,
@@ -728,6 +734,146 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     "SO line added: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
                     reqLine.ItemCode, reqLine.Quantity, reqLine.UnitPrice);
             }
+        }
+    }
+
+    /// <summary>
+    /// Closes an existing open pick list for the SO and creates a new
+    /// one with current SO line quantities.  If the pick list has
+    /// already been picked (status != Released), it is left untouched.
+    /// </summary>
+    private void _RefreshPickListForSO(int soDocEntry, SapSalesOrderRequest request)
+    {
+        try
+        {
+            int? existingPklEntry = LookupPickListForSalesOrder(soDocEntry);
+            if (!existingPklEntry.HasValue)
+            {
+                _logger.LogInformation(
+                    "No existing pick list for SO DocEntry={DocEntry} — creating new one.",
+                    soDocEntry);
+                _CreatePickListForSO(soDocEntry, request);
+                return;
+            }
+
+            // Check pick list status
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            rs.DoQuery(
+                $"SELECT \"Status\" FROM \"OPKL\" WHERE \"AbsEntry\" = {existingPklEntry.Value}");
+
+            string pklStatus = "N"; // default unknown
+            if (!rs.EoF)
+                pklStatus = rs.Fields.Item("Status").Value?.ToString() ?? "N";
+            Marshal.ReleaseComObject(rs);
+
+            // Status: R = Released (open), P = Picked, C = Closed/Partially Delivered
+            if (pklStatus == "R")
+            {
+                _logger.LogInformation(
+                    "Pick list AbsEntry={PklEntry} is still Released — closing and recreating.",
+                    existingPklEntry.Value);
+
+                // Close the old pick list
+                var pkl = (PickLists)_company.GetBusinessObject(BoObjectTypes.oPickLists);
+                if (pkl.GetByKey(existingPklEntry.Value))
+                {
+                    pkl.Status = BoPickStatus.ps_Closed;
+                    int closeResult = pkl.Update();
+                    if (closeResult != 0)
+                    {
+                        _company.GetLastError(out int ec, out string em);
+                        _logger.LogWarning(
+                            "Failed to close pick list AbsEntry={PklEntry}: {Err}",
+                            existingPklEntry.Value, em);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Closed old pick list AbsEntry={PklEntry}.",
+                            existingPklEntry.Value);
+                    }
+                }
+                Marshal.ReleaseComObject(pkl);
+
+                // Create new pick list with updated quantities
+                _CreatePickListForSO(soDocEntry, request);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Pick list AbsEntry={PklEntry} status={Status} (already picked/closed) "
+                    + "— leaving it. New pick list will be created for additional qty if needed.",
+                    existingPklEntry.Value, pklStatus);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Pick list refresh failed for SO DocEntry={DocEntry}. "
+                + "SO lines were updated successfully — pick list may need manual attention.",
+                soDocEntry);
+        }
+    }
+
+    /// <summary>
+    /// Creates a new pick list for the given SO using current line data.
+    /// </summary>
+    private void _CreatePickListForSO(int soDocEntry, SapSalesOrderRequest request)
+    {
+        try
+        {
+            // Re-read the SO to get current line numbers and quantities
+            var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
+            if (!order.GetByKey(soDocEntry))
+            {
+                Marshal.ReleaseComObject(order);
+                return;
+            }
+
+            int lineCount = order.Lines.Count;
+            var pickList = (PickLists)_company.GetBusinessObject(BoObjectTypes.oPickLists);
+            pickList.PickDate = DateTime.Now;
+
+            for (int i = 0; i < lineCount; i++)
+            {
+                order.Lines.SetCurrentLine(i);
+
+                // Skip fully delivered lines (open qty = 0)
+                double openQty = order.Lines.RemainingOpenQuantity;
+                if (openQty <= 0)
+                    continue;
+
+                if (i > 0) pickList.Lines.Add();
+                pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
+                pickList.Lines.OrderEntry = soDocEntry;
+                pickList.Lines.OrderRowID = order.Lines.LineNum;
+                pickList.Lines.ReleasedQuantity = openQty;
+            }
+
+            Marshal.ReleaseComObject(order);
+
+            int plResult = pickList.Add();
+            if (plResult != 0)
+            {
+                _company.GetLastError(out int ec, out string em);
+                _logger.LogWarning(
+                    "New pick list creation failed for SO DocEntry={DocEntry}: {Err}",
+                    soDocEntry, em);
+            }
+            else
+            {
+                int newPklEntry = int.Parse(_company.GetNewObjectKey());
+                _logger.LogInformation(
+                    "New pick list created: AbsEntry={PklEntry} for SO DocEntry={DocEntry}",
+                    newPklEntry, soDocEntry);
+            }
+            Marshal.ReleaseComObject(pickList);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to create new pick list for SO DocEntry={DocEntry}.",
+                soDocEntry);
         }
     }
 
