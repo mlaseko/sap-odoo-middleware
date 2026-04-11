@@ -465,9 +465,9 @@ public class OdooJsonRpcService : IOdooService
         {
             double lineCogs;
             if (sapLine.StockSum.HasValue)
-                lineCogs = sapLine.StockSum.Value;
+                lineCogs = Math.Round(sapLine.StockSum.Value, 2);
             else if (sapLine.UnitCost.HasValue)
-                lineCogs = sapLine.UnitCost.Value * sapLine.Quantity;
+                lineCogs = Math.Round(sapLine.UnitCost.Value * sapLine.Quantity, 2);
             else
                 throw new InvalidOperationException(
                     $"SAP line ItemCode={sapLine.ItemCode} has neither UnitCost nor StockSum.");
