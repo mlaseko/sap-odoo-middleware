@@ -132,6 +132,36 @@ public class ReturnsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// DELETE /api/returns/{docEntry}
+    /// Cancels a Goods Return in SAP B1 when the return picking
+    /// is cancelled in Odoo.
+    /// </summary>
+    [HttpDelete("{docEntry:int}")]
+    public async Task<IActionResult> Cancel(int docEntry)
+    {
+        _logger.LogInformation(
+            "Received Goods Return cancel request — DocEntry={DocEntry}",
+            docEntry);
+
+        try
+        {
+            await _sapService.CancelGoodsReturnAsync(docEntry);
+
+            _logger.LogInformation(
+                "SAP Goods Return cancelled: DocEntry={DocEntry}", docEntry);
+
+            return Ok(ApiResponse<object>.Ok(new { doc_entry = docEntry, action = "cancelled" }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to cancel SAP Goods Return DocEntry={DocEntry}", docEntry);
+
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
+    }
+
     private async Task WriteBackToOdoo(int odooPickingId, SapGoodsReturnResponse result)
     {
         try

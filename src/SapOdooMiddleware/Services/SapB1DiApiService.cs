@@ -2690,6 +2690,59 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    public async Task CancelGoodsReturnAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Cancelling SAP Goods Return — DocEntry={DocEntry}",
+                docEntry);
+
+            var goodsReturn = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oReturns);
+
+            if (!goodsReturn.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(goodsReturn);
+                throw new InvalidOperationException(
+                    $"SAP Goods Return DocEntry={docEntry} not found.");
+            }
+
+            // If already closed/cancelled, skip
+            if (goodsReturn.DocumentStatus != BoStatus.bost_Open)
+            {
+                Marshal.ReleaseComObject(goodsReturn);
+                _logger.LogInformation(
+                    "SAP Goods Return DocEntry={DocEntry} is already "
+                    + "closed — no cancellation needed.", docEntry);
+                return;
+            }
+
+            int result = goodsReturn.Cancel();
+
+            if (result != 0)
+            {
+                _company!.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(goodsReturn);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            Marshal.ReleaseComObject(goodsReturn);
+
+            _logger.LogInformation(
+                "✅ SAP Goods Return cancelled: DocEntry={DocEntry}",
+                docEntry);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <summary>
     /// Returns the warehouse code to use for a Sales Order line.
     /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to
