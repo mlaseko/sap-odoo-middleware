@@ -973,33 +973,25 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// </summary>
     private SapInvoiceResponse CreateInvoiceCopyFromDelivery(Documents invoice, SapInvoiceRequest request)
     {
-        // Collect all delivery DocEntries to copy from
-        var deliveryDocEntries = new List<int>();
-        if (request.SapDeliveryDocEntries != null && request.SapDeliveryDocEntries.Count > 0)
-            deliveryDocEntries.AddRange(request.SapDeliveryDocEntries);
-        else if (request.SapDeliveryDocEntry.HasValue)
-            deliveryDocEntries.Add(request.SapDeliveryDocEntry.Value);
+        int deliveryDocEntry = request.SapDeliveryDocEntry!.Value;
 
         _logger.LogInformation(
-            "Creating AR Invoice by copying from {Count} Delivery(ies): [{DocEntries}]",
-            deliveryDocEntries.Count,
-            string.Join(", ", deliveryDocEntries));
+            "Creating AR Invoice by copying from Delivery DocEntry={DeliveryDocEntry}",
+            deliveryDocEntry);
 
-        // Set invoice header fields from the first delivery
-        var firstDelivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
-        if (!firstDelivery.GetByKey(deliveryDocEntries[0]))
+        var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+
+        if (!delivery.GetByKey(deliveryDocEntry))
         {
-            Marshal.ReleaseComObject(firstDelivery);
+            Marshal.ReleaseComObject(delivery);
             Marshal.ReleaseComObject(invoice);
             throw new InvalidOperationException(
-                $"SAP B1 Delivery Note with DocEntry={deliveryDocEntries[0]} not found.");
+                $"SAP B1 Delivery Note with DocEntry={deliveryDocEntry} not found.");
         }
 
         invoice.CardCode = !string.IsNullOrEmpty(request.CustomerCode)
             ? request.CustomerCode
-            : firstDelivery.CardCode;
-
-        Marshal.ReleaseComObject(firstDelivery);
+            : delivery.CardCode;
 
         invoice.NumAtCard = request.ExternalInvoiceId;
 
@@ -1024,59 +1016,28 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(invoice.UserFields, "U_Odoo_LastSync", syncDate, "Invoice header");
         TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
 
-        // Copy lines from ALL deliveries — each line references its
-        // source delivery via BaseType/BaseEntry/BaseLine for full
-        // relationship map traceability.
-        int invoiceLineIndex = 0;
-        foreach (int delDocEntry in deliveryDocEntries)
+        int deliveryLineCount = delivery.Lines.Count;
+
+        for (int i = 0; i < deliveryLineCount; i++)
         {
-            var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+            delivery.Lines.SetCurrentLine(i);
 
-            if (!delivery.GetByKey(delDocEntry))
-            {
-                Marshal.ReleaseComObject(delivery);
-                _logger.LogWarning(
-                    "Delivery DocEntry={DocEntry} not found — skipping lines from this delivery.",
-                    delDocEntry);
-                continue;
-            }
+            if (i > 0)
+                invoice.Lines.Add();
 
-            int lineCount = delivery.Lines.Count;
-            _logger.LogInformation(
-                "Copying {LineCount} line(s) from Delivery DocEntry={DocEntry}",
-                lineCount, delDocEntry);
+            invoice.Lines.ItemCode = delivery.Lines.ItemCode;
+            invoice.Lines.Quantity = delivery.Lines.Quantity;
+            invoice.Lines.UnitPrice = delivery.Lines.UnitPrice;
+            invoice.Lines.WarehouseCode = delivery.Lines.WarehouseCode;
 
-            for (int i = 0; i < lineCount; i++)
-            {
-                delivery.Lines.SetCurrentLine(i);
-
-                if (invoiceLineIndex > 0)
-                    invoice.Lines.Add();
-
-                invoice.Lines.ItemCode = delivery.Lines.ItemCode;
-                invoice.Lines.Quantity = delivery.Lines.Quantity;
-                invoice.Lines.UnitPrice = delivery.Lines.UnitPrice;
-                invoice.Lines.WarehouseCode = delivery.Lines.WarehouseCode;
-
-                invoice.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
-                invoice.Lines.BaseEntry = delDocEntry;
-                invoice.Lines.BaseLine = delivery.Lines.LineNum;
-
-                _logger.LogDebug(
-                    "Invoice Line[{Index}]: BaseEntry={BaseEntry}, BaseLine={BaseLine}, " +
-                    "ItemCode={ItemCode}, Qty={Qty}",
-                    invoiceLineIndex, delDocEntry,
-                    delivery.Lines.LineNum,
-                    delivery.Lines.ItemCode,
-                    delivery.Lines.Quantity);
-
-                invoiceLineIndex++;
-            }
-
-            Marshal.ReleaseComObject(delivery);
+            invoice.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
+            invoice.Lines.BaseEntry = deliveryDocEntry;
+            invoice.Lines.BaseLine = delivery.Lines.LineNum;
         }
 
         int? baseSoDocEntry = request.SapSalesOrderDocEntry;
+
+        Marshal.ReleaseComObject(delivery);
 
         // Add the invoice
         int result = invoice.Add();

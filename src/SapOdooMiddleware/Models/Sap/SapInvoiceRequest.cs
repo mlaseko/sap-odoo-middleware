@@ -66,13 +66,6 @@ public class SapInvoiceRequest
     public int? SapDeliveryDocEntry { get; set; }
 
     /// <summary>
-    /// Multiple SAP Delivery DocEntries when the SO was partially delivered.
-    /// Used for multi-delivery copy-from.  When provided, each delivery's
-    /// lines are copied into the invoice with correct base references.
-    /// </summary>
-    public List<int>? SapDeliveryDocEntries { get; set; }
-
-    /// <summary>
     /// SAP Sales Order DocEntry (ORDR.DocEntry) that originated this invoice.
     /// Available on the delivery document and used for traceability.
     /// When <see cref="SapDeliveryDocEntry"/> is not provided, lines must be supplied.
@@ -105,9 +98,7 @@ public class SapInvoiceRequest
     /// Returns true when the invoice should be created by copying from a delivery document.
     /// </summary>
     [JsonIgnore]
-    public bool CopyFromDelivery =>
-        (SapDeliveryDocEntry.HasValue && SapDeliveryDocEntry.Value > 0)
-        || (SapDeliveryDocEntries != null && SapDeliveryDocEntries.Count > 0);
+    public bool CopyFromDelivery => SapDeliveryDocEntry.HasValue && SapDeliveryDocEntry.Value > 0;
 }
 
 /// <summary>
