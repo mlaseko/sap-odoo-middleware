@@ -100,6 +100,11 @@ public interface ISapB1Service
     Task CancelGoodsReturnAsync(int docEntry);
 
     /// <summary>
+    /// Cancels a Credit Memo (ORIN) in SAP B1 by DocEntry.
+    /// </summary>
+    Task CancelCreditMemoAsync(int docEntry);
+
+    /// <summary>
     /// Creates a Customer (BusinessPartner CardType=C) in SAP B1 via DI API.
     /// Returns the auto-generated CardCode for write-back to Odoo.
     /// </summary>

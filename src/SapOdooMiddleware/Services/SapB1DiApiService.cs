@@ -2743,6 +2743,58 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    public async Task CancelCreditMemoAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Cancelling SAP Credit Memo — DocEntry={DocEntry}",
+                docEntry);
+
+            var creditMemo = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oCreditNotes);
+
+            if (!creditMemo.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(creditMemo);
+                throw new InvalidOperationException(
+                    $"SAP Credit Memo DocEntry={docEntry} not found.");
+            }
+
+            if (creditMemo.DocumentStatus != BoStatus.bost_Open)
+            {
+                Marshal.ReleaseComObject(creditMemo);
+                _logger.LogInformation(
+                    "SAP Credit Memo DocEntry={DocEntry} is already "
+                    + "closed — no cancellation needed.", docEntry);
+                return;
+            }
+
+            int result = creditMemo.Cancel();
+
+            if (result != 0)
+            {
+                _company!.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(creditMemo);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            Marshal.ReleaseComObject(creditMemo);
+
+            _logger.LogInformation(
+                "✅ SAP Credit Memo cancelled: DocEntry={DocEntry}",
+                docEntry);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <summary>
     /// Returns the warehouse code to use for a Sales Order line.
     /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to
