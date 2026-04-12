@@ -150,6 +150,30 @@ public class WebhookQueueProcessor : BackgroundService
         {
             using var scope = _scopeFactory.CreateScope();
             var odooService = scope.ServiceProvider.GetRequiredService<IOdooService>();
+            var sapService = scope.ServiceProvider.GetRequiredService<ISapB1Service>();
+
+            // Read the SAP delivery to get actual delivered items
+            List<DeliveredItem>? deliveredItems = null;
+            try
+            {
+                var sapLines = await sapService.ReadDeliveryLinesAsync(entry.DocEntry);
+                if (sapLines.Count > 0)
+                {
+                    deliveredItems = sapLines
+                        .Select(l => new DeliveredItem { ItemCode = l.ItemCode, Quantity = l.Quantity })
+                        .ToList();
+                    _logger.LogInformation(
+                        "WebhookQueueProcessor: SAP delivery DocEntry={DocEntry} has {Count} lines: [{Items}]",
+                        entry.DocEntry, deliveredItems.Count,
+                        string.Join(", ", deliveredItems.Select(d => $"{d.ItemCode}x{d.Quantity}")));
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "WebhookQueueProcessor: Could not read delivery lines for DocEntry={DocEntry}. "
+                    + "Will confirm full demand.", entry.DocEntry);
+            }
 
             // Collect all SO refs to confirm — start with the primary one
             var soRefsToConfirm = new List<string> { entry.OdooSoId };
@@ -157,7 +181,6 @@ public class WebhookQueueProcessor : BackgroundService
             // Check if the SAP delivery references multiple SOs
             try
             {
-                var sapService = scope.ServiceProvider.GetRequiredService<ISapB1Service>();
                 var allRefs = await sapService.ReadDeliveryBaseSoRefsAsync(entry.DocEntry);
                 foreach (var r in allRefs)
                 {
@@ -191,7 +214,8 @@ public class WebhookQueueProcessor : BackgroundService
                         UOdooSoId = soRef,
                         SapDeliveryNo = entry.DocEntry.ToString(),
                         DeliveryDate = entry.DeliveryDate,
-                        Status = "delivered"
+                        Status = "delivered",
+                        DeliveredItems = deliveredItems,
                     };
                     var response = await odooService.ConfirmDeliveryAsync(request);
                     responses.Add(response);

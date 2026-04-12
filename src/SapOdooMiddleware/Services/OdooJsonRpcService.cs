@@ -39,7 +39,7 @@ public class OdooJsonRpcService : IOdooService
 
         var soId = request.ResolvedSoId;
 
-        // 1. Find sale.order by name (which matches the Odoo SO identifier, e.g. "SO0042")
+        // 1. Find sale.order by name
         var soIds = await SearchAsync("sale.order", new JsonArray
         {
             new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(soId) }
@@ -70,10 +70,10 @@ public class OdooJsonRpcService : IOdooService
         await ExecuteMethodAsync("stock.picking", "action_assign", new JsonArray { pickingId });
         _logger.LogInformation("Reserved stock for picking id={PickingId}", pickingId);
 
-        // 4. Set qty_done = quantity (demand) on each move line
-        //    In Odoo 18, action_set_quantities_to_reservation does not exist.
-        //    Instead, we read each stock.move.line, get its 'quantity' (demand),
-        //    and write it to 'qty_done', plus set 'picked' = true.
+        // 4. Read SAP delivery to get actual delivered items + quantities
+        //    Then set qty_done only for the items that were delivered.
+        var deliveredItems = request.DeliveredItems;
+
         var moveLineIds = await SearchAsync("stock.move.line", new JsonArray
         {
             new JsonArray { JsonValue.Create("picking_id"), JsonValue.Create("="), JsonValue.Create(pickingId) }
@@ -83,47 +83,91 @@ public class OdooJsonRpcService : IOdooService
         {
             foreach (var mlId in moveLineIds)
             {
-                // Read the demand quantity
                 var mlData = await ReadAsync("stock.move.line", mlId, new JsonArray
                 {
-                    JsonValue.Create("quantity")
+                    JsonValue.Create("quantity"),
+                    JsonValue.Create("product_id")
                 });
 
                 var demandQty = mlData?["quantity"]?.GetValue<double>() ?? 0;
+                double qtyToSet = demandQty; // default: deliver full demand
 
-                // Write qty_done = demand quantity, picked = true
-                await WriteAsync("stock.move.line", mlId, new JsonObject
+                // If we have SAP delivery line data, match by product
+                if (deliveredItems != null && deliveredItems.Count > 0)
                 {
-                    ["qty_done"] = demandQty,
-                    ["picked"] = true
-                });
+                    int productId = 0;
+                    if (mlData?["product_id"] is JsonArray pArr && pArr.Count >= 1)
+                        productId = pArr[0]!.GetValue<int>();
+
+                    // Look up the product's SAP item code
+                    string itemCode = "";
+                    if (productId > 0)
+                    {
+                        var prodData = await ReadAsync("product.product", productId, new JsonArray
+                        {
+                            JsonValue.Create("x_sap_item_code"),
+                            JsonValue.Create("default_code")
+                        });
+                        itemCode = prodData?["x_sap_item_code"]?.GetValue<string>()
+                            ?? prodData?["default_code"]?.GetValue<string>() ?? "";
+                    }
+
+                    // Find matching delivered item
+                    var match = deliveredItems.FirstOrDefault(d =>
+                        string.Equals(d.ItemCode, itemCode, StringComparison.OrdinalIgnoreCase));
+
+                    if (match != null && match.Quantity > 0)
+                    {
+                        qtyToSet = Math.Min(match.Quantity, demandQty);
+                        match.Quantity -= qtyToSet; // consume
+                    }
+                    else
+                    {
+                        qtyToSet = 0; // not delivered in this SAP delivery
+                    }
+                }
+
+                if (qtyToSet > 0)
+                {
+                    await WriteAsync("stock.move.line", mlId, new JsonObject
+                    {
+                        ["qty_done"] = qtyToSet,
+                        ["picked"] = true
+                    });
+                }
             }
         }
-        _logger.LogInformation("Set qty_done on {Count} move lines for picking id={PickingId}", moveLineIds.Count, pickingId);
+        _logger.LogInformation("Set qty_done on move lines for picking id={PickingId}", pickingId);
 
-        // 5. button_validate() — with context to skip backorder/immediate-transfer wizards
-        await ExecuteMethodWithContextAsync("stock.picking", "button_validate", new JsonArray { pickingId },
-            new JsonObject
-            {
-                ["skip_backorder"] = true,
-                ["skip_immediate"] = true
-            });
-        _logger.LogInformation("Validated picking id={PickingId}", pickingId);
+        // 5. button_validate() — allow backorder for partial deliveries
+        bool isPartial = deliveredItems != null && deliveredItems.Count > 0;
+        var validateContext = new JsonObject
+        {
+            ["skip_immediate"] = true
+        };
+        if (!isPartial)
+        {
+            // Full delivery — skip backorder wizard
+            validateContext["skip_backorder"] = true;
+        }
+        // Partial delivery: do NOT set skip_backorder so Odoo creates
+        // a backorder for the remaining items
 
-        // 6. Write SAP delivery DocEntry, date, and pick list ID onto the picking
+        await ExecuteMethodWithContextAsync("stock.picking", "button_validate",
+            new JsonArray { pickingId }, validateContext);
+        _logger.LogInformation("Validated picking id={PickingId} (partial={IsPartial})", pickingId, isPartial);
+
+        // 6. Write SAP delivery DocEntry, date, and pick list ID
         var writeValues = new JsonObject();
 
-        // x_sap_delivery_docentry is an integer field in Odoo
         if (int.TryParse(request.SapDeliveryNo, out int deliveryDocEntry))
             writeValues["x_sap_delivery_docentry"] = deliveryDocEntry;
         else
             writeValues["x_sap_delivery_docentry"] = request.SapDeliveryNo;
 
-        // x_sap_delivery_date is a datetime field in Odoo
         if (request.DeliveryDate.HasValue)
             writeValues["x_sap_delivery_date"] = request.DeliveryDate.Value.ToString("yyyy-MM-dd HH:mm:ss");
 
-        // Propagate x_sap_picklist_id from the sale order to the picking
         var soData = await ReadAsync("sale.order", soDbId, new JsonArray
         {
             JsonValue.Create("x_sap_picklist_id")
@@ -133,8 +177,8 @@ public class OdooJsonRpcService : IOdooService
             writeValues["x_sap_picklist_id"] = pickListId;
 
         await WriteAsync("stock.picking", pickingId, writeValues);
-        _logger.LogInformation("Wrote SAP delivery DocEntry={DocEntry}, PickListId={PickListId} onto picking id={PickingId}",
-            request.SapDeliveryNo, pickListId, pickingId);
+        _logger.LogInformation("Wrote SAP delivery DocEntry={DocEntry} onto picking id={PickingId}",
+            request.SapDeliveryNo, pickingId);
 
         // 7. Read back picking state and name
         var pickingData = await ReadAsync("stock.picking", pickingId, new JsonArray

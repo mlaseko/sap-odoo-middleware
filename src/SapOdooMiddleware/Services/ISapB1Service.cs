@@ -75,6 +75,12 @@ public interface ISapB1Service
     Task<List<string>> ReadDeliveryBaseSoRefsAsync(int docEntry);
 
     /// <summary>
+    /// Reads the delivered items from a SAP delivery note.
+    /// Returns item codes and quantities for partial delivery handling.
+    /// </summary>
+    Task<List<(string ItemCode, double Quantity)>> ReadDeliveryLinesAsync(int docEntry);
+
+    /// <summary>
     /// Returns the document status (open/closed) of a Return Request (ORRR) in SAP B1.
     /// Odoo gates return validation on this — the picking can only be validated
     /// once the Return Request is closed (SAP has processed the inventory adjustment).

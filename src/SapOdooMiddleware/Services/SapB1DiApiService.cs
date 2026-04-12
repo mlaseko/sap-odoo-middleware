@@ -979,7 +979,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             "Creating AR Invoice by copying from Delivery DocEntry={DeliveryDocEntry}",
             deliveryDocEntry);
 
-        // Load the source delivery to read its lines
         var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
 
         if (!delivery.GetByKey(deliveryDocEntry))
@@ -987,18 +986,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             Marshal.ReleaseComObject(delivery);
             Marshal.ReleaseComObject(invoice);
             throw new InvalidOperationException(
-                $"SAP B1 Delivery Note with DocEntry={deliveryDocEntry} not found. " +
-                "Cannot create invoice by copy-from-delivery.");
+                $"SAP B1 Delivery Note with DocEntry={deliveryDocEntry} not found.");
         }
 
-        _logger.LogInformation(
-            "Loaded source Delivery: DocEntry={DocEntry}, DocNum={DocNum}, CardCode={CardCode}, LineCount={LineCount}",
-            delivery.DocEntry,
-            delivery.DocNum,
-            delivery.CardCode,
-            delivery.Lines.Count);
-
-        // Set invoice header fields
         invoice.CardCode = !string.IsNullOrEmpty(request.CustomerCode)
             ? request.CustomerCode
             : delivery.CardCode;
@@ -1017,7 +1007,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         if (!string.IsNullOrEmpty(request.Currency))
             invoice.DocCurrency = request.Currency;
 
-        // Set header UDFs for Odoo traceability
         TrySetUserField(invoice.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Invoice header");
 
         if (!string.IsNullOrEmpty(request.UOdooSoId))
@@ -1027,19 +1016,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(invoice.UserFields, "U_Odoo_LastSync", syncDate, "Invoice header");
         TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
 
-        // Copy lines from the delivery document.
-        // Each invoice line references its source delivery line via BaseType/BaseEntry/BaseLine.
-        // We set line fields explicitly (ItemCode, Quantity, Price, WarehouseCode) instead
-        // of relying on SAP's automatic copy, because auto-copy also inherits bin
-        // allocations from the delivery.  When the pick list allocated stock from a
-        // bin in a different warehouse (e.g. COCWHSE bin on a MainWHSE line), the
-        // inherited bin/warehouse mismatch causes DI API error -10.  Invoices don't
-        // move stock so bin allocations are unnecessary.
         int deliveryLineCount = delivery.Lines.Count;
-
-        _logger.LogInformation(
-            "Copying {DeliveryLineCount} line(s) from Delivery DocEntry={DeliveryDocEntry} to Invoice (explicit lines, no bin allocations)",
-            deliveryLineCount, deliveryDocEntry);
 
         for (int i = 0; i < deliveryLineCount; i++)
         {
@@ -1048,30 +1025,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (i > 0)
                 invoice.Lines.Add();
 
-            // Set line data explicitly from the delivery
             invoice.Lines.ItemCode = delivery.Lines.ItemCode;
             invoice.Lines.Quantity = delivery.Lines.Quantity;
             invoice.Lines.UnitPrice = delivery.Lines.UnitPrice;
             invoice.Lines.WarehouseCode = delivery.Lines.WarehouseCode;
 
-            // Set base document reference to maintain the document chain
             invoice.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
             invoice.Lines.BaseEntry = deliveryDocEntry;
             invoice.Lines.BaseLine = delivery.Lines.LineNum;
-
-            _logger.LogDebug(
-                "Invoice Line[{Index}]: BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}, " +
-                "ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Warehouse={Warehouse}",
-                i,
-                deliveryDocEntry,
-                delivery.Lines.LineNum,
-                delivery.Lines.ItemCode,
-                delivery.Lines.Quantity,
-                delivery.Lines.UnitPrice,
-                delivery.Lines.WarehouseCode);
         }
 
-        // Capture the originating Sales Order DocEntry from the delivery for the response
         int? baseSoDocEntry = request.SapSalesOrderDocEntry;
 
         Marshal.ReleaseComObject(delivery);
@@ -2683,6 +2646,56 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 ExternalReturnId = request.ExternalReturnId,
                 OdooPickingId = request.OdooPickingId
             };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<List<(string ItemCode, double Quantity)>> ReadDeliveryLinesAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var delivery = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oDeliveryNotes);
+
+            try
+            {
+                if (!delivery.GetByKey(docEntry))
+                {
+                    Marshal.ReleaseComObject(delivery);
+                    return [];
+                }
+
+                var lines = new List<(string, double)>();
+                int lineCount = delivery.Lines.Count;
+                for (int i = 0; i < lineCount; i++)
+                {
+                    delivery.Lines.SetCurrentLine(i);
+                    double qty = delivery.Lines.Quantity;
+                    if (qty > 0)
+                    {
+                        lines.Add((delivery.Lines.ItemCode, qty));
+                    }
+                }
+
+                Marshal.ReleaseComObject(delivery);
+
+                _logger.LogInformation(
+                    "Read {Count} delivered lines from SAP delivery DocEntry={DocEntry}",
+                    lines.Count, docEntry);
+
+                return lines;
+            }
+            catch
+            {
+                Marshal.ReleaseComObject(delivery);
+                throw;
+            }
         }
         finally
         {
