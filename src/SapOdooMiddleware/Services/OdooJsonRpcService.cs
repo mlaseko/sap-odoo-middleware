@@ -170,7 +170,7 @@ public class OdooJsonRpcService : IOdooService
         {
             int incomingDocEntry = 0;
             int.TryParse(request.SapDeliveryNo, out incomingDocEntry);
-            string pickingName = existingPickingData?["name"]?.GetValue<string>() ?? "";
+            string existingPickingName = existingPickingData?["name"]?.GetValue<string>() ?? "";
 
             if (existingDeliveryDocEntry != incomingDocEntry)
             {
@@ -178,7 +178,7 @@ public class OdooJsonRpcService : IOdooService
                     "Write-back MISMATCH for picking id={PickingId} ('{PickingName}'): " +
                     "existing x_sap_delivery_docentry={ExistingId} vs incoming={IncomingId}, " +
                     "SO ref={SoRef} — skipping delivery write-back",
-                    pickingId, pickingName, existingDeliveryDocEntry, incomingDocEntry, soId);
+                    pickingId, existingPickingName, existingDeliveryDocEntry, incomingDocEntry, soId);
                 // Still return the response since the picking was already validated above
                 var skipData = await ReadAsync("stock.picking", pickingId, new JsonArray
                 {
@@ -195,7 +195,7 @@ public class OdooJsonRpcService : IOdooService
             _logger.LogInformation(
                 "Write-back match confirmed for picking id={PickingId} ('{PickingName}'): " +
                 "SAP DocEntry={SapDocEntry}, SO ref={SoRef} — proceeding with re-sync",
-                pickingId, pickingName, existingDeliveryDocEntry, soId);
+                pickingId, existingPickingName, existingDeliveryDocEntry, soId);
         }
 
         var writeValues = new JsonObject();
