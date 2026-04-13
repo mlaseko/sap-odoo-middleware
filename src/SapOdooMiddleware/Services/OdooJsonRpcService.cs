@@ -157,7 +157,47 @@ public class OdooJsonRpcService : IOdooService
             new JsonArray { pickingId }, validateContext);
         _logger.LogInformation("Validated picking id={PickingId} (partial={IsPartial})", pickingId, isPartial);
 
-        // 6. Write SAP delivery DocEntry, date, and pick list ID
+        // 6. Composite check + Write SAP delivery DocEntry, date, and pick list ID
+        var existingPickingData = await ReadAsync("stock.picking", pickingId, new JsonArray
+        {
+            JsonValue.Create("x_sap_delivery_docentry"),
+            JsonValue.Create("scheduled_date"),
+            JsonValue.Create("name")
+        });
+
+        int existingDeliveryDocEntry = existingPickingData?["x_sap_delivery_docentry"]?.GetValue<int>() ?? 0;
+        if (existingDeliveryDocEntry > 0)
+        {
+            int incomingDocEntry = 0;
+            int.TryParse(request.SapDeliveryNo, out incomingDocEntry);
+            string pickingName = existingPickingData?["name"]?.GetValue<string>() ?? "";
+
+            if (existingDeliveryDocEntry != incomingDocEntry)
+            {
+                _logger.LogError(
+                    "Write-back MISMATCH for picking id={PickingId} ('{PickingName}'): " +
+                    "existing x_sap_delivery_docentry={ExistingId} vs incoming={IncomingId}, " +
+                    "SO ref={SoRef} — skipping delivery write-back",
+                    pickingId, pickingName, existingDeliveryDocEntry, incomingDocEntry, soId);
+                // Still return the response since the picking was already validated above
+                var skipData = await ReadAsync("stock.picking", pickingId, new JsonArray
+                {
+                    JsonValue.Create("name"), JsonValue.Create("state")
+                });
+                return new DeliveryUpdateResponse
+                {
+                    UOdooSoId = soId, PickingId = pickingId,
+                    PickingName = skipData?["name"]?.GetValue<string>() ?? "",
+                    State = skipData?["state"]?.GetValue<string>() ?? "",
+                    SapDeliveryNo = request.SapDeliveryNo
+                };
+            }
+            _logger.LogInformation(
+                "Write-back match confirmed for picking id={PickingId} ('{PickingName}'): " +
+                "SAP DocEntry={SapDocEntry}, SO ref={SoRef} — proceeding with re-sync",
+                pickingId, pickingName, existingDeliveryDocEntry, soId);
+        }
+
         var writeValues = new JsonObject();
 
         if (int.TryParse(request.SapDeliveryNo, out int deliveryDocEntry))
@@ -209,6 +249,39 @@ public class OdooJsonRpcService : IOdooService
         _logger.LogInformation(
             "Writing SAP invoice fields back to Odoo — OdooInvoiceId={OdooInvoiceId}, SapDocEntry={SapDocEntry}, LineCount={LineCount}",
             invoiceId, request.SapDocEntry, request.Lines.Count);
+
+        // 0. Composite check: read existing SAP fields + invoice_date before writing
+        var existingData = await ReadAsync("account.move", invoiceId, new JsonArray
+        {
+            JsonValue.Create("x_sap_invoice_docentry"),
+            JsonValue.Create("invoice_date"),
+            JsonValue.Create("name")
+        });
+
+        int existingSapId = existingData?["x_sap_invoice_docentry"]?.GetValue<int>() ?? 0;
+        if (existingSapId > 0)
+        {
+            string odooDate = existingData?["invoice_date"]?.GetValue<string>() ?? "";
+            string invoiceName = existingData?["name"]?.GetValue<string>() ?? "";
+            // Compare date-only (first 10 chars) with the SAP posting date from the request
+            // If SAP DocEntry matches and dates align, allow re-sync; otherwise skip
+            if (existingSapId != request.SapDocEntry)
+            {
+                _logger.LogError(
+                    "Write-back MISMATCH for invoice id={InvoiceId} ('{InvoiceName}'): " +
+                    "existing x_sap_invoice_docentry={ExistingId} vs incoming={IncomingId} — skipping",
+                    invoiceId, invoiceName, existingSapId, request.SapDocEntry);
+                return new InvoiceWriteBackResponse
+                {
+                    OdooInvoiceId = invoiceId, SapDocEntry = request.SapDocEntry,
+                    LinesUpdated = 0, Success = false
+                };
+            }
+            _logger.LogInformation(
+                "Write-back match confirmed for invoice id={InvoiceId} ('{InvoiceName}'): " +
+                "SAP DocEntry={SapDocEntry}, date={OdooDate} — proceeding with re-sync",
+                invoiceId, invoiceName, existingSapId, odooDate);
+        }
 
         // 1. Write x_sap_invoice_docentry (and base document refs) on the account.move header
         var headerValues = new JsonObject
@@ -296,6 +369,34 @@ public class OdooJsonRpcService : IOdooService
             "Writing SAP Incoming Payment fields back to Odoo — OdooPaymentId={OdooPaymentId}, " +
             "SapDocEntry={SapDocEntry}, SapDocNum={SapDocNum}",
             paymentId, request.SapDocEntry, request.SapDocNum);
+
+        // Composite check: read existing SAP fields + date before writing
+        var existingData = await ReadAsync("account.payment", paymentId, new JsonArray
+        {
+            JsonValue.Create("x_sap_inpay_docentry"),
+            JsonValue.Create("date"),
+            JsonValue.Create("name")
+        });
+
+        int existingSapId = existingData?["x_sap_inpay_docentry"]?.GetValue<int>() ?? 0;
+        if (existingSapId > 0 && existingSapId != request.SapDocEntry)
+        {
+            string paymentName = existingData?["name"]?.GetValue<string>() ?? "";
+            _logger.LogError(
+                "Write-back MISMATCH for payment id={PaymentId} ('{PaymentName}'): " +
+                "existing x_sap_inpay_docentry={ExistingId} vs incoming={IncomingId} — skipping",
+                paymentId, paymentName, existingSapId, request.SapDocEntry);
+            return;
+        }
+
+        if (existingSapId > 0)
+        {
+            string paymentName = existingData?["name"]?.GetValue<string>() ?? "";
+            _logger.LogInformation(
+                "Write-back match confirmed for payment id={PaymentId} ('{PaymentName}'): " +
+                "SAP DocEntry={SapDocEntry} — proceeding with re-sync",
+                paymentId, paymentName, existingSapId);
+        }
 
         await WriteAsync("account.payment", paymentId, new JsonObject
         {
