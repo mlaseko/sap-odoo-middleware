@@ -803,6 +803,63 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                 if (existingStatus != "R")
                 {
+                    // Status C (Closed): either the delivery was posted
+                    // (delivered lines now have RemainingOpenQuantity=0 on
+                    // ORDR) or the pick list was cancelled without delivery
+                    // (all lines freed back to open).  Either way, the
+                    // items still needing picking are exactly the ORDR
+                    // lines with RemainingOpenQuantity > 0 — and those are
+                    // NOT claimed by any active pick list.  So we can
+                    // safely build a FOLLOW-UP pick list (without closing
+                    // the old one, which is already closed).
+                    //
+                    // Status P (Picked): items have been gathered but no
+                    // delivery has been posted yet.  The items are still
+                    // locked by the existing pick list — SAP would reject
+                    // a second release.  Must warn and let warehouse close
+                    // the existing pick list / post delivery first.
+                    if (existingStatus == "C")
+                    {
+                        _logger.LogInformation(
+                            "Pick list AbsEntry={PklEntry} is Closed — attempting "
+                            + "to create a FOLLOW-UP pick list for undelivered SO lines.",
+                            existingPklEntry.Value);
+
+                        var (followUpEntry, followUpWarning) =
+                            _TryCreatePickListForSO(soDocEntry);
+
+                        if (followUpEntry.HasValue)
+                        {
+                            _logger.LogInformation(
+                                "Follow-up pick list AbsEntry={NewEntry} created for "
+                                + "SO DocEntry={DocEntry}; original pick list "
+                                + "AbsEntry={OldEntry} left as-is (already Closed).",
+                                followUpEntry.Value, soDocEntry, existingPklEntry.Value);
+                            // NOTE: we deliberately do NOT close the old pick
+                            // list — it's already Closed.  Return the new
+                            // AbsEntry so the ICC writes it back to
+                            // sale.order.x_sap_picklist_id and every active
+                            // outgoing stock.picking.
+                            return (followUpWarning, followUpEntry);
+                        }
+                        // _TryCreatePickListForSO returned (null, msg):
+                        // either there were no undelivered lines (nothing
+                        // to do — return the existing closed AbsEntry with
+                        // no warning) or the build failed (fall through to
+                        // the P/C warning path below).
+                        if (followUpWarning == null)
+                        {
+                            // Nothing to pick — all lines are fully
+                            // delivered.  Keep existing AbsEntry aligned
+                            // on Odoo side; no caveat to surface.
+                            return (null, existingPklEntry);
+                        }
+                        _logger.LogWarning(
+                            "Follow-up pick list build failed for SO "
+                            + "DocEntry={DocEntry}: {Msg}. Falling through to "
+                            + "operator warning.", soDocEntry, followUpWarning);
+                    }
+
                     string statusLabel = existingStatus switch
                     {
                         "P" => "Picked",
