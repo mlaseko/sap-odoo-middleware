@@ -44,4 +44,16 @@ public class SapB1Settings
     /// If empty, pick lists are created without bin allocation (legacy behavior).
     /// </summary>
     public List<string> BinLocationPriority { get; set; } = new();
+
+    /// <summary>
+    /// When <c>true</c>, if an SO line's quantity cannot be fully covered by
+    /// bins in <see cref="BinLocationPriority"/>, the allocator falls back to
+    /// ANY other bin in the line's warehouse that has on-hand stock for the
+    /// item, largest stock first.  When <c>false</c> (default), lines that
+    /// can't be covered by priority bins are SKIPPED from the pick list with
+    /// a warning.  Enable this to stop warehouse "item has stock but isn't
+    /// in the priority bin" surprises at the cost of potentially picking
+    /// from less-preferred bins.
+    /// </summary>
+    public bool AllowFallbackBinAllocation { get; set; } = false;
 }
