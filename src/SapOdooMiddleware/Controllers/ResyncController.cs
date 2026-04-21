@@ -178,16 +178,36 @@ public class ResyncController : ControllerBase
                 await ensureCmd.ExecuteNonQueryAsync();
             }
 
+            // Map the ICC document_type to the corresponding SAP B1 BoObjectType
+            // numeric code so the [ObjectType] column (NOT NULL, no default on
+            // existing production schemas) matches the values SAP's own
+            // triggers insert for webhook entries.
+            //   sales_order      → 17  (oOrders)
+            //   invoice          → 13  (oInvoices)
+            //   incoming_payment → 24  (oIncomingPayments)
+            //   credit_memo      → 14  (oCreditNotes)
+            //   goods_return     → 16  (oReturns)
+            string objectType = documentType.ToLowerInvariant() switch
+            {
+                "sales_order"      => "17",
+                "invoice"          => "13",
+                "incoming_payment" => "24",
+                "credit_memo"      => "14",
+                "goods_return"     => "16",
+                _                  => "0",
+            };
+
             const string sql = """
                 INSERT INTO [dbo].[ODOO_WEBHOOK_QUEUE]
-                    ([DocEntry], [OdooSoId], [Status], [RetryCount], [CreatedAt], [EventType], [ErrorMessage])
+                    ([DocEntry], [ObjectType], [OdooSoId], [Status], [RetryCount], [CreatedAt], [EventType], [ErrorMessage])
                 VALUES
-                    (@DocEntry, @OdooSoId, 'processing', 0, GETDATE(), @EventType, @DocumentType);
+                    (@DocEntry, @ObjectType, @OdooSoId, 'processing', 0, GETDATE(), @EventType, @DocumentType);
                 SELECT SCOPE_IDENTITY();
                 """;
 
             using var cmd = new SqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@DocEntry", docEntry);
+            cmd.Parameters.AddWithValue("@ObjectType", objectType);
             cmd.Parameters.AddWithValue("@OdooSoId", (object?)odooSoId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EventType", "resync");
             cmd.Parameters.AddWithValue("@DocumentType", $"resync:{documentType}");
