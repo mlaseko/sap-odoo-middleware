@@ -19,4 +19,16 @@ public class SapSalesOrderResponse
 
     /// <summary>Pick list absolute entry, if a pick list was auto-created.</summary>
     public int? PickListEntry { get; set; }
+
+    /// <summary>
+    /// Optional human-readable caveat describing a condition the
+    /// caller (ICC) should surface to operators even though the SO
+    /// operation itself succeeded.  Populated for example when an
+    /// update to an already-synced SO added new lines to ORDR/RDR1,
+    /// but the existing pick list (OPKL) could not be refreshed
+    /// because it is already Picked or Closed — warehouse staff need
+    /// to either add the missing line(s) to the active pick list or
+    /// open a new pick list for the additional items.
+    /// </summary>
+    public string? Warning { get; set; }
 }
