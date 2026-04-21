@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Moq;
+using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Controllers;
 using SapOdooMiddleware.Models.Api;
 using SapOdooMiddleware.Models.Sap;
@@ -11,12 +13,23 @@ namespace SapOdooMiddleware.Tests;
 public class SalesOrdersControllerTests
 {
     private readonly Mock<ISapB1Service> _sapServiceMock = new();
+    private readonly Mock<IOptionsSnapshot<WebhookQueueSettings>> _webhookSettingsMock = new();
     private readonly Mock<ILogger<SalesOrdersController>> _loggerMock = new();
     private readonly SalesOrdersController _controller;
 
     public SalesOrdersControllerTests()
     {
-        _controller = new SalesOrdersController(_sapServiceMock.Object, _loggerMock.Object);
+        // Empty connection string → CheckPickListStatusForSoAsync returns null
+        // (no-op), which keeps these controller-level tests focused on the
+        // request/response plumbing rather than the SQL-backed drift check.
+        _webhookSettingsMock
+            .Setup(s => s.Value)
+            .Returns(new WebhookQueueSettings { ConnectionString = string.Empty });
+
+        _controller = new SalesOrdersController(
+            _sapServiceMock.Object,
+            _webhookSettingsMock.Object,
+            _loggerMock.Object);
     }
 
     [Fact]
