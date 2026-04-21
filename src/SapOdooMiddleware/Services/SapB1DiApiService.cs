@@ -433,7 +433,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                         // act as a second-chance pass.
                         string binFilter = allowFallback
                             ? string.Empty
-                            : $"AND BIN.\"BinCode\" IN ({binCodesForSql}) ";
+                            : $"BIN.\"BinCode\" IN ({binCodesForSql}) AND ";
 
                         var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
                         rs.DoQuery(
@@ -1088,7 +1088,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             // behaviour of the original priority-only query.
             string binFilter = allowFallback
                 ? string.Empty
-                : $"AND BIN.\"BinCode\" IN ({binCodesForSql}) ";
+                : $"BIN.\"BinCode\" IN ({binCodesForSql}) AND ";
 
             var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
             rs.DoQuery(
