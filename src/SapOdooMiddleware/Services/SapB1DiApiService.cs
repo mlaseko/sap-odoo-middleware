@@ -3400,11 +3400,22 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             var rs = (Recordset)_company!.GetBusinessObject(
                 BoObjectTypes.BoRecordset);
 
+            // Return the MOST RECENT pick list for this SO.  Multiple pick
+            // lists can exist for one SO (e.g. the original got Closed
+            // without full delivery and a follow-up was issued).  The
+            // refresh / writeback logic in _RefreshPickListForSO routes
+            // based on the STATUS of the active pick list, so we must
+            // return the newest AbsEntry — otherwise we'd see an old
+            // Closed pick list and mistakenly try to create a follow-up
+            // while an active Released pick list already holds those
+            // items (causing SAP error -10 "Released quantity exceeds
+            // open quantity").
             rs.DoQuery(
-                $"SELECT DISTINCT T0.\"AbsEntry\" " +
+                $"SELECT TOP 1 T0.\"AbsEntry\" " +
                 $"FROM \"PKL1\" T0 " +
                 $"WHERE T0.\"OrderEntry\" = {soDocEntry} " +
-                $"AND T0.\"BaseObject\" = '17'");
+                $"AND T0.\"BaseObject\" = '17' " +
+                $"ORDER BY T0.\"AbsEntry\" DESC");
 
             if (rs.EoF)
             {

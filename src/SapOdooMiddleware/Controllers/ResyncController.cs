@@ -197,17 +197,24 @@ public class ResyncController : ControllerBase
                 _                  => "0",
             };
 
+            // [TransType] is also NOT NULL on production schemas (SAP's own
+            // triggers populate it with a transaction-type marker).  Use 'U'
+            // (Update) for resync operations — semantically we are issuing
+            // an update to an existing SAP document, not creating a new one.
+            const string transType = "U";
+
             const string sql = """
                 INSERT INTO [dbo].[ODOO_WEBHOOK_QUEUE]
-                    ([DocEntry], [ObjectType], [OdooSoId], [Status], [RetryCount], [CreatedAt], [EventType], [ErrorMessage])
+                    ([DocEntry], [ObjectType], [TransType], [OdooSoId], [Status], [RetryCount], [CreatedAt], [EventType], [ErrorMessage])
                 VALUES
-                    (@DocEntry, @ObjectType, @OdooSoId, 'processing', 0, GETDATE(), @EventType, @DocumentType);
+                    (@DocEntry, @ObjectType, @TransType, @OdooSoId, 'processing', 0, GETDATE(), @EventType, @DocumentType);
                 SELECT SCOPE_IDENTITY();
                 """;
 
             using var cmd = new SqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@DocEntry", docEntry);
             cmd.Parameters.AddWithValue("@ObjectType", objectType);
+            cmd.Parameters.AddWithValue("@TransType", transType);
             cmd.Parameters.AddWithValue("@OdooSoId", (object?)odooSoId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@EventType", "resync");
             cmd.Parameters.AddWithValue("@DocumentType", $"resync:{documentType}");
