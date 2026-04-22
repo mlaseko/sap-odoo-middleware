@@ -67,13 +67,28 @@ public class InvoicesController : ControllerBase
             _logger.LogInformation(
                 "SAP AR Invoice created: DocEntry={DocEntry}, DocNum={DocNum}, " +
                 "ExternalInvoiceId={ExternalInvoiceId}, BaseDeliveryDocEntry={BaseDeliveryDocEntry}, " +
-                "BaseSalesOrderDocEntry={BaseSalesOrderDocEntry}, LineCount={LineCount}",
+                "BaseSalesOrderDocEntry={BaseSalesOrderDocEntry}, LineCount={LineCount}, " +
+                "Warnings={WarningCount}",
                 result.DocEntry,
                 result.DocNum,
                 result.ExternalInvoiceId,
                 result.BaseDeliveryDocEntry,
                 result.BaseSalesOrderDocEntry,
-                result.Lines.Count);
+                result.Lines.Count,
+                result.Warnings.Count);
+
+            // Surface structured bin-shortfall warnings as individual
+            // WRN log entries so operators can see them in Serilog
+            // without decoding the response body.  Parallels the
+            // SalesOrdersController behaviour.
+            foreach (var w in result.Warnings)
+            {
+                _logger.LogWarning(
+                    "Invoice {DocEntry} warning [{Code}] item {ItemCode} line {LineNum} " +
+                    "warehouse {Whs} required={Required} allocated={Allocated}: {Message}",
+                    result.DocEntry, w.Code, w.ItemCode, w.LineNum, w.WarehouseCode,
+                    w.Required, w.Allocated, w.Message);
+            }
 
             // Step 2: Write back SAP fields to Odoo (when OdooInvoiceId is provided)
             if (request.OdooInvoiceId.HasValue && request.OdooInvoiceId.Value > 0)

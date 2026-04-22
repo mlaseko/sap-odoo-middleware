@@ -59,6 +59,55 @@ public class SapInvoiceResponse
     /// Error message if the COGS journal creation failed. Null on success.
     /// </summary>
     public string? CogsJournalError { get; set; }
+
+    /// <summary>
+    /// Machine-readable per-line caveats.  Each entry describes a
+    /// condition the caller (ICC) should surface to operators while
+    /// the invoice operation itself succeeded.  Today only populated
+    /// for bin-shortfall cases on pure-manual invoice lines (no
+    /// copy-from-delivery): the invoice is always posted to SAP
+    /// regardless of Warnings; any pure-manual line whose priority
+    /// bins cannot fully cover the required quantity is reported
+    /// here so the warehouse can reconcile manually.
+    /// </summary>
+    public List<InvoiceWarning> Warnings { get; set; } = new();
+}
+
+/// <summary>
+/// Structured warning about one invoice condition the caller should
+/// surface to operators.  Parallels <see cref="SalesOrderWarning"/>
+/// on the SO flow so ICC-side consumers can share the same parsing
+/// shape across both document types.
+/// </summary>
+public class InvoiceWarning
+{
+    /// <summary>Stable machine-readable code.  Known codes:
+    /// <list type="bullet">
+    ///   <item><c>BIN_SHORTFALL</c> — an invoice line couldn't be
+    ///     fully covered by bin stock in its warehouse; the invoice
+    ///     line was posted but SAP did not receive an explicit bin
+    ///     allocation and will need manual reconciliation.</item>
+    /// </list>
+    /// </summary>
+    public string Code { get; set; } = string.Empty;
+
+    /// <summary>SAP item code for the affected line, when applicable.</summary>
+    public string? ItemCode { get; set; }
+
+    /// <summary>Position in the original request.Lines array (zero-based).</summary>
+    public int? LineNum { get; set; }
+
+    /// <summary>SAP warehouse the invoice line was posted to.</summary>
+    public string? WarehouseCode { get; set; }
+
+    /// <summary>Requested quantity on the line.</summary>
+    public double? Required { get; set; }
+
+    /// <summary>Quantity actually allocated across bins (may be partial).</summary>
+    public double? Allocated { get; set; }
+
+    /// <summary>Human-readable explanation.</summary>
+    public string Message { get; set; } = string.Empty;
 }
 
 /// <summary>

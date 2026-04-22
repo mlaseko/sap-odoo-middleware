@@ -1562,46 +1562,59 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
 
         // Set lines
-        // ── Pre-query bin stock if bin allocation is configured ──
-        var binPriority = _settings.BinLocationPriority;
-        bool useBinAllocation = binPriority != null && binPriority.Count > 0;
-        var binInfo = new Dictionary<string, (int absEntry, string whsCode, Dictionary<string, double> stock)>();
+        // ── Plan bin allocation for pure-manual lines ──
+        // Invoice lines with a BaseDeliveryDocEntry inherit their bin
+        // allocation from the referenced delivery — SAP copies the
+        // deliveries' bin allocation, so we must NOT overwrite it.
+        // Only "pure manual" lines (no BaseDeliveryDocEntry) need the
+        // planner to assign WhsCode + bins.
+        //
+        // Same stock-aware approach as CreateSalesOrderAsync: the
+        // planner picks each line's warehouse from the highest-
+        // priority bin that actually holds stock, so invoices never
+        // land in a warehouse that has zero stock just because SAP's
+        // BP/user/company default said so.  Choice-X policy: lines
+        // stay whole in one warehouse; shortfalls are surfaced as
+        // structured warnings on the response.
+        var binPriority = _settings.BinLocationPriority ?? new List<string>();
+        bool useBinAllocation = binPriority.Count > 0;
+        bool allowFallback = _settings.AllowFallbackBinAllocation;
 
-        if (useBinAllocation)
+        var pureManualIndices = new List<int>();
+        for (int i = 0; i < request.Lines.Count; i++)
         {
-            var itemCodes = request.Lines.Select(l => l.ItemCode).Distinct().ToList();
-            var itemCodesForSql = string.Join(",", itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
-            var binCodesForSql = string.Join(",", binPriority!.Select(bc => $"'{bc.Replace("'", "''")}'"));
+            if (!request.Lines[i].BaseDeliveryDocEntry.HasValue)
+                pureManualIndices.Add(i);
+        }
 
-            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
-            rs.DoQuery(
-                $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
-                $"FROM OBIN BIN " +
-                $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" " +
-                $"WHERE BIN.\"BinCode\" IN ({binCodesForSql}) " +
-                $"AND IB.\"ItemCode\" IN ({itemCodesForSql}) " +
-                $"AND IB.\"OnHandQty\" > 0");
-
-            while (!rs.EoF)
+        var linePlans = new Dictionary<int, BinAllocationPlanner.LinePlan>();
+        if (useBinAllocation && pureManualIndices.Count > 0)
+        {
+            var itemCodes = pureManualIndices
+                .Select(idx => request.Lines[idx].ItemCode)
+                .Where(ic => !string.IsNullOrWhiteSpace(ic))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var binInfo = QueryBinStockForItems(itemCodes, binPriority, allowFallback);
+            var planInputs = pureManualIndices.Select(idx =>
             {
-                var binCode = (string)rs.Fields.Item("BinCode").Value;
-                var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
-                var whsCode = (string)rs.Fields.Item("WhsCode").Value;
-                var itemCode = (string)rs.Fields.Item("ItemCode").Value;
-                var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
-
-                if (!binInfo.ContainsKey(binCode))
-                    binInfo[binCode] = (absEntry, whsCode, new Dictionary<string, double>());
-                binInfo[binCode].stock[itemCode] = onHand;
-
-                rs.MoveNext();
-            }
-            Marshal.ReleaseComObject(rs);
+                var l = request.Lines[idx];
+                return new BinAllocationPlanner.LineInput(
+                    idx, l.ItemCode, l.Quantity, l.WarehouseCode);
+            }).ToList();
+            var plans = BinAllocationPlanner.Plan(
+                planInputs, binPriority, binInfo, allowFallback,
+                _settings.DefaultWarehouseCode ?? string.Empty);
+            foreach (var p in plans)
+                linePlans[p.LineIdx] = p;
 
             _logger.LogInformation(
-                "Invoice bin stock query: {BinCount} bins with stock for {ItemCount} items",
-                binInfo.Count, itemCodes.Count);
+                "Invoice bin stock query: {BinCount} bin(s) for {ItemCount} item(s) " +
+                "across {PureManualCount} pure-manual line(s) (fallback={Fallback})",
+                binInfo.Count, itemCodes.Count, pureManualIndices.Count, allowFallback);
         }
+
+        var warnings = new List<InvoiceWarning>();
 
         // ── Pre-load SO line numbers for SO-based linking ──
         // When delivery references are absent but a Sales Order DocEntry
@@ -1645,6 +1658,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 invoice.Lines.Add();
 
             var line = request.Lines[i];
+            linePlans.TryGetValue(i, out var linePlan);
 
             invoice.Lines.ItemCode = line.ItemCode;
             invoice.Lines.Quantity = line.Quantity;
@@ -1653,8 +1667,18 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (line.DiscountPercent.HasValue)
                 invoice.Lines.DiscountPercent = line.DiscountPercent.Value;
 
-            if (!string.IsNullOrEmpty(line.WarehouseCode))
-                invoice.Lines.WarehouseCode = line.WarehouseCode;
+            // WarehouseCode resolution:
+            //   1. Explicit request.Lines[i].WarehouseCode wins when set.
+            //   2. Otherwise use the planner's choice (pure-manual lines only).
+            //   3. Delivery-linked lines fall through to SAP's copy-from-
+            //      delivery behaviour — don't override.
+            string? resolvedWhs = !string.IsNullOrEmpty(line.WarehouseCode)
+                ? line.WarehouseCode
+                : (linePlan is not null && !string.IsNullOrEmpty(linePlan.WhsCode))
+                    ? linePlan.WhsCode
+                    : null;
+            if (!string.IsNullOrEmpty(resolvedWhs))
+                invoice.Lines.WarehouseCode = resolvedWhs;
 
             if (!string.IsNullOrEmpty(line.AccountCode))
                 invoice.Lines.AccountCode = line.AccountCode;
@@ -1689,60 +1713,60 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
-            // ── Cascading bin allocation for this line ──
-            if (useBinAllocation && !line.BaseDeliveryDocEntry.HasValue)
+            // ── Planner-driven bin allocation for pure-manual lines ──
+            // Delivery-linked lines are skipped here because SAP will
+            // copy their bin allocation from the referenced delivery.
+            if (linePlan is not null && !line.BaseDeliveryDocEntry.HasValue)
             {
-                // Resolve the warehouse for this line — explicit, default, or SAP fallback
-                string lineWhsCode = !string.IsNullOrEmpty(line.WarehouseCode)
-                    ? line.WarehouseCode
-                    : _settings.DefaultWarehouseCode ?? "";
-
-                double remaining = line.Quantity;
-                var allocations = new List<(int binAbsEntry, string binCode, double allocQty)>();
-
-                foreach (var binCode in binPriority!)
+                if (linePlan.Shortfall > 0 || linePlan.Picks.Count == 0)
                 {
-                    if (remaining <= 0) break;
-                    if (!binInfo.TryGetValue(binCode, out var bin)) continue;
-                    // Only use bins that belong to the same warehouse as the line
-                    if (!string.IsNullOrEmpty(lineWhsCode)
-                        && !string.Equals(bin.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (!bin.stock.TryGetValue(line.ItemCode, out var available) || available <= 0) continue;
+                    _logger.LogWarning(
+                        "Invoice line[{Index}] item {ItemCode}: plan allocated " +
+                        "{Allocated}/{Required} in warehouse {Whs} (fallback={Fallback}) — " +
+                        "no explicit bin allocation written, SAP/warehouse must reconcile",
+                        i, line.ItemCode,
+                        line.Quantity - linePlan.Shortfall, line.Quantity,
+                        linePlan.WhsCode, allowFallback);
 
-                    double take = Math.Min(remaining, available);
-                    allocations.Add((bin.absEntry, binCode, take));
-                    remaining -= take;
-                    bin.stock[line.ItemCode] = available - take;
-                }
-
-                if (remaining <= 0 && allocations.Count > 0)
-                {
-                    for (int b = 0; b < allocations.Count; b++)
+                    warnings.Add(new InvoiceWarning
                     {
+                        Code = "BIN_SHORTFALL",
+                        ItemCode = line.ItemCode,
+                        LineNum = i,
+                        WarehouseCode = linePlan.WhsCode,
+                        Required = line.Quantity,
+                        Allocated = line.Quantity - linePlan.Shortfall,
+                        Message =
+                            $"Item {line.ItemCode} (line {i}): required {line.Quantity:0.##}, "
+                            + $"allocated {(line.Quantity - linePlan.Shortfall):0.##} across "
+                            + $"{linePlan.Picks.Count} bin(s) in warehouse {linePlan.WhsCode}. "
+                            + "Invoice line posted; warehouse must reconcile bins manually."
+                    });
+                }
+                else
+                {
+                    for (int b = 0; b < linePlan.Picks.Count; b++)
+                    {
+                        var pick = linePlan.Picks[b];
                         if (b > 0) invoice.Lines.BinAllocations.Add();
-                        invoice.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
-                        invoice.Lines.BinAllocations.Quantity = allocations[b].allocQty;
+                        invoice.Lines.BinAllocations.BinAbsEntry = pick.AbsEntry;
+                        invoice.Lines.BinAllocations.Quantity = pick.Qty;
                         invoice.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = i;
 
                         _logger.LogInformation(
-                            "  Invoice line[{Index}] item {ItemCode}: bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}",
-                            i, line.ItemCode, allocations[b].binCode,
-                            allocations[b].binAbsEntry, allocations[b].allocQty);
+                            "  Invoice line[{Index}] item {ItemCode}: bin {BinCode} " +
+                            "(AbsEntry={AbsEntry}, Whs={Whs}) → {Qty}{Tag}",
+                            i, line.ItemCode, pick.BinCode,
+                            pick.AbsEntry, pick.WhsCode, pick.Qty,
+                            pick.IsFallback ? " [fallback]" : "");
                     }
-                }
-                else if (remaining > 0)
-                {
-                    _logger.LogWarning(
-                        "Invoice line[{Index}] item {ItemCode}: insufficient bin stock " +
-                        "(need {Required}, have {Available}) — letting SAP resolve",
-                        i, line.ItemCode, line.Quantity, line.Quantity - remaining);
                 }
             }
 
             _logger.LogDebug(
-                "Manual Invoice Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Discount={Discount}",
-                i, line.ItemCode, line.Quantity, line.Price, line.DiscountPercent);
+                "Manual Invoice Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Discount={Discount}, Whs={Whs}",
+                i, line.ItemCode, line.Quantity, line.Price, line.DiscountPercent,
+                resolvedWhs ?? "(SAP default)");
         }
 
         int result = invoice.Add();
@@ -1783,7 +1807,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             DocNum = invoiceDocNum,
             ExternalInvoiceId = request.ExternalInvoiceId,
             BaseSalesOrderDocEntry = request.SapSalesOrderDocEntry,
-            Lines = lineResponses
+            Lines = lineResponses,
+            Warnings = warnings,
         };
     }
 
