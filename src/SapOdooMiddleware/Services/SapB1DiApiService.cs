@@ -277,6 +277,81 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     // ================================
     // SALES ORDER
     // ================================
+    /// <summary>
+    /// Runs a single OBIN+OIBQ query to snapshot on-hand stock across
+    /// the SO's item codes.  Result is the shape
+    /// <see cref="BinAllocationPlanner.BinStock"/> expects so the caller
+    /// can pass it straight to <see cref="BinAllocationPlanner.Plan"/>.
+    ///
+    /// When <paramref name="allowFallback"/> is true the BinCode IN (…)
+    /// filter is dropped so every bin with stock for these items is
+    /// returned — the planner then walks priority bins first and uses
+    /// the rest as a second-chance pass.  When false, only priority
+    /// bins are returned (legacy behaviour).
+    ///
+    /// Returns an empty dictionary when <paramref name="itemCodes"/> is
+    /// empty or when <paramref name="binPriority"/> has no entries (no
+    /// bin management in effect).
+    /// </summary>
+    private Dictionary<string, BinAllocationPlanner.BinStock> QueryBinStockForItems(
+        IReadOnlyCollection<string> itemCodes,
+        IReadOnlyList<string> binPriority,
+        bool allowFallback)
+    {
+        var binInfo = new Dictionary<string, BinAllocationPlanner.BinStock>(
+            StringComparer.OrdinalIgnoreCase);
+
+        if (itemCodes.Count == 0 || binPriority.Count == 0)
+            return binInfo;
+
+        var itemCodesForSql = string.Join(",",
+            itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
+        var binCodesForSql = string.Join(",",
+            binPriority.Select(bc => $"'{bc.Replace("'", "''")}'"));
+
+        string binFilter = allowFallback
+            ? string.Empty
+            : $"BIN.\"BinCode\" IN ({binCodesForSql}) AND ";
+
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery(
+                $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", "
+                + $"IB.\"ItemCode\", IB.\"OnHandQty\" "
+                + $"FROM OBIN BIN "
+                + $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" "
+                + $"WHERE {binFilter}IB.\"ItemCode\" IN ({itemCodesForSql}) "
+                + $"AND IB.\"OnHandQty\" > 0");
+
+            while (!rs.EoF)
+            {
+                var binCode = (string)rs.Fields.Item("BinCode").Value;
+                var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
+                var whsCode = (string)rs.Fields.Item("WhsCode").Value;
+                var itemCode = (string)rs.Fields.Item("ItemCode").Value;
+                var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
+
+                if (!binInfo.TryGetValue(binCode, out var existing))
+                {
+                    existing = new BinAllocationPlanner.BinStock(
+                        absEntry, binCode, whsCode,
+                        new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase));
+                    binInfo[binCode] = existing;
+                }
+                existing.OnHandByItemCode[itemCode] = onHand;
+
+                rs.MoveNext();
+            }
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+
+        return binInfo;
+    }
+
     public async Task<SapSalesOrderResponse> CreateSalesOrderAsync(SapSalesOrderRequest request)
     {
         await _lock.WaitAsync();
@@ -339,26 +414,80 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             _logger.LogDebug("UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header.", syncDate, SyncDirectionOdooToSap);
 
+            // ── Stock-aware warehouse planning ──
+            // Odoo doesn't carry warehouse data on SO lines; relying on
+            // SAP's BP/user/company default sends lines to a warehouse
+            // that may have zero stock for the item (happened on
+            // S09868: item 1598 was posted to MainWHSE while its only
+            // stock lived in COCWHSE, so the pick list had nothing to
+            // allocate).  We fix that here by snapshotting on-hand
+            // stock once and using BinAllocationPlanner to assign each
+            // line a WhsCode derived from the highest-priority bin
+            // that actually holds stock for the item.  The plan is
+            // reused further down to build the pick list without
+            // re-querying.
+            var binPriority = _settings.BinLocationPriority ?? new List<string>();
+            bool allowFallback = _settings.AllowFallbackBinAllocation;
+            var requestItemCodes = request.Lines
+                .Where(l => !string.IsNullOrWhiteSpace(l.ItemCode))
+                .Select(l => l.ItemCode)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var binInfo = QueryBinStockForItems(requestItemCodes, binPriority, allowFallback);
+
+            if (binPriority.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Bin stock query returned data for {BinCount} bin(s) across {ItemCount} item(s) (fallback={Fallback})",
+                    binInfo.Count, requestItemCodes.Count, allowFallback);
+            }
+
+            var planInputs = request.Lines.Select((l, idx) =>
+                new BinAllocationPlanner.LineInput(
+                    idx, l.ItemCode, l.Quantity, l.WarehouseCode)).ToList();
+            var plans = binPriority.Count > 0
+                ? BinAllocationPlanner.Plan(
+                    planInputs, binPriority, binInfo, allowFallback,
+                    _settings.DefaultWarehouseCode ?? string.Empty)
+                : planInputs.Select(pi => new BinAllocationPlanner.LinePlan(
+                    pi.LineIdx, pi.ItemCode, pi.Required,
+                    pi.ExplicitWhsCode ?? _settings.DefaultWarehouseCode ?? string.Empty,
+                    Array.Empty<BinAllocationPlanner.BinPick>(), 0)).ToList();
+
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 if (i > 0)
                     order.Lines.Add();
 
                 var line = request.Lines[i];
+                var linePlan = plans[i];
 
-                // Display value for logging only — "(default)" when no warehouse was specified.
-                var warehouseForLogging = line.WarehouseCode ?? "(default)";
+                // Plan.WhsCode overrides SAP's default cascade when
+                // Odoo didn't pin an explicit warehouse on the line.
+                // When Odoo did pin one, the plan honours it (Phase 0)
+                // so the caller's choice still wins.
+                string? resolvedWhs = !string.IsNullOrEmpty(line.WarehouseCode)
+                    ? line.WarehouseCode
+                    : !string.IsNullOrEmpty(linePlan.WhsCode)
+                        ? linePlan.WhsCode
+                        : null;
 
-                _logger.LogDebug(
-                    "Line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={UnitPrice}, Warehouse={Warehouse}",
-                    i, line.ItemCode, line.Quantity, line.UnitPrice, warehouseForLogging);
+                var warehouseForLogging = resolvedWhs ?? "(SAP default)";
+
+                _logger.LogInformation(
+                    "Line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={UnitPrice}, "
+                    + "Warehouse={Warehouse} (source={Source}, planBins={BinCount}, shortfall={Shortfall})",
+                    i, line.ItemCode, line.Quantity, line.UnitPrice, warehouseForLogging,
+                    !string.IsNullOrEmpty(line.WarehouseCode) ? "request"
+                        : !string.IsNullOrEmpty(linePlan.WhsCode) ? "plan" : "sap-default",
+                    linePlan.Picks.Count, linePlan.Shortfall);
 
                 order.Lines.ItemCode = line.ItemCode;
                 order.Lines.Quantity = line.Quantity;
                 order.Lines.UnitPrice = line.UnitPrice;
 
-                if (!string.IsNullOrEmpty(line.WarehouseCode))
-                    order.Lines.WarehouseCode = line.WarehouseCode;
+                if (!string.IsNullOrEmpty(resolvedWhs))
+                    order.Lines.WarehouseCode = resolvedWhs;
 
                 if (!string.IsNullOrEmpty(line.UOdooSoLineId))
                     TrySetUserField(order.Lines.UserFields, "U_Odoo_SOLine_ID", line.UOdooSoLineId, $"line[{i}]");
@@ -400,6 +529,29 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 UOdooSoId = request.ResolvedSoId
             };
 
+            // Emit one structured warning per line that couldn't be
+            // fully bin-allocated.  These are attached to the response
+            // even when AutoCreatePickList is disabled so the ICC can
+            // surface them on the integration.log regardless of whether
+            // the pick-list path actually ran.
+            foreach (var p in plans.Where(p => p.Shortfall > 0))
+            {
+                response.Warnings.Add(new SalesOrderWarning
+                {
+                    Code = "BIN_SHORTFALL",
+                    ItemCode = p.ItemCode,
+                    LineNum = p.LineIdx,
+                    WarehouseCode = p.WhsCode,
+                    Required = p.Required,
+                    Allocated = p.Required - p.Shortfall,
+                    Message =
+                        $"Item {p.ItemCode} (line {p.LineIdx}): required {p.Required:0.##}, "
+                        + $"allocated {(p.Required - p.Shortfall):0.##} across "
+                        + $"{p.Picks.Count} bin(s) in warehouse {p.WhsCode}. "
+                        + "Pick list line skipped; warehouse must allocate manually."
+                });
+            }
+
             if (_settings.AutoCreatePickList)
             {
                 _logger.LogInformation(
@@ -408,63 +560,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                 try
                 {
-                    var binPriority = _settings.BinLocationPriority;
-                    bool useBinAllocation = binPriority != null && binPriority.Count > 0;
-                    bool allowFallback = _settings.AllowFallbackBinAllocation;
-                    var binPrioritySet = useBinAllocation
-                        ? new HashSet<string>(binPriority!, StringComparer.OrdinalIgnoreCase)
-                        : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    bool useBinAllocation = binPriority.Count > 0;
 
-                    // ── Resolve bin AbsEntry values and stock levels ──
-                    // Maps: BinCode → (AbsEntry, WhsCode, { ItemCode → AvailableQty })
-                    var binInfo = new Dictionary<string, (int absEntry, string whsCode, Dictionary<string, double> stock)>();
-
-                    if (useBinAllocation)
-                    {
-                        // Collect all unique item codes from SO lines
-                        var itemCodes = lineCaptures.Select(lc => lc.itemCode).Distinct().ToList();
-                        var itemCodesForSql = string.Join(",", itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
-                        var binCodesForSql = string.Join(",", binPriority!.Select(bc => $"'{bc.Replace("'", "''")}'"));
-
-                        // When AllowFallbackBinAllocation is on, drop the
-                        // BinCode filter so we pull every bin that has stock
-                        // for any of the SO's items.  Priority bins are still
-                        // tried first in the cascade below; non-priority bins
-                        // act as a second-chance pass.
-                        string binFilter = allowFallback
-                            ? string.Empty
-                            : $"BIN.\"BinCode\" IN ({binCodesForSql}) AND ";
-
-                        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
-                        rs.DoQuery(
-                            $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
-                            $"FROM OBIN BIN " +
-                            $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" " +
-                            $"WHERE {binFilter}IB.\"ItemCode\" IN ({itemCodesForSql}) " +
-                            $"AND IB.\"OnHandQty\" > 0");
-
-                        while (!rs.EoF)
-                        {
-                            var binCode = (string)rs.Fields.Item("BinCode").Value;
-                            var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
-                            var whsCode = (string)rs.Fields.Item("WhsCode").Value;
-                            var itemCode = (string)rs.Fields.Item("ItemCode").Value;
-                            var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
-
-                            if (!binInfo.ContainsKey(binCode))
-                                binInfo[binCode] = (absEntry, whsCode, new Dictionary<string, double>());
-                            binInfo[binCode].stock[itemCode] = onHand;
-
-                            rs.MoveNext();
-                        }
-                        Marshal.ReleaseComObject(rs);
-
-                        _logger.LogInformation(
-                            "Bin stock query returned data for {BinCount} bins across {ItemCount} items (fallback={Fallback})",
-                            binInfo.Count, itemCodes.Count, allowFallback);
-                    }
-
-                    // ── Build pick list with cascading bin allocation ──
                     var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
                     pickList.PickDate = DateTime.Now;
 
@@ -474,10 +571,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     for (int i = 0; i < lineCaptures.Count; i++)
                     {
                         var (lineNum, qty, itemCode, lineWhsCode) = lineCaptures[i];
+                        var linePlan = plans[i];
 
                         if (!useBinAllocation)
                         {
-                            // Legacy behavior: no bin allocation
+                            // Legacy behaviour: no bin management configured.
                             if (pickLineIndex > 0) pickList.Lines.Add();
                             pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
                             pickList.Lines.OrderEntry = docEntry;
@@ -488,89 +586,37 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                             continue;
                         }
 
-                        // Cascading allocation across priority bins
-                        double remaining = qty;
-                        var allocations = new List<(int binAbsEntry, string binCode, double allocQty, bool isFallback)>();
-
-                        foreach (var binCode in binPriority!)
+                        if (linePlan.Shortfall > 0 || linePlan.Picks.Count == 0)
                         {
-                            if (remaining <= 0) break;
-
-                            if (!binInfo.TryGetValue(binCode, out var bin)) continue;
-                            // Only use bins that belong to the same warehouse as the SO line
-                            if (!string.IsNullOrEmpty(lineWhsCode)
-                                && !string.Equals(bin.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
-                                continue;
-                            if (!bin.stock.TryGetValue(itemCode, out var available) || available <= 0) continue;
-
-                            double take = Math.Min(remaining, available);
-                            allocations.Add((bin.absEntry, binCode, take, false));
-                            remaining -= take;
-                            // Reduce available so subsequent lines don't over-allocate
-                            bin.stock[itemCode] = available - take;
-                        }
-
-                        // Second-chance pass: when fallback is enabled and
-                        // priority bins couldn't cover the line, walk any
-                        // non-priority bin in the same warehouse that has
-                        // stock for this item, largest-first.
-                        if (remaining > 0 && allowFallback)
-                        {
-                            var fallbackBins = binInfo
-                                .Where(kv => !binPrioritySet.Contains(kv.Key))
-                                .Where(kv =>
-                                    string.IsNullOrEmpty(lineWhsCode)
-                                    || string.Equals(kv.Value.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
-                                .Where(kv => kv.Value.stock.TryGetValue(itemCode, out var a) && a > 0)
-                                .OrderByDescending(kv => kv.Value.stock[itemCode])
-                                .ToList();
-
-                            foreach (var kv in fallbackBins)
-                            {
-                                if (remaining <= 0) break;
-                                var bin = kv.Value;
-                                double available = bin.stock[itemCode];
-                                double take = Math.Min(remaining, available);
-                                allocations.Add((bin.absEntry, kv.Key, take, true));
-                                remaining -= take;
-                                bin.stock[itemCode] = available - take;
-                                _logger.LogInformation(
-                                    "Fallback bin allocation: item {ItemCode} (line {LineNum}) → bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}",
-                                    itemCode, lineNum, kv.Key, bin.absEntry, take);
-                            }
-                        }
-
-                        if (remaining > 0)
-                        {
-                            // Not enough stock across all eligible bins — skip this line entirely
                             _logger.LogWarning(
-                                "Skipping pick list for item {ItemCode} (line {LineNum}): " +
-                                "need {Required}, only {Available} available{Suffix}",
-                                itemCode, lineNum, qty, qty - remaining,
-                                allowFallback ? " across all bins in warehouse"
-                                              : " across priority bins (AllowFallbackBinAllocation=false)");
+                                "Skipping pick list for item {ItemCode} (line {LineNum}): "
+                                + "plan allocated {Allocated}/{Required} in warehouse {Whs} "
+                                + "(fallback={Fallback})",
+                                itemCode, lineNum,
+                                qty - linePlan.Shortfall, qty, linePlan.WhsCode, allowFallback);
                             continue;
                         }
 
-                        // Add pick list line with bin allocations
                         if (pickLineIndex > 0) pickList.Lines.Add();
                         pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
                         pickList.Lines.OrderEntry = docEntry;
                         pickList.Lines.OrderRowID = lineNum;
                         pickList.Lines.ReleasedQuantity = qty;
 
-                        for (int b = 0; b < allocations.Count; b++)
+                        for (int b = 0; b < linePlan.Picks.Count; b++)
                         {
+                            var pick = linePlan.Picks[b];
                             if (b > 0) pickList.Lines.BinAllocations.Add();
-                            pickList.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
-                            pickList.Lines.BinAllocations.Quantity = allocations[b].allocQty;
+                            pickList.Lines.BinAllocations.BinAbsEntry = pick.AbsEntry;
+                            pickList.Lines.BinAllocations.Quantity = pick.Qty;
                             pickList.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = pickLineIndex;
 
                             _logger.LogInformation(
-                                "  Item {ItemCode} line {LineNum}: bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}{Tag}",
-                                itemCode, lineNum, allocations[b].binCode,
-                                allocations[b].binAbsEntry, allocations[b].allocQty,
-                                allocations[b].isFallback ? " [fallback]" : "");
+                                "  Item {ItemCode} line {LineNum}: bin {BinCode} "
+                                + "(AbsEntry={AbsEntry}, Whs={Whs}) → {Qty}{Tag}",
+                                itemCode, lineNum, pick.BinCode,
+                                pick.AbsEntry, pick.WhsCode, pick.Qty,
+                                pick.IsFallback ? " [fallback]" : "");
                         }
 
                         anyLineAllocated = true;
@@ -580,7 +626,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     if (!anyLineAllocated)
                     {
                         _logger.LogWarning(
-                            "No lines could be fully allocated from priority bins — skipping pick list creation for DocEntry={DocEntry}",
+                            "No lines could be fully allocated — skipping pick list creation for DocEntry={DocEntry}",
                             docEntry);
                         Marshal.ReleaseComObject(pickList);
                     }
@@ -742,7 +788,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// <summary>
     /// Updates SAP SO line quantities to match the incoming request.
     /// Matches lines by ItemCode. For matched lines, updates Quantity
-    /// and UnitPrice. New items are appended as additional lines.
+    /// and UnitPrice.  New items are appended as additional lines;
+    /// newly-appended lines receive a stock-aware WhsCode from
+    /// <see cref="BinAllocationPlanner"/> (existing SAP lines keep
+    /// their current warehouse — SAP B1 will generally refuse to
+    /// change WhsCode on a line that has been picked or partially
+    /// delivered, so we avoid that class of bug).
     /// </summary>
     private void _UpdateSalesOrderLines(Documents order, SapSalesOrderRequest request)
     {
@@ -758,8 +809,45 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 sapLines[ic] = i;
         }
 
-        foreach (var reqLine in request.Lines)
+        // Identify NEW lines (item codes not already on the SAP doc)
+        // and plan bin allocation for them so each gets an appropriate
+        // WhsCode.  Existing lines are not re-planned — their WhsCode
+        // stays as SAP has it.
+        var newLines = request.Lines
+            .Select((rl, idx) => (reqIdx: idx, line: rl))
+            .Where(x => !string.IsNullOrWhiteSpace(x.line.ItemCode)
+                     && !sapLines.ContainsKey(x.line.ItemCode))
+            .ToList();
+
+        var newLinePlans = new Dictionary<int, BinAllocationPlanner.LinePlan>();
+        if (newLines.Count > 0)
         {
+            var binPriority = _settings.BinLocationPriority ?? new List<string>();
+            bool allowFallback = _settings.AllowFallbackBinAllocation;
+            var itemCodes = newLines
+                .Select(x => x.line.ItemCode)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var binInfo = QueryBinStockForItems(itemCodes, binPriority, allowFallback);
+            var planInputs = newLines.Select(x =>
+                new BinAllocationPlanner.LineInput(
+                    x.reqIdx, x.line.ItemCode, x.line.Quantity, x.line.WarehouseCode))
+                .ToList();
+            var plans = binPriority.Count > 0
+                ? BinAllocationPlanner.Plan(
+                    planInputs, binPriority, binInfo, allowFallback,
+                    _settings.DefaultWarehouseCode ?? string.Empty)
+                : planInputs.Select(pi => new BinAllocationPlanner.LinePlan(
+                    pi.LineIdx, pi.ItemCode, pi.Required,
+                    pi.ExplicitWhsCode ?? _settings.DefaultWarehouseCode ?? string.Empty,
+                    Array.Empty<BinAllocationPlanner.BinPick>(), 0)).ToList();
+            foreach (var p in plans)
+                newLinePlans[p.LineIdx] = p;
+        }
+
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            var reqLine = request.Lines[i];
             if (sapLines.TryGetValue(reqLine.ItemCode, out int sapIdx))
             {
                 // Update existing line
@@ -785,12 +873,19 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 order.Lines.Quantity = reqLine.Quantity;
                 order.Lines.UnitPrice = reqLine.UnitPrice;
 
-                if (!string.IsNullOrEmpty(reqLine.WarehouseCode))
-                    order.Lines.WarehouseCode = reqLine.WarehouseCode;
+                string? resolvedWhs = !string.IsNullOrEmpty(reqLine.WarehouseCode)
+                    ? reqLine.WarehouseCode
+                    : (newLinePlans.TryGetValue(i, out var linePlan)
+                        && !string.IsNullOrEmpty(linePlan.WhsCode))
+                        ? linePlan.WhsCode
+                        : null;
+                if (!string.IsNullOrEmpty(resolvedWhs))
+                    order.Lines.WarehouseCode = resolvedWhs;
 
                 _logger.LogInformation(
-                    "SO line added: ItemCode={ItemCode}, Qty={Qty}, Price={Price}",
-                    reqLine.ItemCode, reqLine.Quantity, reqLine.UnitPrice);
+                    "SO line added: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Whs={Whs}",
+                    reqLine.ItemCode, reqLine.Quantity, reqLine.UnitPrice,
+                    resolvedWhs ?? "(SAP default)");
             }
         }
     }
@@ -1063,64 +1158,51 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             return (null, null);
         }
 
-        // ── Resolve bin stock ──
-        // When AllowFallbackBinAllocation is enabled, we fetch stock for ALL
-        // bins (not just the priority list) so a line that can't be covered
-        // by priority bins can still be picked from whatever non-priority
-        // bin actually has the item.  Priority bins are still tried FIRST
-        // during the cascade; fallback bins are a second-chance pass.
-        var binPriority = _settings.BinLocationPriority;
-        bool useBinAllocation = binPriority != null && binPriority.Count > 0;
+        // ── Plan bin allocation via the shared planner ──
+        // Existing SAP lines carry a WhsCode (set either by SAP's
+        // default cascade on the original create or by a previous
+        // plan).  We pass it as ExplicitWhsCode so Phase 0 pins the
+        // plan to the existing warehouse — we never repoint an
+        // already-posted SAP line here ("new lines only" policy
+        // applies at update time, and a refresh re-reads lines from
+        // the live SAP doc).
+        var binPriority = _settings.BinLocationPriority ?? new List<string>();
+        bool useBinAllocation = binPriority.Count > 0;
         bool allowFallback = _settings.AllowFallbackBinAllocation;
-        var binInfo = new Dictionary<string, (int absEntry, string whsCode, Dictionary<string, double> stock)>();
-        var binPrioritySet = useBinAllocation
-            ? new HashSet<string>(binPriority!, StringComparer.OrdinalIgnoreCase)
-            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var itemCodes = lineCaptures
+            .Select(lc => lc.itemCode)
+            .Where(ic => !string.IsNullOrWhiteSpace(ic))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var binInfo = useBinAllocation
+            ? QueryBinStockForItems(itemCodes, binPriority, allowFallback)
+            : new Dictionary<string, BinAllocationPlanner.BinStock>();
 
         if (useBinAllocation)
         {
-            var itemCodes = lineCaptures.Select(lc => lc.itemCode).Distinct().ToList();
-            var itemCodesForSql = string.Join(",", itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
-            var binCodesForSql = string.Join(",", binPriority!.Select(bc => $"'{bc.Replace("'", "''")}'"));
-
-            // When fallback is ON, drop the BinCode filter to pull every bin
-            // that has stock for any of the SO's items.  When OFF, keep the
-            // behaviour of the original priority-only query.
-            string binFilter = allowFallback
-                ? string.Empty
-                : $"BIN.\"BinCode\" IN ({binCodesForSql}) AND ";
-
-            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
-            rs.DoQuery(
-                $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", IB.\"ItemCode\", IB.\"OnHandQty\" "
-                + $"FROM OBIN BIN "
-                + $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" "
-                + $"WHERE {binFilter}IB.\"ItemCode\" IN ({itemCodesForSql}) "
-                + $"AND IB.\"OnHandQty\" > 0");
-
-            while (!rs.EoF)
-            {
-                var binCode = (string)rs.Fields.Item("BinCode").Value;
-                var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
-                var whsCode = (string)rs.Fields.Item("WhsCode").Value;
-                var itemCode = (string)rs.Fields.Item("ItemCode").Value;
-                var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
-
-                if (!binInfo.ContainsKey(binCode))
-                    binInfo[binCode] = (absEntry, whsCode, new Dictionary<string, double>());
-                binInfo[binCode].stock[itemCode] = onHand;
-
-                rs.MoveNext();
-            }
-            Marshal.ReleaseComObject(rs);
-
             _logger.LogInformation(
                 "Pick list refresh: bin stock query returned data for {BinCount} bin(s) across {ItemCount} item(s) "
                 + "(fallback={Fallback})",
                 binInfo.Count, itemCodes.Count, allowFallback);
         }
 
-        // ── Build pick list with cascading bin allocation ──
+        var planInputs = lineCaptures.Select((lc, idx) =>
+            new BinAllocationPlanner.LineInput(
+                idx, lc.itemCode, lc.qty,
+                string.IsNullOrWhiteSpace(lc.whsCode) ? null : lc.whsCode))
+            .ToList();
+
+        var plans = useBinAllocation
+            ? BinAllocationPlanner.Plan(
+                planInputs, binPriority, binInfo, allowFallback,
+                _settings.DefaultWarehouseCode ?? string.Empty)
+            : planInputs.Select(pi => new BinAllocationPlanner.LinePlan(
+                pi.LineIdx, pi.ItemCode, pi.Required,
+                pi.ExplicitWhsCode ?? _settings.DefaultWarehouseCode ?? string.Empty,
+                Array.Empty<BinAllocationPlanner.BinPick>(), 0)).ToList();
+
+        // ── Build pick list with the per-line plans ──
         var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
         pickList.PickDate = DateTime.Now;
 
@@ -1131,6 +1213,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         for (int i = 0; i < lineCaptures.Count; i++)
         {
             var (lineNum, qty, itemCode, lineWhsCode) = lineCaptures[i];
+            var linePlan = plans[i];
 
             if (!useBinAllocation)
             {
@@ -1145,64 +1228,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 continue;
             }
 
-            // Cascading allocation across priority bins (in configured order).
-            double remaining = qty;
-            var allocations = new List<(int binAbsEntry, string binCode, double allocQty, bool isFallback)>();
-
-            foreach (var binCode in binPriority!)
-            {
-                if (remaining <= 0) break;
-                if (!binInfo.TryGetValue(binCode, out var bin)) continue;
-                if (!string.IsNullOrEmpty(lineWhsCode)
-                    && !string.Equals(bin.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (!bin.stock.TryGetValue(itemCode, out var available) || available <= 0) continue;
-
-                double take = Math.Min(remaining, available);
-                allocations.Add((bin.absEntry, binCode, take, false));
-                remaining -= take;
-                // Reduce available so subsequent lines don't over-allocate.
-                bin.stock[itemCode] = available - take;
-            }
-
-            // Second-chance pass: when fallback is enabled and priority bins
-            // couldn't cover the line, walk any non-priority bin in the same
-            // warehouse that has stock for this item, largest-first.
-            if (remaining > 0 && allowFallback)
-            {
-                var fallbackBins = binInfo
-                    .Where(kv => !binPrioritySet.Contains(kv.Key))
-                    .Where(kv =>
-                        string.IsNullOrEmpty(lineWhsCode)
-                        || string.Equals(kv.Value.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
-                    .Where(kv => kv.Value.stock.TryGetValue(itemCode, out var a) && a > 0)
-                    .OrderByDescending(kv => kv.Value.stock[itemCode])
-                    .ToList();
-
-                foreach (var kv in fallbackBins)
-                {
-                    if (remaining <= 0) break;
-                    var bin = kv.Value;
-                    double available = bin.stock[itemCode];
-                    double take = Math.Min(remaining, available);
-                    allocations.Add((bin.absEntry, kv.Key, take, true));
-                    remaining -= take;
-                    bin.stock[itemCode] = available - take;
-                    _logger.LogInformation(
-                        "Pick list refresh: fallback allocation for item {ItemCode} (line {LineNum}): "
-                        + "bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}",
-                        itemCode, lineNum, kv.Key, bin.absEntry, take);
-                }
-            }
-
-            if (remaining > 0)
+            if (linePlan.Shortfall > 0 || linePlan.Picks.Count == 0)
             {
                 _logger.LogWarning(
                     "Pick list refresh: skipping item {ItemCode} (line {LineNum}): "
-                    + "need {Required}, only {Available} available{Suffix}",
-                    itemCode, lineNum, qty, qty - remaining,
-                    allowFallback ? " across all bins in warehouse"
-                                  : " across priority bins (AllowFallbackBinAllocation=false)");
+                    + "plan allocated {Allocated}/{Required} in warehouse {Whs} (fallback={Fallback})",
+                    itemCode, lineNum, qty - linePlan.Shortfall, qty, linePlan.WhsCode, allowFallback);
                 skippedItems.Add(itemCode);
                 continue;
             }
@@ -1213,18 +1244,19 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             pickList.Lines.OrderRowID = lineNum;
             pickList.Lines.ReleasedQuantity = qty;
 
-            for (int b = 0; b < allocations.Count; b++)
+            for (int b = 0; b < linePlan.Picks.Count; b++)
             {
+                var pick = linePlan.Picks[b];
                 if (b > 0) pickList.Lines.BinAllocations.Add();
-                pickList.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
-                pickList.Lines.BinAllocations.Quantity = allocations[b].allocQty;
+                pickList.Lines.BinAllocations.BinAbsEntry = pick.AbsEntry;
+                pickList.Lines.BinAllocations.Quantity = pick.Qty;
                 pickList.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = pickLineIndex;
 
                 _logger.LogInformation(
-                    "  Pick-refresh line[{LineNum}] item {ItemCode}: bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}{Tag}",
-                    lineNum, itemCode, allocations[b].binCode,
-                    allocations[b].binAbsEntry, allocations[b].allocQty,
-                    allocations[b].isFallback ? " [fallback]" : "");
+                    "  Pick-refresh line[{LineNum}] item {ItemCode}: bin {BinCode} "
+                    + "(AbsEntry={AbsEntry}, Whs={Whs}) → {Qty}{Tag}",
+                    lineNum, itemCode, pick.BinCode, pick.AbsEntry, pick.WhsCode, pick.Qty,
+                    pick.IsFallback ? " [fallback]" : "");
             }
 
             anyLineAllocated = true;
