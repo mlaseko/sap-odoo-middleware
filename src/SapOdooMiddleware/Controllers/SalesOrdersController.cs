@@ -48,8 +48,21 @@ public class SalesOrdersController : ControllerBase
             var result = await _sapService.CreateSalesOrderAsync(request);
 
             _logger.LogInformation(
-                "SAP SO created: DocEntry={DocEntry}, DocNum={DocNum}, PickList={PickList}",
-                result.DocEntry, result.DocNum, result.PickListEntry);
+                "SAP SO created: DocEntry={DocEntry}, DocNum={DocNum}, PickList={PickList}, Warnings={WarningCount}",
+                result.DocEntry, result.DocNum, result.PickListEntry, result.Warnings.Count);
+
+            // Surface structured bin-shortfall warnings as individual
+            // WRN log entries so operators can see them in Serilog
+            // without decoding the response body.  The ICC side also
+            // consumes result.Warnings on write-back.
+            foreach (var w in result.Warnings)
+            {
+                _logger.LogWarning(
+                    "SO {DocEntry} warning [{Code}] item {ItemCode} line {LineNum} " +
+                    "warehouse {Whs} required={Required} allocated={Allocated}: {Message}",
+                    result.DocEntry, w.Code, w.ItemCode, w.LineNum, w.WarehouseCode,
+                    w.Required, w.Allocated, w.Message);
+            }
 
             return Ok(ApiResponse<SapSalesOrderResponse>.Ok(result));
         }
