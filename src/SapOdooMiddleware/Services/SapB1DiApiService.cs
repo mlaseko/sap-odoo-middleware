@@ -3904,4 +3904,198 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         _lock.Dispose();
         GC.SuppressFinalize(this);
     }
+
+    // ================================
+    // INVENTORY VALUATION
+    // ================================
+
+    /// <inheritdoc/>
+    public async Task<decimal> GetInventoryValuationTotalAsync(DateOnly? asOfDate)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var effectiveDate = asOfDate ?? DateOnly.FromDateTime(DateTime.Now);
+            string asOfDateSql = effectiveDate.ToString("yyyy-MM-dd");
+
+            // DateOnly.ToString("yyyy-MM-dd") always produces exactly "YYYY-MM-DD".
+            // Validate the format as a defence-in-depth measure before interpolating
+            // into SQL, since Recordset.DoQuery() does not support parameterized queries.
+            if (asOfDateSql.Length != 10
+                || asOfDateSql[4] != '-' || asOfDateSql[7] != '-'
+                || !asOfDateSql.All(c => char.IsDigit(c) || c == '-'))
+            {
+                throw new InvalidOperationException(
+                    $"Invalid as_of_date format '{asOfDateSql}'. Expected YYYY-MM-DD.");
+            }
+
+            _logger.LogInformation(
+                "Executing inventory valuation query for as_of_date={AsOfDate}",
+                asOfDateSql);
+
+            // Build the inventory valuation SQL using the provided as_of_date
+            // instead of GETDATE() so the result is reproducible for any date.
+            string sql = $@"
+WITH LatestPurchase AS
+(
+    SELECT
+        X.ItemCode,
+        X.Price,
+        X.Currency,
+        X.DocDate,
+        ROW_NUMBER() OVER (
+            PARTITION BY X.ItemCode
+            ORDER BY X.DocDate DESC, X.DocEntry DESC, X.LineNum DESC
+        ) AS RN
+    FROM
+    (
+        SELECT
+            T1.ItemCode,
+            T1.Price AS Price,
+            ISNULL(T1.Currency, T0.DocCur) AS Currency,
+            T0.DocDate,
+            T1.DocEntry,
+            T1.LineNum
+        FROM OPCH T0
+        INNER JOIN PCH1 T1 ON T0.DocEntry = T1.DocEntry
+        WHERE
+            T0.CANCELED = 'N'
+            AND T1.Quantity <> 0
+            AND T1.Price > 0
+            AND T0.DocDate <= '{asOfDateSql}'
+
+        UNION ALL
+
+        SELECT
+            T1.ItemCode,
+            T1.Price AS Price,
+            ISNULL(T1.Currency, T0.DocCur) AS Currency,
+            T0.DocDate,
+            T1.DocEntry,
+            T1.LineNum
+        FROM OPDN T0
+        INNER JOIN PDN1 T1 ON T0.DocEntry = T1.DocEntry
+        WHERE
+            T0.CANCELED = 'N'
+            AND T1.Quantity <> 0
+            AND T1.Price > 0
+            AND T0.DocDate <= '{asOfDateSql}'
+    ) X
+),
+
+ItemWarehouse AS
+(
+    SELECT
+        T0.ItemCode,
+        T1.WhsCode,
+        T1.OnHand,
+        T0.LastPurPrc,
+        T0.LastPurCur,
+        T0.LastPurDat,
+        T1.AvgPrice AS WarehouseCost,
+        T0.AvgPrice AS ItemCost,
+        LP.Price AS LatestPurchasePrice,
+        LP.Currency AS LatestPurchaseCurrency,
+        LP.DocDate AS LatestPurchaseDate
+    FROM OITM T0
+    INNER JOIN OITW T1 ON T0.ItemCode = T1.ItemCode
+    LEFT JOIN LatestPurchase LP ON T0.ItemCode = LP.ItemCode AND LP.RN = 1
+    WHERE T1.OnHand <> 0
+),
+
+Valuation AS
+(
+    SELECT
+        IW.ItemCode,
+        IW.WhsCode,
+        IW.OnHand,
+
+        CASE
+            WHEN ISNULL(IW.LastPurPrc, 0) > 0 THEN
+                CASE
+                    WHEN ISNULL(IW.LastPurCur, 'TZS') = 'TZS' THEN IW.LastPurPrc
+                    ELSE IW.LastPurPrc * ISNULL(R1.Rate, 0)
+                END
+
+            WHEN ISNULL(IW.LatestPurchasePrice, 0) > 0 THEN
+                CASE
+                    WHEN ISNULL(IW.LatestPurchaseCurrency, 'TZS') = 'TZS' THEN IW.LatestPurchasePrice
+                    ELSE IW.LatestPurchasePrice * ISNULL(R2.Rate, 0)
+                END
+
+            WHEN ISNULL(IW.WarehouseCost, 0) > 0 THEN IW.WarehouseCost
+
+            WHEN ISNULL(IW.ItemCost, 0) > 0 THEN IW.ItemCost
+
+            ELSE 0
+        END AS ValuationPriceTZS
+
+    FROM ItemWarehouse IW
+
+    OUTER APPLY
+    (
+        SELECT TOP 1 Rate
+        FROM ORTT
+        WHERE
+            Currency = IW.LastPurCur
+            AND RateDate <= ISNULL(IW.LastPurDat, '{asOfDateSql}')
+        ORDER BY RateDate DESC
+    ) R1
+
+    OUTER APPLY
+    (
+        SELECT TOP 1 Rate
+        FROM ORTT
+        WHERE
+            Currency = IW.LatestPurchaseCurrency
+            AND RateDate <= ISNULL(IW.LatestPurchaseDate, '{asOfDateSql}')
+        ORDER BY RateDate DESC
+    ) R2
+)
+
+SELECT SUM(OnHand * ValuationPriceTZS) AS TotalValue FROM Valuation";
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(sql);
+
+                if (rs.EoF)
+                {
+                    _logger.LogWarning(
+                        "Inventory valuation query returned no rows for as_of_date={AsOfDate}",
+                        asOfDateSql);
+                    return 0m;
+                }
+
+                object rawValue = rs.Fields.Item("TotalValue").Value;
+
+                if (rawValue == null || rawValue is DBNull)
+                {
+                    _logger.LogWarning(
+                        "Inventory valuation query returned NULL total for as_of_date={AsOfDate}",
+                        asOfDateSql);
+                    return 0m;
+                }
+
+                decimal total = Convert.ToDecimal(rawValue);
+
+                _logger.LogInformation(
+                    "Inventory valuation for as_of_date={AsOfDate}: {Total} TZS",
+                    asOfDateSql, total);
+
+                return total;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 }

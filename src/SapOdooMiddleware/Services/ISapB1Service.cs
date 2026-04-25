@@ -169,4 +169,11 @@ public interface ISapB1Service
     /// for COGS journal creation.  Does NOT modify the document.
     /// </summary>
     Task<SapInvoiceResponse> ReadInvoiceCostsAsync(int docEntry);
+
+    /// <summary>
+    /// Executes the inventory valuation SQL against SAP B1 via DI API Recordset.DoQuery()
+    /// and returns the total on-hand inventory value in TZS as of <paramref name="asOfDate"/>.
+    /// When <paramref name="asOfDate"/> is null, today's server date is used.
+    /// </summary>
+    Task<decimal> GetInventoryValuationTotalAsync(DateOnly? asOfDate);
 }
