@@ -114,4 +114,8 @@ internal sealed class SapB1DiApiServiceStub : ISapB1Service
     public Task CancelCreditMemoAsync(int docEntry) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<decimal> GetInventoryValuationTotalAsync(DateOnly? asOfDate) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 }
