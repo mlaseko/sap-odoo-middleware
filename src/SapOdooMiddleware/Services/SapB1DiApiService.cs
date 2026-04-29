@@ -684,6 +684,44 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "Updating SAP SO — DocEntry={DocEntry}, ResolvedSoId={ResolvedSoId}",
                 docEntry, request.ResolvedSoId);
 
+            // ── Pre-flight: refuse the SO update entirely if the active
+            //    pick list is in 'Picked' status.  At that point the
+            //    warehouse has already started gathering items and
+            //    line-quantity / line-set changes would silently
+            //    invalidate their work.  SAP also refuses Close() on a
+            //    Picked pick list, so the cancel-and-replace path in
+            //    _RefreshPickListForSO would fail anyway — better to
+            //    fail fast BEFORE any SAP changes are committed and
+            //    surface a clear operator instruction.  The SO update
+            //    can be retried after the operator either posts the
+            //    delivery (which Closes the pick list) or undoes the
+            //    picking in SAP B1's Pick & Pack Manager (which reverts
+            //    the line back to Released).
+            if (request.Lines.Count > 0 && _settings.AutoCreatePickList)
+            {
+                int? preflightPkl = LookupPickListForSalesOrder(docEntry);
+                if (preflightPkl.HasValue)
+                {
+                    string preflightStatus = GetPickListStatus(preflightPkl.Value);
+                    if (preflightStatus == "P")
+                    {
+                        throw new InvalidOperationException(
+                            $"Cannot update SO DocEntry={docEntry}: pick list "
+                            + $"AbsEntry={preflightPkl.Value} is in 'Picked' status. "
+                            + "Warehouse has already started picking — line changes "
+                            + "would invalidate their work.\n\n"
+                            + "Operator action required (in SAP B1):\n"
+                            + "  1. Open Pick & Pack Manager → find pick list "
+                            + $"AbsEntry={preflightPkl.Value}\n"
+                            + "  2. Either: post the delivery from it (which Closes "
+                            + "the pick list), OR undo the picking (which reverts "
+                            + "the lines to Released)\n"
+                            + "  3. Re-trigger the SO update from Odoo (re-sync via "
+                            + "ICC or manual push).");
+                    }
+                }
+            }
+
             var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
 
             if (!order.GetByKey(docEntry))
@@ -1022,75 +1060,117 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
-            // Build and add the REPLACEMENT pick list first.  If this
-            // fails (e.g. bin stock missing, SAP validation error) we
-            // leave the original pick list alone — better to keep the
-            // existing pick list than to close it and end up with none.
+            // ── Cancel-and-replace path (existing status = 'R') ────────
+            //
+            // Goal: ONE pick list per SO at all times.  Close the
+            // existing Released pick list FIRST, then build a brand-new
+            // pick list with all currently-open SO lines (including
+            // the lines that were on the old pick list, which become
+            // open again as soon as the old one is Closed).  The
+            // operator agreed to "fast and loose" semantics: no
+            // snapshot/rollback — if the new build fails after the old
+            // is closed, the SO has zero active pick lists and the
+            // operator must recreate it manually via SAP B1 Pick & Pack
+            // Manager → Open tab → Pick All, or by re-syncing the SO
+            // from Odoo.  See the catastrophe-log path below.
+            //
+            // P-status is filtered out at UpdateSalesOrderAsync's
+            // pre-flight (the SO update is refused entirely before any
+            // SAP changes commit), so by the time we reach here the
+            // existing pick list is guaranteed to be Releasable.
+            if (existingPklEntry.HasValue)
+            {
+                var pklToClose = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+                int closeResult;
+                string closeErr = string.Empty;
+                try
+                {
+                    if (!pklToClose.GetByKey(existingPklEntry.Value))
+                    {
+                        Marshal.ReleaseComObject(pklToClose);
+                        string msg =
+                            $"Pick list AbsEntry={existingPklEntry.Value} for SO DocEntry={soDocEntry} "
+                            + "was located by query but could not be opened by DI API. "
+                            + "Existing pick list left in place; refresh aborted.";
+                        _logger.LogWarning(msg);
+                        return (msg, existingPklEntry);
+                    }
+                    closeResult = pklToClose.Close();
+                    if (closeResult != 0)
+                        _company.GetLastError(out _, out closeErr);
+                }
+                finally { Marshal.ReleaseComObject(pklToClose); }
+
+                if (closeResult != 0)
+                {
+                    string msg =
+                        $"Could not close existing pick list AbsEntry={existingPklEntry.Value} "
+                        + $"for SO DocEntry={soDocEntry}: {closeErr}. "
+                        + "SAP refused the close — most likely a status flip to Picked "
+                        + "happened between the pre-flight check and now (concurrent "
+                        + "warehouse activity), or a row-lock collision.  Existing pick "
+                        + "list left in place; SO line changes were already committed "
+                        + "to SAP and need a manual reconciliation in Pick & Pack Manager.";
+                    _logger.LogWarning(
+                        "Pick list cancel-and-replace aborted for SO DocEntry={DocEntry}: {Msg}",
+                        soDocEntry, msg);
+                    return (msg, existingPklEntry);
+                }
+
+                _logger.LogInformation(
+                    "Closed existing pick list AbsEntry={PklEntry} for SO DocEntry={DocEntry} "
+                    + "ahead of cancel-and-replace.",
+                    existingPklEntry.Value, soDocEntry);
+            }
+
+            // Build the new pick list.  At this point any old pick list
+            // is Closed, so the SO lines that were on it are back to
+            // open and the planner can fully reallocate them.
             var (newPklEntry, buildWarning) = _TryCreatePickListForSO(soDocEntry);
 
             if (!newPklEntry.HasValue)
             {
-                // Build failed.  Do NOT close the existing pick list.
+                // CATASTROPHE: existing pick list (if any) is now
+                // Closed, but we couldn't build a new one.  The SO has
+                // zero active pick lists.  Operator must recreate
+                // manually — surface clear instructions.
                 string msg = buildWarning
-                    ?? $"Could not create replacement pick list for SO DocEntry={soDocEntry}.";
+                    ?? $"Could not create new pick list for SO DocEntry={soDocEntry}.";
                 if (existingPklEntry.HasValue)
                 {
-                    msg += $" Existing pick list AbsEntry={existingPklEntry.Value} left in place "
-                         + "(warehouse can still work from it for the original line set). "
-                         + "Operator must either manually add the new line(s) to the existing "
-                         + "pick list or resolve the underlying stock issue and re-sync.";
+                    msg += $" Old pick list AbsEntry={existingPklEntry.Value} was already Closed "
+                         + "and cannot be reopened.\n\n"
+                         + "Operator action required:\n"
+                         + "  1. Open SAP B1 → Pick & Pack Manager → Open tab\n"
+                         + "  2. Find SO DocEntry=" + soDocEntry + " and click 'Pick All' "
+                         + "to create a fresh pick list, OR re-sync the SO from Odoo "
+                         + "(ICC → Manual Push) so the middleware retries from a clean state.";
+                    _logger.LogError(
+                        "CATASTROPHE: pick list AbsEntry={OldPkl} was closed but new build "
+                        + "failed for SO DocEntry={DocEntry}: {Msg}",
+                        existingPklEntry.Value, soDocEntry, msg);
                 }
-                _logger.LogWarning(
-                    "Pick list refresh aborted for SO DocEntry={DocEntry}: {Msg}",
-                    soDocEntry, msg);
-                // Existing pick list remains active.  Return its AbsEntry
-                // (or null when there was none) so the ICC does not update
-                // x_sap_picklist_id to anything new.
-                return (msg, existingPklEntry);
+                else
+                {
+                    _logger.LogWarning(
+                        "Pick list build failed for SO DocEntry={DocEntry}: {Msg}",
+                        soDocEntry, msg);
+                }
+                return (msg, null);
             }
 
             _logger.LogInformation(
-                "Replacement pick list AbsEntry={NewPklEntry} created for SO DocEntry={DocEntry}.",
-                newPklEntry.Value, soDocEntry);
+                "Pick list cancel-and-replace complete for SO DocEntry={DocEntry}: "
+                + "old AbsEntry={OldPkl} → new AbsEntry={NewPkl}.",
+                soDocEntry, existingPklEntry, newPklEntry.Value);
 
-            // Replacement succeeded.  Now safe to close the old one.
-            if (existingPklEntry.HasValue)
-            {
-                var pkl = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
-                try
-                {
-                    if (pkl.GetByKey(existingPklEntry.Value))
-                    {
-                        int closeResult = pkl.Close();
-                        if (closeResult != 0)
-                        {
-                            _company.GetLastError(out int ec, out string em);
-                            _logger.LogWarning(
-                                "Failed to close old pick list AbsEntry={PklEntry} after "
-                                + "creating replacement AbsEntry={NewPklEntry}: {Err}. "
-                                + "Both pick lists now exist — warehouse should use the new one.",
-                                existingPklEntry.Value, newPklEntry.Value, em);
-                        }
-                        else
-                        {
-                            _logger.LogInformation(
-                                "Closed old pick list AbsEntry={PklEntry} after successful "
-                                + "replacement AbsEntry={NewPklEntry}.",
-                                existingPklEntry.Value, newPklEntry.Value);
-                        }
-                    }
-                }
-                finally
-                {
-                    Marshal.ReleaseComObject(pkl);
-                }
-            }
-
-            // The build may still have a partial-success warning (some
-            // items skipped due to no bin stock) — bubble it up so the
-            // operator can see which items need manual attention.  The
-            // NEW pick list AbsEntry is returned so ICC writes it back
-            // onto the sale.order and every related outgoing picking.
+            // The build may still carry a partial-success warning (some
+            // items skipped due to no bin stock — e.g. cross-warehouse
+            // shortfall on item 9951).  Bubble it up so the operator
+            // can see which items need manual attention.  The new
+            // AbsEntry is returned so ICC writes it back onto the
+            // sale.order AND every related outgoing stock.picking via
+            // integration_job_line_drift._writeback_sale_order.
             return (buildWarning, newPklEntry);
         }
         catch (Exception ex)
@@ -1127,6 +1207,22 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// </returns>
     private (int? pickListEntry, string? warning) _TryCreatePickListForSO(int soDocEntry)
     {
+        // ── Pre-fetch quantities already released to ANOTHER active pick
+        //    list, so we never try to release more than is genuinely open.
+        //    SAP B1's RDR1.RemainingOpenQuantity = ordered − delivered, and
+        //    does NOT subtract released-to-pick-list quantities.  If a
+        //    caller invokes this method while another OPKL row is still in
+        //    Released or Picked status (e.g. the C-status follow-up branch
+        //    in _RefreshPickListForSO, or any future caller that builds
+        //    additively), the planner would otherwise try to claim already-
+        //    released qty and SAP would reject the Add() with error -10
+        //    "Released quantity exceeds open quantity".  The cancel-and-
+        //    replace path closes the old pick list before reaching this
+        //    point, so this dictionary is empty for that path — making the
+        //    filter a no-op there but a hard correctness guard for the
+        //    follow-up paths.
+        var alreadyReleased = GetActivelyReleasedQuantitiesBySOLine(soDocEntry);
+
         // ── Read current SO lines + remaining open qty ──
         var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
         if (!order.GetByKey(soDocEntry))
@@ -1140,13 +1236,26 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         for (int i = 0; i < lineCount; i++)
         {
             order.Lines.SetCurrentLine(i);
-            double openQty = order.Lines.RemainingOpenQuantity;
-            if (openQty <= 0)
+            int lineNum = order.Lines.LineNum;
+            double remainingOpen = order.Lines.RemainingOpenQuantity;
+            if (remainingOpen <= 0)
                 continue;  // fully delivered line — nothing left to pick
 
+            double released = alreadyReleased.TryGetValue(lineNum, out var v) ? v : 0;
+            double availableToRelease = remainingOpen - released;
+            if (availableToRelease <= 0)
+            {
+                _logger.LogInformation(
+                    "Pick list build: skipping SO line {Line} item {Item} — already "
+                    + "fully released to another active pick list "
+                    + "(open={Open}, alreadyReleased={Released})",
+                    lineNum, order.Lines.ItemCode, remainingOpen, released);
+                continue;
+            }
+
             lineCaptures.Add((
-                order.Lines.LineNum,
-                openQty,
+                lineNum,
+                availableToRelease,
                 order.Lines.ItemCode ?? string.Empty,
                 order.Lines.WarehouseCode ?? string.Empty));
         }
@@ -3491,6 +3600,83 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 soDocEntry);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Reads the OPKL header status for a pick list AbsEntry.  Returns
+    /// "R" (Released), "P" (Picked), "C" (Closed), or "N" if the pick
+    /// list cannot be found / status cannot be read.
+    /// </summary>
+    private string GetPickListStatus(int absEntry)
+    {
+        try
+        {
+            var rs = (Recordset)_company!.GetBusinessObject(
+                BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(
+                    $"SELECT \"Status\" FROM \"OPKL\" WHERE \"AbsEntry\" = {absEntry}");
+                if (rs.EoF) return "N";
+                return rs.Fields.Item("Status").Value?.ToString() ?? "N";
+            }
+            finally { Marshal.ReleaseComObject(rs); }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to read pick list status for AbsEntry={AbsEntry}",
+                absEntry);
+            return "N";
+        }
+    }
+
+    /// <summary>
+    /// Returns a map of <c>SO line number → total released quantity</c>
+    /// across all currently-active pick lists (status R or P) for the
+    /// given Sales Order DocEntry.  Used by the pick-list refresh path
+    /// to compute "available to release" = <c>RemainingOpenQuantity − Σ
+    /// active released qty</c>, so we never try to release a quantity
+    /// that is still claimed by another active pick list.  Without this
+    /// guard the second pick list <c>Add()</c> would be rejected by SAP
+    /// with error <c>-10 "Released quantity exceeds open quantity"</c>.
+    /// </summary>
+    private Dictionary<int, double> GetActivelyReleasedQuantitiesBySOLine(int soDocEntry)
+    {
+        var dict = new Dictionary<int, double>();
+        try
+        {
+            var rs = (Recordset)_company!.GetBusinessObject(
+                BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(
+                    $"SELECT PKL1.\"OrderLine\" AS line, SUM(PKL1.\"RelQtty\") AS qty " +
+                    $"FROM PKL1 " +
+                    $"INNER JOIN OPKL ON PKL1.\"AbsEntry\" = OPKL.\"AbsEntry\" " +
+                    $"WHERE PKL1.\"OrderEntry\" = {soDocEntry} " +
+                    $"AND PKL1.\"BaseObject\" = 17 " +
+                    $"AND OPKL.\"Status\" IN ('R','P') " +
+                    $"AND PKL1.\"PickStatus\" IN ('R','P') " +
+                    $"GROUP BY PKL1.\"OrderLine\"");
+                while (!rs.EoF)
+                {
+                    int line = Convert.ToInt32(rs.Fields.Item("line").Value);
+                    double qty = Convert.ToDouble(rs.Fields.Item("qty").Value);
+                    dict[line] = qty;
+                    rs.MoveNext();
+                }
+            }
+            finally { Marshal.ReleaseComObject(rs); }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to read active released quantities for SO DocEntry={DocEntry} — "
+                + "returning empty map; pick-list refresh may over-claim and be rejected by SAP",
+                soDocEntry);
+        }
+        return dict;
     }
 
     private int? LookupPickListForDelivery(int deliveryDocEntry)
