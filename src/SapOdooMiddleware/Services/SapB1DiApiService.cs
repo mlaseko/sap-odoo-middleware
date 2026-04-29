@@ -1164,6 +1164,63 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 + "old AbsEntry={OldPkl} → new AbsEntry={NewPkl}.",
                 soDocEntry, existingPklEntry, newPklEntry.Value);
 
+            // Stamp the cancelled pick list with a remark pointing to
+            // its replacement, so SAP operators opening the closed
+            // pick list see why it was closed and where to look.
+            // Best-effort: if the Remarks update fails (rare — it's a
+            // free-text field with no status gate), log a warning but
+            // don't fail the refresh, the new pick list is already
+            // built and that's what matters.
+            if (existingPklEntry.HasValue)
+            {
+                try
+                {
+                    var oldPkl = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+                    try
+                    {
+                        if (oldPkl.GetByKey(existingPklEntry.Value))
+                        {
+                            string priorRemarks = oldPkl.Remarks ?? string.Empty;
+                            string cancelNote =
+                                (priorRemarks.Length > 0 ? priorRemarks + "\n\n" : string.Empty)
+                                + $"[CANCELLED {DateTime.Now:yyyy-MM-dd HH:mm}] "
+                                + $"SO DocEntry={soDocEntry} was updated in Odoo; "
+                                + $"this pick list was cancelled and replaced by "
+                                + $"pick list AbsEntry={newPklEntry.Value}. "
+                                + "Use the new pick list for picking — this one is "
+                                + "kept for audit only.";
+                            oldPkl.Remarks = cancelNote;
+                            int updateResult = oldPkl.Update();
+                            if (updateResult != 0)
+                            {
+                                _company.GetLastError(out _, out string updateErr);
+                                _logger.LogWarning(
+                                    "Could not stamp cancellation remark on pick list "
+                                    + "AbsEntry={OldPkl}: {Err}. Pick list is closed and "
+                                    + "replaced by AbsEntry={NewPkl} — non-fatal.",
+                                    existingPklEntry.Value, updateErr, newPklEntry.Value);
+                            }
+                            else
+                            {
+                                _logger.LogInformation(
+                                    "Stamped cancellation remark on pick list "
+                                    + "AbsEntry={OldPkl} pointing to AbsEntry={NewPkl}.",
+                                    existingPklEntry.Value, newPklEntry.Value);
+                            }
+                        }
+                    }
+                    finally { Marshal.ReleaseComObject(oldPkl); }
+                }
+                catch (Exception remarkEx)
+                {
+                    _logger.LogWarning(remarkEx,
+                        "Failed to stamp cancellation remark on pick list "
+                        + "AbsEntry={OldPkl} — non-fatal, replacement AbsEntry={NewPkl} "
+                        + "is already active.",
+                        existingPklEntry.Value, newPklEntry.Value);
+                }
+            }
+
             // The build may still carry a partial-success warning (some
             // items skipped due to no bin stock — e.g. cross-warehouse
             // shortfall on item 9951).  Bubble it up so the operator
