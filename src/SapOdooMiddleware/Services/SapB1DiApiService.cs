@@ -3487,6 +3487,15 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "Looking up SAP document — type={DocumentType}, odooRef={OdooRef}",
                 documentType, odooRef);
 
+            // Customer lookup is structurally different — Business Partners
+            // are keyed by CardCode (not DocEntry/DocNum), so OCRD doesn't
+            // have those columns.  Handled in its own branch below to keep
+            // the document-table query path unchanged.
+            if (documentType == "customer")
+            {
+                return LookupCustomerByOdooId(odooRef);
+            }
+
             // Determine SAP table and UDF based on document type
             var (table, udfColumn, statusColumn) = documentType switch
             {
@@ -3570,6 +3579,54 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             _lock.Release();
         }
+    }
+
+    /// <summary>
+    /// Looks up a SAP Business Partner (Customer) by its Odoo Customer
+    /// Id stamped on the OCRD UDF <c>U_OdooCustomerId</c>.  Returns the
+    /// SAP CardCode so the ICC SAP Field Sync wizard can stamp it on
+    /// the matching <c>res.partner</c> record.  Business Partners are
+    /// keyed by CardCode, not DocEntry/DocNum — those are returned as
+    /// 0 in the response shape (the wizard's customer flow keys off
+    /// CardCode instead).
+    /// </summary>
+    private SapDocumentLookupResponse? LookupCustomerByOdooId(string odooRef)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            // Filter to Customer cards only (CardType='C') — exclude
+            // Vendors (S) and Leads (L) that may share a UDF value.
+            string sql = $"SELECT T0.\"CardCode\" " +
+                         $"FROM \"OCRD\" T0 " +
+                         $"WHERE T0.\"U_OdooCustomerId\" = '{odooRef.Replace("'", "''")}' " +
+                         $"AND T0.\"CardType\" = 'C'";
+            rs.DoQuery(sql);
+
+            if (rs.EoF)
+            {
+                _logger.LogInformation(
+                    "No SAP Customer found for OdooCustomerId={OdooRef}", odooRef);
+                return null;
+            }
+
+            string cardCode = (string)rs.Fields.Item("CardCode").Value;
+
+            _logger.LogInformation(
+                "SAP Customer found — OdooCustomerId={OdooRef} → CardCode={CardCode}",
+                odooRef, cardCode);
+
+            return new SapDocumentLookupResponse
+            {
+                DocEntry = 0,
+                DocNum = 0,
+                Status = "active",
+                CardCode = cardCode,
+                OdooRef = odooRef,
+                PickListEntry = null,
+            };
+        }
+        finally { Marshal.ReleaseComObject(rs); }
     }
 
     // ================================
