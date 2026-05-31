@@ -1,7 +1,7 @@
 namespace SapOdooMiddleware.ItemProvisioning;
 
 public record LubesProvisioningResult(
-    string  Status,                              // "created" | "exists" | "needs_review" | "failed" | "dry_run"
+    string  Status,                              // "created" | "recovered" | "needs_review" | "failed" | "dry_run"
     string  ItemCode,
     string? ItemName                = null,
     string? OdooCategoryName        = null,

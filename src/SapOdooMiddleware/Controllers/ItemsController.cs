@@ -39,7 +39,7 @@ public class ItemsController : ControllerBase
         return result.Status switch
         {
             "created"      => Ok(result),
-            "exists"       => Ok(result),
+            "recovered"    => Ok(result),
             "dry_run"      => Ok(result),
             "needs_review" => Accepted(result),
             "failed"       => StatusCode(500, result),
