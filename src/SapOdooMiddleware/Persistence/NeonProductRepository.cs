@@ -61,7 +61,8 @@ public class NeonProductRepository : INeonProductRepository
                 "CompanyId","ListPrice","SapItemType",
                 "SapVatGroupSales","SapVatGroupPurchase","SapUomGroupEntry",
                 "SapStatus","SapErrorMsg",
-                "IsInventoryItem","IsActive"
+                "IsInventoryItem","IsActive",
+                "OnHandSap"
             ) VALUES (
                 @ItemCode,@ItemName,@ItemsGroupCode,
                 @OdooCategoryExternalId,@OdooCategoryName,
@@ -70,7 +71,8 @@ public class NeonProductRepository : INeonProductRepository
                 1,@ListPrice,'I',
                 'O1','I1',1,
                 @SapStatus,@SapErrorMsg,
-                true,true
+                true,true,
+                0
             )
             ON CONFLICT ("ItemCode") DO UPDATE SET
                 "ItemName"               = EXCLUDED."ItemName",
