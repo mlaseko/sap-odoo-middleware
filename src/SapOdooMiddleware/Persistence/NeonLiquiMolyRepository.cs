@@ -15,7 +15,7 @@ public interface INeonLiquiMolyRepository
 
 /// <summary>
 /// Raw-Npgsql repository over the Neon "NeonLiquiMolyProducts" table, keyed on the
-/// article number. List/dictionary-valued DTO fields are stored as JSONB.
+/// article number. List-valued DTO fields are stored as JSON in text columns.
 ///
 /// NOTE: the column set below mirrors <see cref="LiquiMolyProductDto"/> and the spec (§7.1).
 /// Verify it against the live Neon schema before first deploy; if column names/types
@@ -175,10 +175,12 @@ public class NeonLiquiMolyRepository : INeonLiquiMolyRepository
         };
     }
 
+    // List columns on NeonLiquiMolyProducts are text (not jsonb); store the JSON as a
+    // text parameter. Read-back deserialises the same JSON string back into a List<string>.
     private static void AddJsonb(NpgsqlCommand cmd, string name, object? value)
     {
         var json = value is null ? "[]" : JsonSerializer.Serialize(value, JsonOpts);
-        cmd.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Jsonb) { Value = json });
+        cmd.Parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Text) { Value = json });
     }
 
     private static string? Str(NpgsqlDataReader r, int ordinal)
