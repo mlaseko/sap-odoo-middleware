@@ -55,7 +55,7 @@ public class NeonProductRepository : INeonProductRepository
         const string sql = """
             INSERT INTO public."NeonProducts" (
                 "ItemCode","ItemName","ItemsGroupCode",
-                "OdooCategoryId","OdooCategoryName",
+                "OdooCategoryExternalId","OdooCategoryName",
                 "ProductType","IsStorable","OdooUomId",
                 "SalesTaxId","PurchaseTaxId","IncomeAccountId","ExpenseAccountId",
                 "CompanyId","ListPrice","SapItemType",
@@ -75,7 +75,7 @@ public class NeonProductRepository : INeonProductRepository
             ON CONFLICT ("ItemCode") DO UPDATE SET
                 "ItemName"               = EXCLUDED."ItemName",
                 "ItemsGroupCode"         = EXCLUDED."ItemsGroupCode",
-                "OdooCategoryId"         = EXCLUDED."OdooCategoryId",
+                "OdooCategoryExternalId" = EXCLUDED."OdooCategoryExternalId",
                 "OdooCategoryName"       = EXCLUDED."OdooCategoryName",
                 "ListPrice"              = EXCLUDED."ListPrice",
                 "SapStatus"              = EXCLUDED."SapStatus",
@@ -126,7 +126,6 @@ public class NeonProductRepository : INeonProductRepository
               AND "OdooProductId" IS NOT NULL
               AND "OdooProductId" <> ''
               AND "BackrefStampedAt" IS NULL
-            ORDER BY "UpdatedAt"
             LIMIT @Limit;
             """;
 
