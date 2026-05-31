@@ -3974,6 +3974,117 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    public async Task<SapItemSnapshot?> GetItemSnapshotAsync(string itemCode, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    return null;
+
+                string? cat = null;
+                try { cat = items.UserFields.Fields.Item("U_Odoo_Category").Value?.ToString(); }
+                catch { /* UDF may not exist on this schema */ }
+
+                items.PriceList.SetCurrentLine(0);
+                var retail = (decimal)items.PriceList.Price;
+                items.PriceList.SetCurrentLine(1);
+                var dealer = (decimal)items.PriceList.Price;
+                items.PriceList.SetCurrentLine(2);
+                var superDealer = (decimal)items.PriceList.Price;
+
+                return new SapItemSnapshot(cat, retail, dealer, superDealer);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task UpdateBlankFieldsAsync(string itemCode, SapLubesItemRequest desired, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException(
+                        $"SAP item {itemCode} not found for recovery update.");
+
+                bool changed = false;
+
+                // Fill the Odoo category UDF only if currently blank.
+                string? currentCat = null;
+                try { currentCat = items.UserFields.Fields.Item("U_Odoo_Category").Value?.ToString(); }
+                catch { /* UDF may not exist on this schema */ }
+
+                if (string.IsNullOrWhiteSpace(currentCat)
+                    && !string.IsNullOrWhiteSpace(desired.OdooCategoryName)
+                    && TrySetUserField(items.UserFields, "U_Odoo_Category", desired.OdooCategoryName, $"item {itemCode}"))
+                {
+                    changed = true;
+                }
+
+                // Fill each price-list price only if currently 0.
+                changed |= FillBlankPrice(items, 0, desired.RetailNetPrice);
+                changed |= FillBlankPrice(items, 1, desired.DealerNetPrice);
+                changed |= FillBlankPrice(items, 2, desired.SuperDealerNetPrice);
+
+                if (!changed)
+                {
+                    _logger.LogInformation(
+                        "SAP item {ItemCode} recovery: no blank fields to fill; leaving as-is.", itemCode);
+                    return;
+                }
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed for {itemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation("SAP item {ItemCode} recovery: blank fields filled.", itemCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>Sets price-list line <paramref name="line"/> only when its current price is 0.</summary>
+    private static bool FillBlankPrice(Items items, int line, decimal desired)
+    {
+        items.PriceList.SetCurrentLine(line);
+        if (items.PriceList.Price == 0d && desired > 0m)
+        {
+            items.PriceList.Price    = (double)desired;
+            items.PriceList.Currency = "TZS";
+            return true;
+        }
+        return false;
+    }
+
     private static string Truncate(string s, int max) =>
         string.IsNullOrEmpty(s) || s.Length <= max ? s : s.Substring(0, max);
 

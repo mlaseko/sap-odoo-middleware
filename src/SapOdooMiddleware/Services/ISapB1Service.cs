@@ -176,6 +176,21 @@ public interface ISapB1Service
     Task UpdateOdooProductIdAsync(string itemCode, string odooProductId);
 
     /// <summary>
+    /// Returns a snapshot of the existing OITM item's Odoo-category UDF and price-list
+    /// prices, or <c>null</c> if the item does not exist. Used by the orchestrator to
+    /// decide between create and idempotent recovery.
+    /// </summary>
+    Task<SapItemSnapshot?> GetItemSnapshotAsync(string itemCode, CancellationToken ct);
+
+    /// <summary>
+    /// Idempotent recovery for an item that already exists in SAP: fills only the
+    /// blank fields (empty <c>U_Odoo_Category</c> UDF and/or any price-list price that
+    /// is 0) from <paramref name="desired"/>. Never overwrites a non-blank SAP value,
+    /// and only calls <c>Items.Update()</c> when at least one blank field needs filling.
+    /// </summary>
+    Task UpdateBlankFieldsAsync(string itemCode, SapLubesItemRequest desired, CancellationToken ct);
+
+    /// <summary>
     /// Looks up a SAP document by its Odoo reference stored in a UDF.
     /// Used by the SAP Field Sync page to find missing SAP identifiers.
     /// Returns null if no matching document is found.

@@ -15,10 +15,15 @@ public interface ILubesItemProvisioningService
 }
 
 /// <summary>
-/// Orchestrates end-to-end provisioning of one Liqui Moly item:
-/// idempotency pre-check → ensure scraped data → classify Odoo category + SAP family →
-/// price → (SAP create is master) → write Neon product + price-list rows.
-/// SAP is the system of record: nothing is written to Neon unless SAP creation succeeds.
+/// Orchestrates end-to-end provisioning of one Liqui Moly item.
+///
+/// The full data pipeline (scrape → classify category + family → price) runs and is
+/// validated BEFORE any side-effecting write. Only then does it touch SAP:
+///   - if the item does not exist, it is created;
+///   - if it already exists, only blank SAP fields are filled (idempotent recovery).
+/// The Neon upsert always runs (it is idempotent via ON CONFLICT), so re-POSTing the
+/// same article number is safe and heals any prior half-created state.
+/// SAP is the system of record: nothing is written if pre-flight validation fails.
 /// </summary>
 public class LubesItemProvisioningService : ILubesItemProvisioningService
 {
@@ -59,11 +64,12 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         if (req.EurCost <= 0m)
             return new LubesProvisioningResult("failed", code, ErrorMessage: "EurCost must be > 0.");
 
-        // 1) SAP existence pre-check (idempotency)
-        if (await _sap.ItemExistsAsync(code))
-            return new LubesProvisioningResult("exists", code);
+        // ============================================================
+        // DATA PIPELINE — gather + validate everything before any SAP/Neon item write.
+        // (The Liqui Moly cache upsert is idempotent and is not an item-creation side effect.)
+        // ============================================================
 
-        // 2) Ensure LM row (scrape on demand)
+        // 1) Ensure LM row (scrape on demand)
         var lm = await _lmRepo.GetByArticleNumberAsync(code, ct);
         if (lm is null)
         {
@@ -75,13 +81,13 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             await _lmRepo.UpsertAsync(lm, ct);
         }
 
-        // 3) Build the rich description used for both classifications
+        // 2) Rich description for both classifications
         var description = string.IsNullOrWhiteSpace(lm.Description)
             ? $"{code}-{lm.Name}."
             : $"{code}-{lm.Name}. {lm.Description}";
         var hint = lm.Category;
 
-        // 4) Odoo category
+        // 3) Odoo category
         CategoryClassification catResult;
         try { catResult = await _classifier.ClassifyCategoryAsync(description, hint, ct); }
         catch (Exception ex)
@@ -95,7 +101,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
                 Candidates: catResult.Candidates);
 
-        // 5) SAP family
+        // 4) SAP family
         FamilyClassification famResult;
         try { famResult = await _classifier.ClassifyFamilyAsync(description, hint, ct); }
         catch (Exception ex)
@@ -108,13 +114,12 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             return new LubesProvisioningResult("needs_review", code,
                 ReviewReason: $"Low confidence on SAP family ({famResult.Confidence:F2}).");
 
-        // 6) Pricing
+        // 5) Pricing
         string pricingCat;
         try { pricingCat = _pricing.ResolvePricingCategory(hint); }
         catch (InvalidOperationException ex)
         {
-            return new LubesProvisioningResult("needs_review", code,
-                ReviewReason: ex.Message);
+            return new LubesProvisioningResult("needs_review", code, ReviewReason: ex.Message);
         }
         var rate   = req.EurTzsRateOverride ?? _pricingSettings.EurTzsRate;
         var cifTzs = req.EurCost * rate;
@@ -123,9 +128,17 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         var itemName = $"{code}-{lm.Name}";
         if (itemName.Length > 200) itemName = itemName.Substring(0, 200);
 
-        // 6b) Dry-run short-circuit: return everything we WOULD do, write nothing.
-        if (req.DryRun)
-            return new LubesProvisioningResult("dry_run", code,
+        // 6) PRE-FLIGHT VALIDATION — nothing has been written yet.
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(lm.Name))            missing.Add("ProductName");
+        if (string.IsNullOrWhiteSpace(catResult.Name))     missing.Add("OdooCategoryName");
+        if (string.IsNullOrWhiteSpace(catResult.ExternalId)) missing.Add("OdooCategoryExternalId");
+        if (famResult.GroupCode is null)                   missing.Add("SapItemGroupCode");
+        if (prices.Retail      <= 0m)                      missing.Add("RetailNetPrice");
+        if (prices.Dealer      <= 0m)                      missing.Add("DealerNetPrice");
+        if (prices.SuperDealer <= 0m)                      missing.Add("SuperDealerNetPrice");
+        if (missing.Count > 0)
+            return new LubesProvisioningResult("needs_review", code,
                 ItemName: itemName,
                 OdooCategoryName: catResult.Name,
                 OdooCategoryExternalId: catResult.ExternalId,
@@ -133,11 +146,9 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 SapItemGroupName: famResult.GroupName,
                 PricingCategory: pricingCat,
                 CifCostTzs: cifTzs,
-                RetailNetPrice: prices.Retail,
-                DealerNetPrice: prices.Dealer,
-                SuperDealerNetPrice: prices.SuperDealer);
+                ReviewReason: $"Required field(s) missing after classification/pricing: {string.Join(", ", missing)}.");
 
-        // 7) SAP create (master — runs first)
+        // All required fields are present — build the desired SAP item state.
         var sapReq = new SapLubesItemRequest(
             ItemCode: code,
             ItemName: itemName,
@@ -145,16 +156,48 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             RetailNetPrice: prices.Retail,
             DealerNetPrice: prices.Dealer,
             SuperDealerNetPrice: prices.SuperDealer,
-            OdooCategoryName: catResult.Name ?? "");
+            OdooCategoryName: catResult.Name!);
 
-        try { await _sap.CreateLubesItemAsync(sapReq); }
+        // 6b) Dry-run short-circuit: return everything we WOULD do, write nothing.
+        if (req.DryRun)
+            return BuildResult("dry_run", code, itemName, catResult, famResult, pricingCat, cifTzs, prices);
+
+        // ============================================================
+        // WRITE PHASE — SAP first (system of record), then Neon (idempotent).
+        // ============================================================
+
+        // 7) Decide create vs. recovery from the existing SAP state.
+        SapItemSnapshot? snapshot;
+        try { snapshot = await _sap.GetItemSnapshotAsync(code, ct); }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "SAP create failed for {Code}", code);
+            _logger.LogError(ex, "SAP snapshot read failed for {Code}", code);
             return new LubesProvisioningResult("failed", code, ErrorMessage: ex.Message);
         }
 
-        // 8) Neon writes (the Neon → Odoo automation picks these up)
+        string status;
+        try
+        {
+            if (snapshot is null)
+            {
+                await _sap.CreateLubesItemAsync(sapReq);
+                status = "created";
+            }
+            else
+            {
+                // Item already exists (possibly half-created) — fill only blank SAP fields.
+                await _sap.UpdateBlankFieldsAsync(code, sapReq, ct);
+                status = "recovered";
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SAP write ({Mode}) failed for {Code}",
+                snapshot is null ? "create" : "recover", code);
+            return new LubesProvisioningResult("failed", code, ErrorMessage: ex.Message);
+        }
+
+        // 8) Neon writes — idempotent; insert missing rows or refresh existing ones.
         try
         {
             await _productRepo.UpsertProductAsync(new NeonProductWrite(
@@ -173,14 +216,22 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         catch (Exception ex)
         {
             _logger.LogError(ex,
-                "SAP item {Code} CREATED but Neon write failed; manual sync needed.", code);
+                "SAP item {Code} write succeeded ({Status}) but Neon write failed; re-POST to heal.",
+                code, status);
             return new LubesProvisioningResult("failed", code,
-                ErrorMessage: $"SAP item created but Neon write failed: {ex.Message}");
+                ErrorMessage: $"SAP item write succeeded ({status}) but Neon write failed: {ex.Message}");
         }
 
         // 9) Done
-        return new LubesProvisioningResult(
-            Status: "created",
+        return BuildResult(status, code, itemName, catResult, famResult, pricingCat, cifTzs, prices);
+    }
+
+    private static LubesProvisioningResult BuildResult(
+        string status, string code, string itemName,
+        CategoryClassification catResult, FamilyClassification famResult,
+        string pricingCat, decimal cifTzs, PriceTiers prices) =>
+        new(
+            Status: status,
             ItemCode: code,
             ItemName: itemName,
             OdooCategoryName: catResult.Name,
@@ -192,5 +243,4 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             RetailNetPrice: prices.Retail,
             DealerNetPrice: prices.Dealer,
             SuperDealerNetPrice: prices.SuperDealer);
-    }
 }

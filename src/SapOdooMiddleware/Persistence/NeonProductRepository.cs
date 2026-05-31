@@ -54,7 +54,7 @@ public class NeonProductRepository : INeonProductRepository
     {
         const string sql = """
             INSERT INTO public."NeonProducts" (
-                "ItemCode","ItemName","ItemsGroupCode",
+                "ItemCode","ItemName","ItemGroupCode",
                 "OdooCategoryExternalId","OdooCategoryName",
                 "ProductType","IsStorable","OdooUomId",
                 "SalesTaxId","PurchaseTaxId","IncomeAccountId","ExpenseAccountId",
@@ -74,7 +74,7 @@ public class NeonProductRepository : INeonProductRepository
             )
             ON CONFLICT ("ItemCode") DO UPDATE SET
                 "ItemName"               = EXCLUDED."ItemName",
-                "ItemsGroupCode"         = EXCLUDED."ItemsGroupCode",
+                "ItemGroupCode"          = EXCLUDED."ItemGroupCode",
                 "OdooCategoryExternalId" = EXCLUDED."OdooCategoryExternalId",
                 "OdooCategoryName"       = EXCLUDED."OdooCategoryName",
                 "ListPrice"              = EXCLUDED."ListPrice",
