@@ -62,7 +62,7 @@ public class NeonProductRepository : INeonProductRepository
                 "SapVatGroupSales","SapVatGroupPurchase","SapUomGroupEntry",
                 "SapStatus","SapErrorMsg",
                 "IsInventoryItem","IsActive",
-                "OnHandSap"
+                "OnHandSap","AvailableCache","SyncedAt"
             ) VALUES (
                 @ItemCode,@ItemName,@ItemsGroupCode,
                 @OdooCategoryExternalId,@OdooCategoryName,
@@ -72,7 +72,7 @@ public class NeonProductRepository : INeonProductRepository
                 'O1','I1',1,
                 @SapStatus,@SapErrorMsg,
                 true,true,
-                0
+                0,0,now()
             )
             ON CONFLICT ("ItemCode") DO UPDATE SET
                 "ItemName"               = EXCLUDED."ItemName",
@@ -81,7 +81,8 @@ public class NeonProductRepository : INeonProductRepository
                 "OdooCategoryName"       = EXCLUDED."OdooCategoryName",
                 "ListPrice"              = EXCLUDED."ListPrice",
                 "SapStatus"              = EXCLUDED."SapStatus",
-                "SapErrorMsg"            = EXCLUDED."SapErrorMsg";
+                "SapErrorMsg"            = EXCLUDED."SapErrorMsg",
+                "SyncedAt"               = now();
             """;
 
         await using var conn = await OpenAsync(ct);
