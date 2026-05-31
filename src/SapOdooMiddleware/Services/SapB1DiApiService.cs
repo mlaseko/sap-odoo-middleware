@@ -200,6 +200,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         ("OINV", "Odoo_SO_ID", "Odoo Sales Order ID", 0, 50),
         ("OINV", "Odoo_LastSync", "Last Odoo Sync Date", 3, 0),
         ("OINV", "Odoo_SyncDir", "Odoo Sync Direction", 0, 10),
+
+        // OITM (Items) — Item Provisioning
+        ("OITM", "Odoo_Category", "Odoo Category Name", 0, 70),
+        ("OITM", "Odoo_Product_ID", "Odoo Product ID", 0, 20),
     ];
 
     public async Task<List<string>> EnsureUdfsAsync()
@@ -3838,6 +3842,141 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// Logs a warning (instead of throwing) when the field does not exist in the SAP B1 schema.
     /// </summary>
     /// <returns><c>true</c> if the field was set successfully; <c>false</c> otherwise.</returns>
+    // ================================
+    // ITEM PROVISIONING (Lubes)
+    // ================================
+
+    public async Task<bool> ItemExistsAsync(string itemCode)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                return items.GetByKey(itemCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task CreateLubesItemAsync(SapLubesItemRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                items.ItemCode       = request.ItemCode;
+                items.ItemName       = Truncate(request.ItemName, 200);
+                items.ItemType       = ItemTypeEnum.itItems;
+                items.InventoryItem  = BoYesNoEnum.tYES;
+                items.SalesItem      = BoYesNoEnum.tYES;
+                items.PurchaseItem   = BoYesNoEnum.tYES;
+                items.ItemsGroupCode = request.ItemsGroupCode;
+
+                // UoM group "Packing Units" (entry 1).
+                items.UoMGroupEntry  = 1;
+
+                items.SalesVATGroup    = "O1";
+                items.PurchaseVATGroup = "I1";
+
+                // Price lists — DI API pre-populates one row per PriceList in OPLN.
+                // Navigate by index (0 = PriceList 1, etc.) and set Price + Currency.
+                items.PriceList.SetCurrentLine(0);
+                items.PriceList.Price    = (double)request.RetailNetPrice;
+                items.PriceList.Currency = "TZS";
+
+                items.PriceList.SetCurrentLine(1);
+                items.PriceList.Price    = (double)request.DealerNetPrice;
+                items.PriceList.Currency = "TZS";
+
+                items.PriceList.SetCurrentLine(2);
+                items.PriceList.Price    = (double)request.SuperDealerNetPrice;
+                items.PriceList.Currency = "TZS";
+
+                // UDF — set the Odoo category name; the worker stamps U_Odoo_Product_ID later.
+                TrySetUserField(items.UserFields, "U_Odoo_Category",
+                    request.OdooCategoryName ?? string.Empty, $"item {request.ItemCode}");
+
+                int result = items.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Add failed for {request.ItemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP item created: ItemCode={ItemCode}, ItemName={ItemName}, Group={Group}",
+                    request.ItemCode, items.ItemName, request.ItemsGroupCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task UpdateOdooProductIdAsync(string itemCode, string odooProductId)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException(
+                        $"SAP item {itemCode} not found for Odoo backref.");
+
+                TrySetUserField(items.UserFields, "U_Odoo_Product_ID",
+                    odooProductId ?? string.Empty, $"item {itemCode}");
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed for {itemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP item {ItemCode} stamped with Odoo product id {OdooProductId}.",
+                    itemCode, odooProductId);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    private static string Truncate(string s, int max) =>
+        string.IsNullOrEmpty(s) || s.Length <= max ? s : s.Substring(0, max);
+
     private bool TrySetUserField(UserFields userFields, string fieldName, object value, string context)
     {
         try

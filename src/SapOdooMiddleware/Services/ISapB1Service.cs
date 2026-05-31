@@ -150,6 +150,31 @@ public interface ISapB1Service
     /// </summary>
     Task<SapB1PingResponse> PingAsync();
 
+    // ================================
+    // ITEM PROVISIONING (Lubes)
+    // ================================
+
+    /// <summary>
+    /// Returns true if an OITM item with the given ItemCode already exists in SAP B1.
+    /// Used by Item Provisioning for an idempotency pre-check.
+    /// </summary>
+    Task<bool> ItemExistsAsync(string itemCode);
+
+    /// <summary>
+    /// Creates a Liqui Moly item master (OITM) in SAP B1 via DI API:
+    /// item type I, Inventory/Sales/Purchase = Y, UoM group "Packing Units",
+    /// VAT groups O1/I1, net (excl-VAT) TZS prices on price lists 1/2/3, and the
+    /// <c>U_Odoo_Category</c> UDF set to the Odoo category name. <c>U_Odoo_Product_ID</c>
+    /// is left empty at create and stamped later by the backref worker.
+    /// </summary>
+    Task CreateLubesItemAsync(SapLubesItemRequest request);
+
+    /// <summary>
+    /// Stamps the Odoo product id onto the SAP item's <c>U_Odoo_Product_ID</c> UDF.
+    /// Used by the backref worker once the Neon → Odoo automation has created the product.
+    /// </summary>
+    Task UpdateOdooProductIdAsync(string itemCode, string odooProductId);
+
     /// <summary>
     /// Looks up a SAP document by its Odoo reference stored in a UDF.
     /// Used by the SAP Field Sync page to find missing SAP identifiers.
