@@ -103,11 +103,13 @@ public class NeonProductRepository : INeonProductRepository
         CancellationToken ct)
     {
         const string sql = """
-            INSERT INTO public."NeonPriceLists" ("ItemCode","PriceList","Price") VALUES
-                (@ItemCode, 1, @Retail),
-                (@ItemCode, 2, @Dealer),
-                (@ItemCode, 3, @SuperDealer)
-            ON CONFLICT ("ItemCode","PriceList") DO UPDATE SET "Price" = EXCLUDED."Price";
+            INSERT INTO public."NeonPriceLists" ("ItemCode","PriceList","Price","SyncedAt") VALUES
+                (@ItemCode, 1, @Retail,      now()),
+                (@ItemCode, 2, @Dealer,      now()),
+                (@ItemCode, 3, @SuperDealer, now())
+            ON CONFLICT ("ItemCode","PriceList") DO UPDATE SET
+                "Price"    = EXCLUDED."Price",
+                "SyncedAt" = now();
             """;
 
         await using var conn = await OpenAsync(ct);
