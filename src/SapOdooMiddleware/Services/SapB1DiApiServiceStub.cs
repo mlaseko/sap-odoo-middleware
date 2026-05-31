@@ -118,4 +118,16 @@ internal sealed class SapB1DiApiServiceStub : ISapB1Service
     public Task<decimal> GetInventoryValuationTotalAsync(DateOnly? asOfDate) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<bool> ItemExistsAsync(string itemCode) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task CreateLubesItemAsync(SapLubesItemRequest request) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task UpdateOdooProductIdAsync(string itemCode, string odooProductId) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 }
