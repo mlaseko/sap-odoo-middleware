@@ -172,7 +172,8 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         catch (Exception ex)
         {
             _logger.LogError(ex, "SAP snapshot read failed for {Code}", code);
-            return new LubesProvisioningResult("failed", code, ErrorMessage: ex.Message);
+            return BuildResult("failed", code, itemName, catResult, famResult, pricingCat, cifTzs, prices,
+                errorMessage: ex.Message);
         }
 
         string status;
@@ -194,7 +195,8 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         {
             _logger.LogError(ex, "SAP write ({Mode}) failed for {Code}",
                 snapshot is null ? "create" : "recover", code);
-            return new LubesProvisioningResult("failed", code, ErrorMessage: ex.Message);
+            return BuildResult("failed", code, itemName, catResult, famResult, pricingCat, cifTzs, prices,
+                errorMessage: ex.Message);
         }
 
         // 8) Neon writes — idempotent; insert missing rows or refresh existing ones.
@@ -218,18 +220,24 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             _logger.LogError(ex,
                 "SAP item {Code} write succeeded ({Status}) but Neon write failed; re-POST to heal.",
                 code, status);
-            return new LubesProvisioningResult("failed", code,
-                ErrorMessage: $"SAP item write succeeded ({status}) but Neon write failed: {ex.Message}");
+            return BuildResult("failed", code, itemName, catResult, famResult, pricingCat, cifTzs, prices,
+                errorMessage: $"SAP item write succeeded ({status}) but Neon write failed: {ex.Message}");
         }
 
         // 9) Done
         return BuildResult(status, code, itemName, catResult, famResult, pricingCat, cifTzs, prices);
     }
 
+    /// <summary>
+    /// Builds a fully-populated result echoing everything computed by the data pipeline.
+    /// Used for success ("created"/"recovered"), "dry_run", and post-pipeline failures —
+    /// so a "failed" response still shows what we computed and would have written.
+    /// </summary>
     private static LubesProvisioningResult BuildResult(
         string status, string code, string itemName,
         CategoryClassification catResult, FamilyClassification famResult,
-        string pricingCat, decimal cifTzs, PriceTiers prices) =>
+        string pricingCat, decimal cifTzs, PriceTiers prices,
+        string? errorMessage = null) =>
         new(
             Status: status,
             ItemCode: code,
@@ -242,5 +250,6 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             CifCostTzs: cifTzs,
             RetailNetPrice: prices.Retail,
             DealerNetPrice: prices.Dealer,
-            SuperDealerNetPrice: prices.SuperDealer);
+            SuperDealerNetPrice: prices.SuperDealer,
+            ErrorMessage: errorMessage);
 }
