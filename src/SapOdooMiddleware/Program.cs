@@ -1,10 +1,17 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Microsoft.OpenApi.Models;
+using MolasLubes.Infrastructure.Integrations.LiquiMoly;
 using Serilog;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Filters;
+using SapOdooMiddleware.Integrations.Classifier;
+using SapOdooMiddleware.ItemProvisioning;
 using SapOdooMiddleware.Middleware;
+using SapOdooMiddleware.Persistence;
+using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
+using SapOdooMiddleware.Workers;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -49,6 +56,33 @@ builder.Services.AddSingleton<ISapB1Service, SapB1DiApiServiceStub>();
 
 builder.Services.AddHttpClient<IOdooService, OdooJsonRpcService>();
 builder.Services.AddHostedService<WebhookQueueProcessor>();
+
+// --- Item Provisioning settings ---
+builder.Services.Configure<ClassifierSettings>(builder.Configuration.GetSection(ClassifierSettings.SectionName));
+builder.Services.Configure<PricingSettings>(builder.Configuration.GetSection(PricingSettings.SectionName));
+builder.Services.Configure<OdooBackrefWorkerSettings>(builder.Configuration.GetSection(OdooBackrefWorkerSettings.SectionName));
+builder.Services.Configure<NeonSettings>(builder.Configuration.GetSection(NeonSettings.SectionName));
+builder.Services.Configure<LiquiMolyScraperSettings>(builder.Configuration.GetSection("LiquiMoly"));
+
+// --- DGX classifier typed HttpClient ---
+builder.Services.AddHttpClient<ICategoryClassifier, HttpCategoryClassifier>((sp, http) =>
+{
+    var s = sp.GetRequiredService<IOptions<ClassifierSettings>>().Value;
+    http.BaseAddress = new Uri(s.BaseUrl);
+    http.Timeout     = TimeSpan.FromSeconds(s.TimeoutSeconds);
+});
+
+// --- Liqui Moly scraper (typed HttpClient) ---
+builder.Services.AddHttpClient<LiquiMolyProductScraperService>();
+
+// --- Item Provisioning components ---
+builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
+builder.Services.AddScoped<INeonLiquiMolyRepository, NeonLiquiMolyRepository>();
+builder.Services.AddScoped<INeonProductRepository, NeonProductRepository>();
+builder.Services.AddScoped<ILubesItemProvisioningService, LubesItemProvisioningService>();
+
+// --- Background worker (Odoo id back-stamp to SAP) ---
+builder.Services.AddHostedService<OdooBackrefWorker>();
 
 // --- Controllers ---
 builder.Services.AddControllers()
