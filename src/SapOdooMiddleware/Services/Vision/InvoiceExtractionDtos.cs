@@ -31,7 +31,7 @@ public record InvoiceLine
     [JsonPropertyName("unit")]           public string?  Unit          { get; init; }
     [JsonPropertyName("commodity_code")] public string?  CommodityCode { get; init; }
     [JsonPropertyName("origin")]         public string?  Origin        { get; init; }
-    [JsonPropertyName("discount_pct")]   public decimal  DiscountPct   { get; init; }
+    [JsonPropertyName("discount_pct")]   public decimal? DiscountPct   { get; init; }
     [JsonPropertyName("line_total")]     public decimal? LineTotal     { get; init; }
 }
 

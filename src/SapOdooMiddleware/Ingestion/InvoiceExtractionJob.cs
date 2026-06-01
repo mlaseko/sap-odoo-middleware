@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
@@ -62,24 +63,53 @@ public class InvoiceExtractionJob
             // 1. Render PDF to PNGs.
             var pages = _renderer.RenderToPngs(doc.FilePath, _settings.PdfRenderDpi);
             _logger.LogInformation("Document {Id}: {Pages} page(s) rendered.", documentId, pages.Count);
+            await _docs.SetTotalPagesAsync(documentId, pages.Count, ct);
 
-            // 2. Extract each page, accumulate.
+            // 2. Extract each page in isolation — one bad page must not fail the whole document.
             InvoiceHeader? header = null;
             InvoiceFooter? footer = null;
             var allLines = new List<(int pageNo, InvoiceLine line)>();
             var rawByPage = new Dictionary<int, InvoicePageExtraction>();
+            var successfulPages = 0;
+            var failedPages = new List<(int PageNo, string Error)>();
 
             for (int i = 0; i < pages.Count; i++)
             {
                 int pageNo = i + 1;
-                var result = await _extractor.ExtractPageAsync(pages[i], pageNo, ct);
-                rawByPage[pageNo] = result;
+                var sw = Stopwatch.StartNew();
+                await _docs.MarkPageStartedAsync(documentId, pageNo, ct);
+                try
+                {
+                    var result = await _extractor.ExtractPageAsync(pages[i], pageNo, ct);
+                    rawByPage[pageNo] = result;
 
-                header ??= result.Header;                          // first page that has it wins
-                if (result.Footer is not null) footer = result.Footer; // last page with totals wins
+                    header ??= result.Header;                          // first page that has it wins
+                    if (result.Footer is not null) footer = result.Footer; // last page with totals wins
 
-                foreach (var line in result.Lines)
-                    allLines.Add((pageNo, line));
+                    foreach (var line in result.Lines)
+                        allLines.Add((pageNo, line));
+
+                    sw.Stop();
+                    await _docs.RecordPageCompletedAsync(documentId, pageNo, sw.Elapsed.TotalSeconds, ct);
+                    successfulPages++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    sw.Stop();
+                    _logger.LogError(ex, "Page {Page} extraction failed for document {Id}", pageNo, documentId);
+                    failedPages.Add((pageNo, ex.Message));
+                    // Record duration even on failure so ETA stays accurate; continue to next page.
+                    await _docs.RecordPageCompletedAsync(documentId, pageNo, sw.Elapsed.TotalSeconds, ct);
+                }
+            }
+
+            // If every page failed, the document as a whole is failed.
+            if (successfulPages == 0)
+            {
+                var allFailedMsg = $"All {pages.Count} page(s) failed extraction. First error: {failedPages[0].Error}";
+                _logger.LogError("Document {Id}: {Message}", documentId, allFailedMsg);
+                await _docs.UpdateStatusAsync(documentId, "failed", allFailedMsg, ct);
+                return;
             }
 
             // 3. Persist lines (replace any prior for this doc → idempotent re-extract).
@@ -102,9 +132,19 @@ public class InvoiceExtractionJob
                 rawExtractionJson: rawJson,
                 ct: ct);
 
+            // 6. Surface any partial-page failures on the row (status remains 'extracted').
+            if (failedPages.Count > 0)
+            {
+                var warning = $"{failedPages.Count}/{pages.Count} page(s) failed: " +
+                              string.Join("; ", failedPages.Select(p => $"page {p.PageNo}: {p.Error}"));
+                _logger.LogWarning("Document {Id} partial extraction: {Warning}", documentId, warning);
+                // Status stays 'extracted'; record the warning in ErrorMessage so it shows on Detail.
+                await _docs.UpdateStatusAsync(documentId, "extracted", warning, ct);
+            }
+
             _logger.LogInformation(
-                "Document {Id}: extraction complete — {Lines} line(s), validation={Validation}.",
-                documentId, rows.Count, validationStatus);
+                "Document {Id}: extraction complete — {Lines} line(s), {Ok}/{Total} page(s) ok, validation={Validation}.",
+                documentId, rows.Count, successfulPages, pages.Count, validationStatus);
         }
         catch (Exception ex)
         {
@@ -128,16 +168,14 @@ public class InvoiceExtractionJob
             Unit:          line.Unit,
             CommodityCode: line.CommodityCode,
             Origin:        line.Origin,
-            DiscountPct:   line.DiscountPct,
+            DiscountPct:   line.DiscountPct ?? 0m,
             LineTotal:     line.LineTotal,
             IsPromotional: IsPromotional(line));
 
     private static bool IsPromotional(InvoiceLine line)
     {
-        if (line.DiscountPct >= 100m) return true;
-        if (line.UnitPrice is null or 0m) return true;
-        if (string.Equals(line.PackSize?.Trim(), "1 Stk", StringComparison.OrdinalIgnoreCase)) return true;
-        if (string.Equals(line.Unit?.Trim(), "Stk", StringComparison.OrdinalIgnoreCase)) return true;
+        if ((line.DiscountPct ?? 0m) >= 100m) return true;
+        if ((line.UnitPrice ?? 0m) == 0m && (line.LineTotal ?? 0m) == 0m && line.Quantity is > 0m) return true;
         return false;
     }
 

@@ -33,7 +33,10 @@ public record StagingDocumentRow(
     string?   ValidationNotes,
     string?   ErrorMessage,
     DateTime  UploadedAt,
-    DateTime? ExtractedAt);
+    DateTime? ExtractedAt,
+    int       PagesProcessed,
+    DateTime? CurrentPageStartedAt,
+    decimal?  LastPageDurationSec);
 
 public record InvoiceHeaderUpdate(
     string? InvoiceNumber, DateTime? InvoiceDate, string? SalesOrder, string? DeliveryNoteRef,
@@ -68,6 +71,17 @@ public interface IStagingDocumentRepository
 
     /// <summary>Document ids still needing extraction (recovery sweep on worker startup).</summary>
     Task<IReadOnlyList<Guid>> ListPendingExtractionAsync(CancellationToken ct);
+
+    // --- Live extraction progress ---
+
+    /// <summary>Set total page count and reset processed count (called once after PDF render).</summary>
+    Task SetTotalPagesAsync(Guid documentId, int pageCount, CancellationToken ct);
+
+    /// <summary>Mark a page as started (stamps CurrentPageStartedAt = NOW()).</summary>
+    Task MarkPageStartedAsync(Guid documentId, int pageNo, CancellationToken ct);
+
+    /// <summary>Record a page as completed: advance PagesProcessed, store duration, clear the start stamp.</summary>
+    Task RecordPageCompletedAsync(Guid documentId, int pageNo, double durationSec, CancellationToken ct);
 }
 
 public class StagingDocumentRepository : IStagingDocumentRepository
@@ -77,7 +91,8 @@ public class StagingDocumentRepository : IStagingDocumentRepository
         "\"Status\",\"DocumentType\",\"Supplier\",\"InvoiceNumber\",\"InvoiceDate\",\"SalesOrder\"," +
         "\"DeliveryNoteRef\",\"CustomerName\",\"CustomerAccount\",\"Currency\",\"Subtotal\",\"Freight\"," +
         "\"TotalNet\",\"TaxAmount\",\"InvoiceTotal\",\"PaymentTerms\",\"DueDate\",\"ValidationStatus\"," +
-        "\"ValidationNotes\",\"ErrorMessage\",\"UploadedAt\",\"ExtractedAt\"";
+        "\"ValidationNotes\",\"ErrorMessage\",\"UploadedAt\",\"ExtractedAt\"," +
+        "\"PagesProcessed\",\"CurrentPageStartedAt\",\"LastPageDurationSec\"";
 
     private readonly string _conn;
     public StagingDocumentRepository(IOptions<NeonSettings> s) => _conn = s.Value.ConnectionString;
@@ -223,6 +238,50 @@ public class StagingDocumentRepository : IStagingDocumentRepository
         return list;
     }
 
+    public async Task SetTotalPagesAsync(Guid documentId, int pageCount, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document"
+            SET "PageCount" = @pageCount, "PagesProcessed" = 0
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("pageCount", pageCount);
+        cmd.Parameters.AddWithValue("id", documentId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task MarkPageStartedAsync(Guid documentId, int pageNo, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document"
+            SET "CurrentPageStartedAt" = NOW()
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", documentId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RecordPageCompletedAsync(Guid documentId, int pageNo, double durationSec, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document"
+            SET "PagesProcessed" = @pageNo,
+                "LastPageDurationSec" = @durationSec,
+                "CurrentPageStartedAt" = NULL
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("pageNo", pageNo);
+        cmd.Parameters.AddWithValue("durationSec", (decimal)durationSec);
+        cmd.Parameters.AddWithValue("id", documentId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     private static StagingDocumentRow Map(NpgsqlDataReader r) => new(
         Id:               r.GetGuid(0),
         OriginalFilename: r.GetString(1),
@@ -251,5 +310,8 @@ public class StagingDocumentRepository : IStagingDocumentRepository
         ValidationNotes:  r.IsDBNull(24) ? null : r.GetString(24),
         ErrorMessage:     r.IsDBNull(25) ? null : r.GetString(25),
         UploadedAt:       r.GetDateTime(26),
-        ExtractedAt:      r.IsDBNull(27) ? null : r.GetDateTime(27));
+        ExtractedAt:      r.IsDBNull(27) ? null : r.GetDateTime(27),
+        PagesProcessed:       r.IsDBNull(28) ? 0    : r.GetInt32(28),
+        CurrentPageStartedAt: r.IsDBNull(29) ? null : r.GetDateTime(29),
+        LastPageDurationSec:  r.IsDBNull(30) ? null : r.GetDecimal(30));
 }

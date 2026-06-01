@@ -71,4 +71,35 @@ public class DocumentsController : ControllerBase
         var lines = await _lines.ListByDocumentAsync(id, ct);
         return Ok(lines);
     }
+
+    /// <summary>
+    /// Lightweight extraction-progress probe for the Detail page poller. Single PK select,
+    /// no joins. Exempt from the API key in ApiKeyMiddleware (UI-facing, browser-polled).
+    /// </summary>
+    [HttpGet("{id:guid}/status")]
+    public async Task<ActionResult<DocumentStatusResponse>> GetStatus(Guid id, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(id, ct);
+        if (doc is null) return NotFound();
+
+        return Ok(new DocumentStatusResponse(
+            Id: doc.Id,
+            Status: doc.Status,
+            ValidationStatus: doc.ValidationStatus,
+            PageCount: doc.PageCount ?? 0,
+            PagesProcessed: doc.PagesProcessed,
+            CurrentPageStartedAtUtc: doc.CurrentPageStartedAt,
+            LastPageDurationSec: doc.LastPageDurationSec,
+            ErrorMessage: doc.ErrorMessage));
+    }
 }
+
+public record DocumentStatusResponse(
+    Guid Id,
+    string Status,
+    string? ValidationStatus,
+    int PageCount,
+    int PagesProcessed,
+    DateTime? CurrentPageStartedAtUtc,
+    decimal? LastPageDurationSec,
+    string? ErrorMessage);

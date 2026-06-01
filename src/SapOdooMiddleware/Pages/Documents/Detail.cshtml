@@ -9,6 +9,21 @@
     <a href="/documents">← Back to list</a>
 </div>
 
+<div id="progress-card" class="progress-card" style="display:none">
+    <div class="progress-header">
+        <span class="progress-label">Extracting…</span>
+        <span class="progress-page-text">Page <span id="pp-current">0</span> of <span id="pp-total">0</span></span>
+    </div>
+    <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="pp-fill" style="width: 0%"></div>
+    </div>
+    <div class="progress-meta">
+        <span id="pp-percent">0%</span>
+        <span id="pp-elapsed"></span>
+        <span id="pp-eta"></span>
+    </div>
+</div>
+
 <div class="card">
     <div style="display:flex; justify-content:space-between; align-items:center;">
         <div>
@@ -87,3 +102,81 @@
         </tr>
     </tfoot>
 </table>
+
+<script>
+(function () {
+    const docId = @Json.Serialize(Model.Doc.Id);
+    const initialStatus = @Json.Serialize(Model.Doc.Status);
+    const ACTIVE_STATUSES = ['uploaded', 'extracting'];
+
+    if (!ACTIVE_STATUSES.includes(initialStatus)) return;
+
+    const card = document.getElementById('progress-card');
+    const fill = document.getElementById('pp-fill');
+    const current = document.getElementById('pp-current');
+    const total = document.getElementById('pp-total');
+    const percent = document.getElementById('pp-percent');
+    const elapsed = document.getElementById('pp-elapsed');
+    const eta = document.getElementById('pp-eta');
+
+    card.style.display = 'block';
+
+    let pollTimer = null;
+    let elapsedTimer = null;
+    let currentPageStartedAt = null;
+
+    function fmtSec(s) {
+        if (s == null || !isFinite(s) || s < 0) return '';
+        if (s < 60) return Math.round(s) + 's';
+        const m = Math.floor(s / 60);
+        const r = Math.round(s - m * 60);
+        return m + 'm ' + r + 's';
+    }
+
+    function updateElapsed() {
+        if (!currentPageStartedAt) { elapsed.textContent = ''; return; }
+        const ms = Date.now() - currentPageStartedAt.getTime();
+        elapsed.textContent = 'page time: ' + fmtSec(ms / 1000);
+    }
+
+    async function poll() {
+        try {
+            const r = await fetch('/api/documents/' + docId + '/status', { cache: 'no-store' });
+            if (!r.ok) return;
+            const s = await r.json();   // snake_case payload (API uses SnakeCaseLower)
+
+            const pageCount = s.page_count || 0;
+            const pagesProcessed = s.pages_processed || 0;
+            const pct = pageCount > 0 ? Math.floor(100 * pagesProcessed / pageCount) : 0;
+
+            fill.style.width = pct + '%';
+            current.textContent = pagesProcessed;
+            total.textContent = pageCount;
+            percent.textContent = pct + '%';
+
+            currentPageStartedAt = s.current_page_started_at_utc ? new Date(s.current_page_started_at_utc) : null;
+            updateElapsed();
+
+            if (s.last_page_duration_sec != null && pageCount > pagesProcessed) {
+                const remaining = (pageCount - pagesProcessed) * s.last_page_duration_sec;
+                eta.textContent = 'eta: ' + fmtSec(remaining);
+            } else {
+                eta.textContent = '';
+            }
+
+            // Stop once the status is terminal, then soft-reload to show lines/header/footer.
+            if (!ACTIVE_STATUSES.includes(s.status)) {
+                clearInterval(pollTimer);
+                clearInterval(elapsedTimer);
+                setTimeout(() => location.reload(), 250);
+            }
+        } catch (e) {
+            // Network blip — keep polling.
+        }
+    }
+
+    pollTimer = setInterval(poll, 1500);
+    elapsedTimer = setInterval(updateElapsed, 500);
+    poll(); // initial fire
+})();
+</script>

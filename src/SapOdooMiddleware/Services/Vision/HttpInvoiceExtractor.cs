@@ -18,6 +18,8 @@ public class HttpInvoiceExtractor : IInvoiceExtractor
     {
         PropertyNameCaseInsensitive = true,
         NumberHandling = JsonNumberHandling.AllowReadingFromString,
+        // Tolerant parsing of LLM-derived numbers (null, US/EU formats, percent, empty -> null).
+        Converters = { new ResilientNullableDecimalConverter() },
     };
 
     public HttpInvoiceExtractor(HttpClient http) => _http = http;
