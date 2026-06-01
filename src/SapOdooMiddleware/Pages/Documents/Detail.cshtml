@@ -362,24 +362,24 @@
         if (editing) return;
         const row = cell.closest('tr');
         const field = cell.dataset.field;
-        const original = cell.dataset.raw !== undefined ? cell.dataset.raw : cell.textContent.trim();
+        const displayBefore = cell.textContent;
+        const editVal = cell.dataset.raw !== undefined ? cell.dataset.raw : cell.textContent.trim();
         editing = cell;
+        let done = false;
 
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'cell-input';
-        input.value = original;
+        input.value = editVal;
         cell.textContent = '';
         cell.appendChild(input);
         input.focus();
         input.select();
 
-        let done = false;
-        const cancel = () => { if (done) return; done = true; editing = null; cell.textContent = ''; restore(); };
-        const restore = () => { /* re-render from data-raw/display happens via applyLine on commit; on cancel just put back */ };
+        const finish = () => { done = true; editing = null; };
 
         const commit = async () => {
-            if (done) return; done = true; editing = null;
+            if (done) return; finish();
             const val = input.value.trim();
             cell.innerHTML = '<span class="cell-spin">…</span>';
             try {
@@ -388,13 +388,15 @@
                 await refreshSummary();
             } catch (e) {
                 alert('Edit failed: ' + e.message);
-                cell.textContent = original; // best-effort revert
+                cell.textContent = displayBefore; // best-effort revert
             }
         };
 
+        const cancel = () => { if (done) return; finish(); cell.textContent = displayBefore; };
+
         input.addEventListener('keydown', ev => {
             if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
-            else if (ev.key === 'Escape') { ev.preventDefault(); done = true; editing = null; cell.textContent = (cell.dataset.raw !== undefined && original !== '') ? original : original; }
+            else if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
         });
         input.addEventListener('blur', commit);
     }

@@ -43,8 +43,6 @@ public class DocumentsController : ControllerBase
     // to a stub. TODO: wire real operator identity when Windows auth is enabled.
     private string CurrentUser => HttpContext.User?.Identity?.Name is { Length: > 0 } n ? n : "operator";
 
-    private static readonly string[] TerminalLineStatuses = { "matched", "created", "skip" };
-
     /// <summary>Upload one Liqui Moly invoice PDF. Triggers asynchronous extraction.</summary>
     [HttpPost("upload")]
     [RequestSizeLimit(50 * 1024 * 1024)]   // 50 MB
