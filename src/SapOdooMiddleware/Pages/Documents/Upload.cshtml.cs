@@ -4,6 +4,7 @@ using SapOdooMiddleware.Ingestion;
 
 namespace SapOdooMiddleware.Pages.Documents;
 
+[RequestSizeLimit(50 * 1024 * 1024)]   // 50 MB, matching DocumentsController + MaxUploadMb
 public class UploadModel : PageModel
 {
     private readonly DocumentUploadService _uploads;
