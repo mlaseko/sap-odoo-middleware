@@ -29,9 +29,8 @@ public class DetailModel : PageModel
         Doc = doc;
         Lines = await _lines.ListByDocumentAsync(id, ct);
 
-        if (doc.Status is "extracting" or "uploaded")
-            ViewData["AutoRefresh"] = true;
-
+        // No meta-refresh here — the page polls /api/documents/{id}/status via JS and
+        // does a single soft reload when extraction reaches a terminal state.
         ViewData["Title"] = doc.InvoiceNumber ?? doc.OriginalFilename;
         return Page();
     }
