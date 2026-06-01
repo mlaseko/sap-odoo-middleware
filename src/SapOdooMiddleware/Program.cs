@@ -5,12 +5,14 @@ using MolasLubes.Infrastructure.Integrations.LiquiMoly;
 using Serilog;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Filters;
+using SapOdooMiddleware.Ingestion;
 using SapOdooMiddleware.Integrations.Classifier;
 using SapOdooMiddleware.ItemProvisioning;
 using SapOdooMiddleware.Middleware;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
+using SapOdooMiddleware.Services.Vision;
 using SapOdooMiddleware.Workers;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -90,6 +92,36 @@ builder.Services.AddHostedService<ProvisioningJobWorker>();
 // --- Background worker (Odoo id back-stamp to SAP) ---
 builder.Services.AddHostedService<OdooBackrefWorker>();
 
+// --- Invoice Ingestion (Phase A) ---
+builder.Services.Configure<DocumentIngestionSettings>(
+    builder.Configuration.GetSection(DocumentIngestionSettings.SectionName));
+builder.Services.Configure<VisionExtractorSettings>(
+    builder.Configuration.GetSection(VisionExtractorSettings.SectionName));
+
+builder.Services.AddScoped<IStagingDocumentRepository, StagingDocumentRepository>();
+builder.Services.AddScoped<IStagingDocumentLineRepository, StagingDocumentLineRepository>();
+builder.Services.AddSingleton<IPdfPageRenderer, PdfPageRenderer>();
+builder.Services.AddSingleton<InvoiceTotalsValidator>();
+builder.Services.AddScoped<InvoiceExtractionJob>();
+builder.Services.AddScoped<DocumentUploadService>();
+
+// Vision extractor: typed HttpClient over the DGX vision endpoint (reuses Classifier:BaseUrl
+// with the longer VisionExtractor timeout).
+builder.Services.AddHttpClient<IInvoiceExtractor, HttpInvoiceExtractor>((sp, http) =>
+{
+    var cs = sp.GetRequiredService<IOptions<ClassifierSettings>>().Value;
+    var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
+    http.BaseAddress = new Uri(cs.BaseUrl);
+    http.Timeout     = TimeSpan.FromSeconds(vs.TimeoutSeconds);
+});
+
+// In-process extraction queue + background worker (doc row is the source of truth).
+builder.Services.AddSingleton<IDocumentExtractionQueue, DocumentExtractionQueue>();
+builder.Services.AddHostedService<InvoiceExtractionWorker>();
+
+// --- Razor Pages (operator UI under /documents; no Blazor) ---
+builder.Services.AddRazorPages();
+
 // --- Controllers ---
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
@@ -143,11 +175,15 @@ Log.Information(
     webhookQueueEnabled,
     File.Exists(externalConfig));
 
+// --- Static files (served before the API-key check; not under /api) ---
+app.UseStaticFiles();
+
 // --- Middleware ---
 app.UseMiddleware<ApiKeyMiddleware>();
 
 // --- Endpoints ---
 app.MapControllers();
+app.MapRazorPages();
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
 
 app.Run();

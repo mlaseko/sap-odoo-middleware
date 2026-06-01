@@ -1,0 +1,89 @@
+@page "/documents/{id:guid}"
+@model SapOdooMiddleware.Pages.Documents.DetailModel
+@{
+    var badge = Model.ValidationBadge();
+}
+
+<div style="display:flex; justify-content:space-between; align-items:center;">
+    <h2 style="margin:0;">@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
+    <a href="/documents">← Back to list</a>
+</div>
+
+<div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+            Status: <strong>@Model.Doc.Status</strong>
+            &nbsp;|&nbsp; Validation: <span class="badge @badge.Css">@badge.Text</span>
+        </div>
+        <div>@Model.Doc.PageCount page(s)</div>
+    </div>
+    @if (!string.IsNullOrWhiteSpace(Model.Doc.ValidationNotes))
+    {
+        <p style="margin:8px 0 0; color:#854d0e;">@Model.Doc.ValidationNotes</p>
+    }
+    @if (!string.IsNullOrWhiteSpace(Model.Doc.ErrorMessage))
+    {
+        <p style="margin:8px 0 0; color:#991b1b;">@Model.Doc.ErrorMessage</p>
+    }
+</div>
+
+<div class="card">
+    <table>
+        <tbody>
+            <tr><th>Invoice number</th><td>@Model.Doc.InvoiceNumber</td>
+                <th>Invoice date</th><td>@(Model.Doc.InvoiceDate?.ToString("yyyy-MM-dd"))</td></tr>
+            <tr><th>Customer</th><td>@Model.Doc.CustomerName</td>
+                <th>Customer account</th><td>@Model.Doc.CustomerAccount</td></tr>
+            <tr><th>Sales order</th><td>@Model.Doc.SalesOrder</td>
+                <th>Delivery note</th><td>@Model.Doc.DeliveryNoteRef</td></tr>
+            <tr><th>Currency</th><td>@Model.Doc.Currency</td>
+                <th>Payment terms</th><td>@Model.Doc.PaymentTerms</td></tr>
+            <tr><th>Subtotal</th><td class="num">@(Model.Doc.Subtotal?.ToString("N2"))</td>
+                <th>Freight</th><td class="num">@(Model.Doc.Freight?.ToString("N2"))</td></tr>
+            <tr><th>Total net</th><td class="num">@(Model.Doc.TotalNet?.ToString("N2"))</td>
+                <th>Invoice total</th><td class="num">@(Model.Doc.InvoiceTotal?.ToString("N2"))</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<h3>Line items (@Model.Lines.Count)</h3>
+<table>
+    <thead>
+        <tr>
+            <th class="num">#</th>
+            <th>Article</th>
+            <th>Description</th>
+            <th>Pack</th>
+            <th>Unit</th>
+            <th class="num">Qty</th>
+            <th class="num">Unit price</th>
+            <th class="num">Line total</th>
+            <th class="num">Disc %</th>
+            <th>Origin</th>
+        </tr>
+    </thead>
+    <tbody>
+    @foreach (var l in Model.Lines)
+    {
+        <tr class="@(l.IsPromotional ? "promo" : null)">
+            <td class="num">@l.LineNo</td>
+            <td>@l.ArticleNumber @(l.IsPromotional ? "(Promo)" : null)</td>
+            <td>@l.Description</td>
+            <td>@l.PackSize</td>
+            <td>@l.Unit</td>
+            <td class="num">@(l.Quantity?.ToString("0.###"))</td>
+            <td class="num">@(l.UnitPrice?.ToString("N2"))</td>
+            <td class="num">@(l.LineTotal?.ToString("N2"))</td>
+            <td class="num">@l.DiscountPct.ToString("0.##")</td>
+            <td>@l.Origin</td>
+        </tr>
+    }
+    </tbody>
+    <tfoot>
+        <tr>
+            <th colspan="7" class="num">Σ(line totals) + freight = @Model.ComputedTotal.ToString("N2")</th>
+            <th class="num">vs total net @(Model.Doc.TotalNet?.ToString("N2"))</th>
+            <th colspan="2"></th>
+        </tr>
+    </tfoot>
+</table>
