@@ -170,14 +170,7 @@ public class InvoiceExtractionJob
             Origin:        line.Origin,
             DiscountPct:   line.DiscountPct ?? 0m,
             LineTotal:     line.LineTotal,
-            IsPromotional: IsPromotional(line));
-
-    private static bool IsPromotional(InvoiceLine line)
-    {
-        if ((line.DiscountPct ?? 0m) >= 100m) return true;
-        if ((line.UnitPrice ?? 0m) == 0m && (line.LineTotal ?? 0m) == 0m && line.Quantity is > 0m) return true;
-        return false;
-    }
+            IsPromotional: InvoicePromotionRules.IsPromotional(line));
 
     private static InvoiceHeaderUpdate? ToHeaderUpdate(InvoiceHeader? h) => h is null ? null : new(
         InvoiceNumber:    h.InvoiceNumber,
