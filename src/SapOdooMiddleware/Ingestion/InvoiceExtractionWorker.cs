@@ -12,15 +12,18 @@ public class InvoiceExtractionWorker : BackgroundService
 {
     private readonly IDocumentExtractionQueue _queue;
     private readonly IServiceProvider _sp;
+    private readonly IDocumentAutoMatchQueue _autoMatchQueue;
     private readonly ILogger<InvoiceExtractionWorker> _logger;
 
     public InvoiceExtractionWorker(
         IDocumentExtractionQueue queue,
         IServiceProvider sp,
+        IDocumentAutoMatchQueue autoMatchQueue,
         ILogger<InvoiceExtractionWorker> logger)
     {
         _queue  = queue;
         _sp     = sp;
+        _autoMatchQueue = autoMatchQueue;
         _logger = logger;
     }
 
@@ -67,6 +70,9 @@ public class InvoiceExtractionWorker : BackgroundService
             using var scope = _sp.CreateScope();
             var job = scope.ServiceProvider.GetRequiredService<InvoiceExtractionJob>();
             await job.RunAsync(documentId, ct);
+
+            // Hand off to SAP auto-match (job no-ops if the document didn't reach 'extracted').
+            _autoMatchQueue.Enqueue(documentId);
         }
         catch (Exception ex)
         {

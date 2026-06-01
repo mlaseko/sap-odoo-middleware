@@ -119,6 +119,12 @@ builder.Services.AddHttpClient<IInvoiceExtractor, HttpInvoiceExtractor>((sp, htt
 builder.Services.AddSingleton<IDocumentExtractionQueue, DocumentExtractionQueue>();
 builder.Services.AddHostedService<InvoiceExtractionWorker>();
 
+// --- Phase B review: auto-match + bulk-create ---
+builder.Services.AddScoped<InvoiceAutoMatchJob>();
+builder.Services.AddScoped<InvoiceItemCreationService>();
+builder.Services.AddSingleton<IDocumentAutoMatchQueue, DocumentAutoMatchQueue>();
+builder.Services.AddHostedService<InvoiceAutoMatchWorker>();
+
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
 
