@@ -45,7 +45,7 @@ public class ApiKeyMiddlewareTests : IClassFixture<ApiKeyMiddlewareTests.TestApp
         var json = JsonNode.Parse(body);
         var errors = json?["errors"]?.AsArray();
         Assert.NotNull(errors);
-        Assert.Contains("Missing X-Api-Key header", errors![0]!.GetValue<string>());
+        Assert.Contains("Missing API key", errors![0]!.GetValue<string>());
     }
 
     [Fact]
