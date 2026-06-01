@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
@@ -62,6 +63,7 @@ public class InvoiceExtractionJob
             // 1. Render PDF to PNGs.
             var pages = _renderer.RenderToPngs(doc.FilePath, _settings.PdfRenderDpi);
             _logger.LogInformation("Document {Id}: {Pages} page(s) rendered.", documentId, pages.Count);
+            await _docs.SetTotalPagesAsync(documentId, pages.Count, ct);
 
             // 2. Extract each page in isolation — one bad page must not fail the whole document.
             InvoiceHeader? header = null;
@@ -74,6 +76,8 @@ public class InvoiceExtractionJob
             for (int i = 0; i < pages.Count; i++)
             {
                 int pageNo = i + 1;
+                var sw = Stopwatch.StartNew();
+                await _docs.MarkPageStartedAsync(documentId, pageNo, ct);
                 try
                 {
                     var result = await _extractor.ExtractPageAsync(pages[i], pageNo, ct);
@@ -85,13 +89,17 @@ public class InvoiceExtractionJob
                     foreach (var line in result.Lines)
                         allLines.Add((pageNo, line));
 
+                    sw.Stop();
+                    await _docs.RecordPageCompletedAsync(documentId, pageNo, sw.Elapsed.TotalSeconds, ct);
                     successfulPages++;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    sw.Stop();
                     _logger.LogError(ex, "Page {Page} extraction failed for document {Id}", pageNo, documentId);
                     failedPages.Add((pageNo, ex.Message));
-                    // Continue to the next page rather than failing the whole document.
+                    // Record duration even on failure so ETA stays accurate; continue to next page.
+                    await _docs.RecordPageCompletedAsync(documentId, pageNo, sw.Elapsed.TotalSeconds, ct);
                 }
             }
 

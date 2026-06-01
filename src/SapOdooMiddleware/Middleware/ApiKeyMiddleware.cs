@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Models.Api;
@@ -15,6 +16,13 @@ public class ApiKeyMiddleware
 {
     private const string ApiKeyHeader = "X-Api-Key";
     private const string BearerPrefix = "Bearer ";
+
+    // Public exemption: the Detail page polls extraction progress from the browser with no
+    // API key. Narrowly scoped to GET /api/documents/{guid}/status — nothing else is exempt.
+    private static readonly Regex PublicStatusProbe = new(
+        @"^/api/documents/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/status/?$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
     private readonly RequestDelegate _next;
     private readonly ILogger<ApiKeyMiddleware> _logger;
 
@@ -26,6 +34,14 @@ public class ApiKeyMiddleware
 
     public async Task InvokeAsync(HttpContext context, IOptions<ApiKeySettings> settings)
     {
+        // UI-facing extraction-progress probe is public (GET /api/documents/{guid}/status only).
+        if (HttpMethods.IsGet(context.Request.Method)
+            && PublicStatusProbe.IsMatch(context.Request.Path.Value ?? string.Empty))
+        {
+            await _next(context);
+            return;
+        }
+
         // Only enforce API key auth on /api/* routes.
         // Everything else (health, Swagger, favicon, bot probes, etc.) passes through
         // and will naturally 404 if no matching endpoint exists.
