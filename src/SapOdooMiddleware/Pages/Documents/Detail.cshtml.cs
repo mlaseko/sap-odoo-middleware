@@ -21,6 +21,23 @@ public class DetailModel : PageModel
     public decimal SumLineTotals => Lines.Sum(l => l.LineTotal ?? 0m);
     public decimal ComputedTotal => SumLineTotals + (Doc.Freight ?? 0m);
 
+    /// <summary>Review section is shown for extracted (editable) and reviewed (read-only) docs.</summary>
+    public bool ShowReview => Doc.Status is "extracted" or "reviewed";
+    public bool IsReviewed => Doc.Status == "reviewed";
+    public bool IsEditable => Doc.Status == "extracted";
+
+    /// <summary>CSS class + label for a line review-status pill.</summary>
+    public static (string Css, string Text) LinePill(string status) => status switch
+    {
+        "matched"       => ("pill-green",  "matched"),
+        "create_new"    => ("pill-blue",   "create new"),
+        "skip"          => ("pill-grey",   "skip"),
+        "pending"       => ("pill-yellow", "pending"),
+        "created"       => ("pill-green",  "created"),
+        "create_failed" => ("pill-red",    "create failed"),
+        _               => ("pill-grey",   status)
+    };
+
     public async Task<IActionResult> OnGetAsync(Guid id, CancellationToken ct)
     {
         var doc = await _docs.GetByIdAsync(id, ct);
