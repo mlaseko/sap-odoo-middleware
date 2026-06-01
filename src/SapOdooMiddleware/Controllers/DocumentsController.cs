@@ -90,6 +90,7 @@ public class DocumentsController : ControllerBase
             PagesProcessed: doc.PagesProcessed,
             CurrentPageStartedAtUtc: doc.CurrentPageStartedAt,
             LastPageDurationSec: doc.LastPageDurationSec,
+            ServerNowUtc: DateTime.UtcNow,
             ErrorMessage: doc.ErrorMessage));
     }
 }
@@ -102,4 +103,5 @@ public record DocumentStatusResponse(
     int PagesProcessed,
     DateTime? CurrentPageStartedAtUtc,
     decimal? LastPageDurationSec,
+    DateTime ServerNowUtc,
     string? ErrorMessage);

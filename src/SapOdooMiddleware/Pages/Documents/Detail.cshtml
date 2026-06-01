@@ -121,22 +121,59 @@
 
     card.style.display = 'block';
 
+    // Default per-page estimate (seconds) used before we have a real measurement,
+    // and as a floor so the first page still shows motion + an ETA.
+    const DEFAULT_PAGE_SEC = 60;
+    // Cap intra-page fill so the bar never reaches the next page boundary before that
+    // page actually completes (avoids overshoot, then a visible "snap back").
+    const INTRA_PAGE_CAP = 0.92;
+
     let pollTimer = null;
-    let elapsedTimer = null;
-    let currentPageStartedAt = null;
+    let tickTimer = null;
+
+    // Snapshot of the latest poll, used to interpolate between polls on the local clock.
+    let snap = null; // { pageCount, pagesProcessed, expectedSec, pageElapsedAtSnapSec|null, localAnchorMs }
 
     function fmtSec(s) {
         if (s == null || !isFinite(s) || s < 0) return '';
-        if (s < 60) return Math.round(s) + 's';
+        s = Math.round(s);
+        if (s < 60) return s + 's';
         const m = Math.floor(s / 60);
-        const r = Math.round(s - m * 60);
-        return m + 'm ' + r + 's';
+        return m + 'm ' + (s - m * 60) + 's';
     }
 
-    function updateElapsed() {
-        if (!currentPageStartedAt) { elapsed.textContent = ''; return; }
-        const ms = Date.now() - currentPageStartedAt.getTime();
-        elapsed.textContent = 'page time: ' + fmtSec(ms / 1000);
+    // Seconds elapsed on the current page right now, anchored to the server clock at the last
+    // poll and advanced by the local clock since (skew-free, smooth between polls).
+    function pageElapsedNow() {
+        if (!snap || snap.pageElapsedAtSnapSec == null) return null;
+        return snap.pageElapsedAtSnapSec + (Date.now() - snap.localAnchorMs) / 1000;
+    }
+
+    function render() {
+        if (!snap) return;
+        const { pageCount, pagesProcessed, expectedSec } = snap;
+        const elapsedSec = pageElapsedNow();
+
+        // Fractional progress within the page currently being processed.
+        let frac = 0;
+        if (elapsedSec != null && expectedSec > 0) {
+            frac = Math.min(elapsedSec / expectedSec, INTRA_PAGE_CAP);
+        }
+        const done = pageCount > 0 ? (pagesProcessed + frac) / pageCount : 0;
+        const pct = Math.max(0, Math.min(100, done * 100));
+
+        fill.style.width = pct.toFixed(1) + '%';
+        percent.textContent = Math.floor(pct) + '%';
+        current.textContent = pagesProcessed;
+        total.textContent = pageCount;
+
+        elapsed.textContent = elapsedSec != null ? 'page time: ' + fmtSec(elapsedSec) : '';
+
+        // ETA = time left on the current page + full estimate for the pages after it.
+        const pagesAfterCurrent = Math.max(0, pageCount - pagesProcessed - (elapsedSec != null ? 1 : 0));
+        let remaining = pagesAfterCurrent * expectedSec;
+        if (elapsedSec != null) remaining += Math.max(expectedSec - elapsedSec, 0);
+        eta.textContent = (pageCount > 0 && remaining > 0) ? 'eta: ' + fmtSec(remaining) : '';
     }
 
     async function poll() {
@@ -147,27 +184,28 @@
 
             const pageCount = s.page_count || 0;
             const pagesProcessed = s.pages_processed || 0;
-            const pct = pageCount > 0 ? Math.floor(100 * pagesProcessed / pageCount) : 0;
+            const expectedSec = (s.last_page_duration_sec != null && s.last_page_duration_sec > 0)
+                ? Number(s.last_page_duration_sec) : DEFAULT_PAGE_SEC;
 
-            fill.style.width = pct + '%';
-            current.textContent = pagesProcessed;
-            total.textContent = pageCount;
-            percent.textContent = pct + '%';
-
-            currentPageStartedAt = s.current_page_started_at_utc ? new Date(s.current_page_started_at_utc) : null;
-            updateElapsed();
-
-            if (s.last_page_duration_sec != null && pageCount > pagesProcessed) {
-                const remaining = (pageCount - pagesProcessed) * s.last_page_duration_sec;
-                eta.textContent = 'eta: ' + fmtSec(remaining);
-            } else {
-                eta.textContent = '';
+            // Server-clock elapsed on the current page (null when between pages).
+            let pageElapsedAtSnapSec = null;
+            if (s.current_page_started_at_utc && s.server_now_utc) {
+                const started = Date.parse(s.current_page_started_at_utc);
+                const serverNow = Date.parse(s.server_now_utc);
+                if (isFinite(started) && isFinite(serverNow)) {
+                    pageElapsedAtSnapSec = Math.max(0, (serverNow - started) / 1000);
+                }
             }
+
+            snap = { pageCount, pagesProcessed, expectedSec, pageElapsedAtSnapSec, localAnchorMs: Date.now() };
+            render();
 
             // Stop once the status is terminal, then soft-reload to show lines/header/footer.
             if (!ACTIVE_STATUSES.includes(s.status)) {
                 clearInterval(pollTimer);
-                clearInterval(elapsedTimer);
+                clearInterval(tickTimer);
+                fill.style.width = '100%';
+                percent.textContent = '100%';
                 setTimeout(() => location.reload(), 250);
             }
         } catch (e) {
@@ -176,7 +214,7 @@
     }
 
     pollTimer = setInterval(poll, 1500);
-    elapsedTimer = setInterval(updateElapsed, 500);
+    tickTimer = setInterval(render, 250);   // smooth local interpolation between polls
     poll(); // initial fire
 })();
 </script>
