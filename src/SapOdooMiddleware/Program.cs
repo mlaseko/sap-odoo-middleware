@@ -81,6 +81,12 @@ builder.Services.AddScoped<INeonLiquiMolyRepository, NeonLiquiMolyRepository>();
 builder.Services.AddScoped<INeonProductRepository, NeonProductRepository>();
 builder.Services.AddScoped<ILubesItemProvisioningService, LubesItemProvisioningService>();
 
+// Async provisioning queue: POST /api/items enqueues; this worker drains it off the
+// request thread so the long cold-scrape + classifier work isn't bounded by the
+// Cloudflare ~100s proxy timeout. Caller polls GET /api/items/{jobId}.
+builder.Services.AddSingleton<IProvisioningJobStore, ProvisioningJobStore>();
+builder.Services.AddHostedService<ProvisioningJobWorker>();
+
 // --- Background worker (Odoo id back-stamp to SAP) ---
 builder.Services.AddHostedService<OdooBackrefWorker>();
 
