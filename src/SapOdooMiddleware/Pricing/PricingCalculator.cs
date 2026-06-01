@@ -205,6 +205,11 @@ public class PricingCalculator : IPricingCalculator
         ["adhesives & sealants"]             = "Adhesives & Sealants",
         ["repair aids"]                      = "Repair Aids",
         ["oils (industrial/other fluids)"]   = "Oils (Industrial/Other Fluids)",
+        // Marine categories reuse their automotive equivalents' band ratios until
+        // Marine-specific margins are defined.
+        ["marine"]                           = "Engine Oils",
+        ["marine oils"]                      = "Engine Oils",
+        ["marine additives"]                 = "Additives",
     };
 
     public string ResolvePricingCategory(string? scrapedCategory)
