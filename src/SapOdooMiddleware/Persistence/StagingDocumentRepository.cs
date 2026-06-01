@@ -36,7 +36,11 @@ public record StagingDocumentRow(
     DateTime? ExtractedAt,
     int       PagesProcessed,
     DateTime? CurrentPageStartedAt,
-    decimal?  LastPageDurationSec);
+    decimal?  LastPageDurationSec,
+    DateTime? ReviewedAt,
+    string?   ReviewedBy,
+    DateTime? AutoMatchedAt,
+    int       AutoMatchedCount);
 
 public record InvoiceHeaderUpdate(
     string? InvoiceNumber, DateTime? InvoiceDate, string? SalesOrder, string? DeliveryNoteRef,
@@ -72,6 +76,17 @@ public interface IStagingDocumentRepository
     /// <summary>Document ids still needing extraction (recovery sweep on worker startup).</summary>
     Task<IReadOnlyList<Guid>> ListPendingExtractionAsync(CancellationToken ct);
 
+    // --- Phase B review ---
+
+    /// <summary>Extracted documents that have not yet been auto-matched (recovery sweep).</summary>
+    Task<IReadOnlyList<Guid>> ListNeedingAutoMatchAsync(CancellationToken ct);
+
+    /// <summary>Record the auto-match pass result (timestamp + matched/skipped count).</summary>
+    Task SetAutoMatchedAsync(Guid id, int autoMatchedCount, CancellationToken ct);
+
+    /// <summary>Transition the document to 'reviewed' (only valid from 'extracted').</summary>
+    Task MarkReviewedAsync(Guid id, string reviewedBy, CancellationToken ct);
+
     // --- Live extraction progress ---
 
     /// <summary>Set total page count and reset processed count (called once after PDF render).</summary>
@@ -92,7 +107,8 @@ public class StagingDocumentRepository : IStagingDocumentRepository
         "\"DeliveryNoteRef\",\"CustomerName\",\"CustomerAccount\",\"Currency\",\"Subtotal\",\"Freight\"," +
         "\"TotalNet\",\"TaxAmount\",\"InvoiceTotal\",\"PaymentTerms\",\"DueDate\",\"ValidationStatus\"," +
         "\"ValidationNotes\",\"ErrorMessage\",\"UploadedAt\",\"ExtractedAt\"," +
-        "\"PagesProcessed\",\"CurrentPageStartedAt\",\"LastPageDurationSec\"";
+        "\"PagesProcessed\",\"CurrentPageStartedAt\",\"LastPageDurationSec\"," +
+        "\"ReviewedAt\",\"ReviewedBy\",\"AutoMatchedAt\",\"AutoMatchedCount\"";
 
     private readonly string _conn;
     public StagingDocumentRepository(IOptions<NeonSettings> s) => _conn = s.Value.ConnectionString;
@@ -238,6 +254,49 @@ public class StagingDocumentRepository : IStagingDocumentRepository
         return list;
     }
 
+    public async Task<IReadOnlyList<Guid>> ListNeedingAutoMatchAsync(CancellationToken ct)
+    {
+        const string sql = """
+            SELECT "Id" FROM public."staging_document"
+            WHERE "Status" = 'extracted' AND "AutoMatchedAt" IS NULL
+            ORDER BY "ExtractedAt";
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        var list = new List<Guid>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct)) list.Add(r.GetGuid(0));
+        return list;
+    }
+
+    public async Task SetAutoMatchedAsync(Guid id, int autoMatchedCount, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document"
+            SET "AutoMatchedAt" = now(), "AutoMatchedCount" = @count
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("count", autoMatchedCount);
+        cmd.Parameters.AddWithValue("id", id);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task MarkReviewedAsync(Guid id, string reviewedBy, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document"
+            SET "Status" = 'reviewed', "ReviewedAt" = now(), "ReviewedBy" = @by
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("by", reviewedBy);
+        cmd.Parameters.AddWithValue("id", id);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task SetTotalPagesAsync(Guid documentId, int pageCount, CancellationToken ct)
     {
         const string sql = """
@@ -313,5 +372,9 @@ public class StagingDocumentRepository : IStagingDocumentRepository
         ExtractedAt:      r.IsDBNull(27) ? null : r.GetDateTime(27),
         PagesProcessed:       r.IsDBNull(28) ? 0    : r.GetInt32(28),
         CurrentPageStartedAt: r.IsDBNull(29) ? null : r.GetDateTime(29),
-        LastPageDurationSec:  r.IsDBNull(30) ? null : r.GetDecimal(30));
+        LastPageDurationSec:  r.IsDBNull(30) ? null : r.GetDecimal(30),
+        ReviewedAt:           r.IsDBNull(31) ? null : r.GetDateTime(31),
+        ReviewedBy:           r.IsDBNull(32) ? null : r.GetString(32),
+        AutoMatchedAt:        r.IsDBNull(33) ? null : r.GetDateTime(33),
+        AutoMatchedCount:     r.IsDBNull(34) ? 0    : r.GetInt32(34));
 }
