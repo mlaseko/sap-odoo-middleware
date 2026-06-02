@@ -105,6 +105,9 @@ builder.Services.Configure<VisionExtractorSettings>(
 
 builder.Services.AddScoped<IStagingDocumentRepository, StagingDocumentRepository>();
 builder.Services.AddScoped<IStagingDocumentLineRepository, StagingDocumentLineRepository>();
+// Autohub (parts_catalog) staging repos — tenant-resolved connection string via ICompanyContext.
+builder.Services.AddScoped<IStagingPartsDocumentRepository, StagingPartsDocumentRepository>();
+builder.Services.AddScoped<IStagingPartsLineRepository, StagingPartsLineRepository>();
 builder.Services.AddSingleton<IPdfPageRenderer, PdfPageRenderer>();
 builder.Services.AddSingleton<InvoiceTotalsValidator>();
 builder.Services.AddScoped<InvoiceExtractionJob>();
