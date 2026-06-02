@@ -159,6 +159,19 @@ builder.Services.AddScoped<IForexConversionService, ForexConversionService>();
 builder.Services.AddScoped<IPricingCalculationService, PricingCalculationService>();
 builder.Services.AddScoped<ISkuGenerationService, SkuGenerationService>();
 
+// --- Autohub Phase B: auto-match + enrichment ---
+builder.Services.AddScoped<IOitmMatchRepository, OitmMatchRepository>();
+builder.Services.AddScoped<IPartsLineMatchRepository, PartsLineMatchRepository>();
+builder.Services.AddScoped<IAutoMatchService, AutoMatchService>();
+builder.Services.AddScoped<IEnrichmentService, EnrichmentService>();
+builder.Services.AddHttpClient<IEnrichmentClient, HttpEnrichmentClient>((sp, http) =>
+{
+    // Enrichment can trigger a Germax scrape on a cold item — allow the full vision timeout.
+    var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
+    http.Timeout = TimeSpan.FromSeconds(vs.TimeoutSeconds);
+});
+builder.Services.AddHostedService<AutoMatchWorker>();
+
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
 
