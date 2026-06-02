@@ -66,6 +66,11 @@ builder.Services.Configure<OdooBackrefWorkerSettings>(builder.Configuration.GetS
 builder.Services.Configure<NeonSettings>(builder.Configuration.GetSection(NeonSettings.SectionName));
 builder.Services.Configure<LiquiMolyScraperSettings>(builder.Configuration.GetSection("LiquiMoly"));
 
+// --- Multi-tenancy (Companies:* + per-request CompanyContext) ---
+builder.Services.Configure<CompaniesOptions>(builder.Configuration);   // binds the "Companies" section
+builder.Services.AddScoped<CompanyContext>();
+builder.Services.AddScoped<ICompanyContext>(sp => sp.GetRequiredService<CompanyContext>());
+
 // --- DGX classifier typed HttpClient ---
 builder.Services.AddHttpClient<ICategoryClassifier, HttpCategoryClassifier>((sp, http) =>
 {
@@ -185,6 +190,7 @@ Log.Information(
 app.UseStaticFiles();
 
 // --- Middleware ---
+app.UseMiddleware<TenantResolutionMiddleware>();   // sets tenant from URL prefix (default Lubes)
 app.UseMiddleware<ApiKeyMiddleware>();
 
 // --- Endpoints ---
