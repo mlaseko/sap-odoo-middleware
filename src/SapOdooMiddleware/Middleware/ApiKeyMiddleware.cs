@@ -18,9 +18,10 @@ public class ApiKeyMiddleware
     private const string BearerPrefix = "Bearer ";
 
     // Public exemption: the Detail page polls extraction progress from the browser with no
-    // API key. Narrowly scoped to GET /api/documents/{guid}/status — nothing else is exempt.
+    // API key. Narrowly scoped to GET /api/documents/{guid}/status and the Autohub equivalent
+    // GET /api/autohub/documents/{guid}/status — nothing else is exempt.
     private static readonly Regex PublicStatusProbe = new(
-        @"^/api/documents/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/status/?$",
+        @"^/api/(autohub/)?documents/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/status/?$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private readonly RequestDelegate _next;

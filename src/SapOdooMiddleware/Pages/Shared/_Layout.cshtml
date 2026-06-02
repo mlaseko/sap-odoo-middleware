@@ -12,6 +12,9 @@
         body { font-family: system-ui, Segoe UI, Arial, sans-serif; margin: 0; color: #1b1b1f; background: #f6f7f9; }
         header { background: #1f2937; color: #fff; padding: 12px 24px; }
         header a { color: #c7d2fe; text-decoration: none; margin-right: 16px; }
+        .tenant-switch { font-size: 13px; color: #94a3b8; }
+        .tenant-switch a { margin-right: 0; margin-left: 10px; }
+        .tenant-active { color: #fff; font-weight: 700; text-decoration: underline; }
         main { padding: 24px; max-width: 1200px; margin: 0 auto; }
         table { border-collapse: collapse; width: 100%; background: #fff; }
         th, td { border: 1px solid #e5e7eb; padding: 6px 10px; text-align: left; font-size: 14px; }
@@ -69,10 +72,23 @@
     </style>
 </head>
 <body>
-    <header>
-        <a href="/documents"><strong>Invoice Ingestion</strong></a>
-        <a href="/documents">Documents</a>
-        <a href="/documents/upload">Upload</a>
+    @{
+        var reqPath = Context.Request.Path.Value ?? "";
+        var isAutohub = reqPath.StartsWith("/autohub", StringComparison.OrdinalIgnoreCase)
+                     || reqPath.StartsWith("/api/autohub", StringComparison.OrdinalIgnoreCase);
+        var docsBase = isAutohub ? "/autohub/documents" : "/documents";
+    }
+    <header style="display:flex; justify-content:space-between; align-items:center;">
+        <span>
+            <a href="@docsBase"><strong>Invoice Ingestion</strong></a>
+            <a href="@docsBase">Documents</a>
+            <a href="@docsBase/upload">Upload</a>
+        </span>
+        <span class="tenant-switch">
+            Tenant:
+            <a href="/documents" class="@(isAutohub ? "" : "tenant-active")">Lubes</a>
+            <a href="/autohub/documents" class="@(isAutohub ? "tenant-active" : "")">Autohub</a>
+        </span>
     </header>
     <main>
         @RenderBody()

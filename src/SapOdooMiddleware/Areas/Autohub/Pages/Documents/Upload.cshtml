@@ -1,0 +1,20 @@
+@page "/autohub/documents/upload"
+@model SapOdooMiddleware.Areas.Autohub.Pages.Documents.UploadModel
+
+<h2>Upload spare-parts invoice</h2>
+
+@if (Model.Error is not null)
+{
+    <div class="error">@Model.Error</div>
+}
+
+<div class="card" style="max-width:560px;">
+    <form method="post" enctype="multipart/form-data">
+        <p>Select a spare-parts invoice PDF (VIKA, Germax, or similar) to upload. Extraction starts automatically.</p>
+        <p><input type="file" name="Pdf" accept=".pdf" required /></p>
+        <p>
+            <button class="btn" type="submit">Upload &amp; extract</button>
+            <a href="/autohub/documents" style="margin-left:12px;">Cancel</a>
+        </p>
+    </form>
+</div>
