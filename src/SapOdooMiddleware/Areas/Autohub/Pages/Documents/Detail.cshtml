@@ -1,0 +1,88 @@
+@page "/autohub/documents/{id:guid}"
+@model SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel
+@{
+    var badge = Model.ValidationBadge();
+    var sym = Model.Sym();
+}
+
+<div style="display:flex; justify-content:space-between; align-items:center;">
+    <h2 style="margin:0;">@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
+    <a href="/autohub/documents">← Back to list</a>
+</div>
+
+@* Header card *@
+<div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+            Status: <strong>@Model.Doc.Status</strong>
+            &nbsp;|&nbsp; Validation: <span class="badge @badge.Css">@badge.Text</span>
+        </div>
+        <div>@Model.Doc.PageCount page(s)</div>
+    </div>
+    @if (!string.IsNullOrWhiteSpace(Model.Doc.ErrorMessage))
+    {
+        <p style="margin:8px 0 0; color:#854d0e;">@Model.Doc.ErrorMessage</p>
+    }
+</div>
+
+@* Live progress (shared partial; targets the Autohub status endpoint) *@
+<partial name="/Pages/Shared/_ExtractionProgress.cshtml" model="new ExtractionProgressVm(Model.Doc.Id, Model.Doc.Status, $"/api/autohub/documents/{Model.Doc.Id}/status")" />
+
+@* Invoice metadata *@
+<div class="card">
+    <table>
+        <tbody>
+            <tr><th>Supplier</th><td>@Model.Doc.SupplierName</td>
+                <th>Invoice number</th><td>@Model.Doc.InvoiceNumber</td></tr>
+            <tr><th>Invoice date</th><td>@(Model.Doc.InvoiceDate?.ToString("yyyy-MM-dd"))</td>
+                <th>Currency</th><td>@Model.Doc.Currency</td></tr>
+            <tr><th>Total amount</th><td class="num">@(Model.Doc.TotalAmount is { } t ? sym + t.ToString("N2") : "")</td>
+                <th></th><td></td></tr>
+        </tbody>
+    </table>
+</div>
+
+@if (Model.Doc.Status == "extracted" && Model.Lines.Count == 0)
+{
+    <div class="notice" style="background:#fef9c3; border-color:#fde68a; color:#854d0e;">
+        Extraction succeeded but no line items were found. Check the file or operator review may be required.
+    </div>
+}
+
+<h3>Line items (@Model.Lines.Count)</h3>
+<table>
+    <thead>
+        <tr>
+            <th class="num">#</th>
+            <th class="num">Page</th>
+            <th>Supplier Art.</th>
+            <th>OEMs</th>
+            <th>Description</th>
+            <th>Brand</th>
+            <th class="num">Qty</th>
+            <th>Unit</th>
+            <th class="num">Unit Price</th>
+            <th class="num">Line Total</th>
+            <th class="num">Disc %</th>
+        </tr>
+    </thead>
+    <tbody>
+    @foreach (var l in Model.Lines)
+    {
+        var oems = string.Join(", ", l.OemNumbers);
+        <tr class="@(l.IsPromotional ? "promo" : null)">
+            <td class="num">@l.LineNumber</td>
+            <td class="num">@l.PageNumber</td>
+            <td>@l.SupplierArticleNumber</td>
+            <td title="@oems" style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">@oems</td>
+            <td>@l.Description</td>
+            <td>@l.Brand</td>
+            <td class="num">@(l.Quantity?.ToString("0.###"))</td>
+            <td>@l.Unit</td>
+            <td class="num">@(l.UnitPriceForeign is { } up ? sym + up.ToString("N2") : "")</td>
+            <td class="num">@(l.LineTotalForeign is { } lt ? sym + lt.ToString("N2") : "")</td>
+            <td class="num">@(l.DiscountPct?.ToString("0.##"))</td>
+        </tr>
+    }
+    </tbody>
+</table>

@@ -66,6 +66,11 @@ builder.Services.Configure<OdooBackrefWorkerSettings>(builder.Configuration.GetS
 builder.Services.Configure<NeonSettings>(builder.Configuration.GetSection(NeonSettings.SectionName));
 builder.Services.Configure<LiquiMolyScraperSettings>(builder.Configuration.GetSection("LiquiMoly"));
 
+// --- Multi-tenancy (Companies:* + per-request CompanyContext) ---
+builder.Services.Configure<CompaniesOptions>(builder.Configuration);   // binds the "Companies" section
+builder.Services.AddScoped<CompanyContext>();
+builder.Services.AddScoped<ICompanyContext>(sp => sp.GetRequiredService<CompanyContext>());
+
 // --- DGX classifier typed HttpClient ---
 builder.Services.AddHttpClient<ICategoryClassifier, HttpCategoryClassifier>((sp, http) =>
 {
@@ -100,6 +105,9 @@ builder.Services.Configure<VisionExtractorSettings>(
 
 builder.Services.AddScoped<IStagingDocumentRepository, StagingDocumentRepository>();
 builder.Services.AddScoped<IStagingDocumentLineRepository, StagingDocumentLineRepository>();
+// Autohub (parts_catalog) staging repos — tenant-resolved connection string via ICompanyContext.
+builder.Services.AddScoped<IStagingPartsDocumentRepository, StagingPartsDocumentRepository>();
+builder.Services.AddScoped<IStagingPartsLineRepository, StagingPartsLineRepository>();
 builder.Services.AddSingleton<IPdfPageRenderer, PdfPageRenderer>();
 builder.Services.AddSingleton<InvoiceTotalsValidator>();
 builder.Services.AddScoped<InvoiceExtractionJob>();
@@ -124,6 +132,20 @@ builder.Services.AddScoped<InvoiceAutoMatchJob>();
 builder.Services.AddScoped<InvoiceItemCreationService>();
 builder.Services.AddSingleton<IDocumentAutoMatchQueue, DocumentAutoMatchQueue>();
 builder.Services.AddHostedService<InvoiceAutoMatchWorker>();
+
+// --- Autohub (parts) extraction pipeline — parallel to Lubes, isolated queue/worker ---
+builder.Services.AddSingleton<PartsInvoiceValidator>();
+builder.Services.AddScoped<PartsExtractionJob>();
+builder.Services.AddScoped<PartsDocumentUploadService>();
+builder.Services.AddHttpClient<IInvoicePartsExtractor, HttpPartsInvoiceExtractor>((sp, http) =>
+{
+    // Endpoint + base URL are resolved per-request from the tenant inside the extractor; only the
+    // long vision timeout is configured here.
+    var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
+    http.Timeout = TimeSpan.FromSeconds(vs.TimeoutSeconds);
+});
+builder.Services.AddSingleton<IPartsExtractionQueue, PartsExtractionQueue>();
+builder.Services.AddHostedService<PartsExtractionWorker>();
 
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
@@ -185,6 +207,7 @@ Log.Information(
 app.UseStaticFiles();
 
 // --- Middleware ---
+app.UseMiddleware<TenantResolutionMiddleware>();   // sets tenant from URL prefix (default Lubes)
 app.UseMiddleware<ApiKeyMiddleware>();
 
 // --- Endpoints ---

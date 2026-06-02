@@ -1,0 +1,124 @@
+@model SapOdooMiddleware.Pages.ExtractionProgressVm
+@*
+    Shared live extraction-progress card + poller. Anchors page-elapsed to the server clock
+    (skew-free) and interpolates locally between polls so the bar moves smoothly within a page.
+    Reusable across tenants via the StatusUrl. (Lubes Detail still inlines its own copy today.)
+*@
+<div id="progress-card" class="progress-card" style="display:none">
+    <div class="progress-header">
+        <span class="progress-label">Extracting…</span>
+        <span class="progress-page-text">Page <span id="pp-current">0</span> of <span id="pp-total">0</span></span>
+    </div>
+    <div class="progress-bar-track">
+        <div class="progress-bar-fill" id="pp-fill" style="width: 0%"></div>
+    </div>
+    <div class="progress-meta">
+        <span id="pp-percent">0%</span>
+        <span id="pp-elapsed"></span>
+        <span id="pp-eta"></span>
+    </div>
+</div>
+
+<script>
+(function () {
+    const initialStatus = @Json.Serialize(Model.Status);
+    const STATUS_URL = @Json.Serialize(Model.StatusUrl);
+    const ACTIVE_STATUSES = ['uploaded', 'extracting'];
+
+    if (!ACTIVE_STATUSES.includes(initialStatus)) return;
+
+    const card = document.getElementById('progress-card');
+    const fill = document.getElementById('pp-fill');
+    const current = document.getElementById('pp-current');
+    const total = document.getElementById('pp-total');
+    const percent = document.getElementById('pp-percent');
+    const elapsed = document.getElementById('pp-elapsed');
+    const eta = document.getElementById('pp-eta');
+
+    card.style.display = 'block';
+
+    const DEFAULT_PAGE_SEC = 60;
+    const INTRA_PAGE_CAP = 0.92;
+
+    let pollTimer = null;
+    let tickTimer = null;
+    let snap = null;
+
+    function fmtSec(s) {
+        if (s == null || !isFinite(s) || s < 0) return '';
+        s = Math.round(s);
+        if (s < 60) return s + 's';
+        const m = Math.floor(s / 60);
+        return m + 'm ' + (s - m * 60) + 's';
+    }
+
+    function pageElapsedNow() {
+        if (!snap || snap.pageElapsedAtSnapSec == null) return null;
+        return snap.pageElapsedAtSnapSec + (Date.now() - snap.localAnchorMs) / 1000;
+    }
+
+    function render() {
+        if (!snap) return;
+        const { pageCount, pagesProcessed, expectedSec } = snap;
+        const elapsedSec = pageElapsedNow();
+
+        let frac = 0;
+        if (elapsedSec != null && expectedSec > 0) {
+            frac = Math.min(elapsedSec / expectedSec, INTRA_PAGE_CAP);
+        }
+        const done = pageCount > 0 ? (pagesProcessed + frac) / pageCount : 0;
+        const pct = Math.max(0, Math.min(100, done * 100));
+
+        fill.style.width = pct.toFixed(1) + '%';
+        percent.textContent = Math.floor(pct) + '%';
+        current.textContent = pagesProcessed;
+        total.textContent = pageCount;
+
+        elapsed.textContent = elapsedSec != null ? 'page time: ' + fmtSec(elapsedSec) : '';
+
+        const pagesAfterCurrent = Math.max(0, pageCount - pagesProcessed - (elapsedSec != null ? 1 : 0));
+        let remaining = pagesAfterCurrent * expectedSec;
+        if (elapsedSec != null) remaining += Math.max(expectedSec - elapsedSec, 0);
+        eta.textContent = (pageCount > 0 && remaining > 0) ? 'eta: ' + fmtSec(remaining) : '';
+    }
+
+    async function poll() {
+        try {
+            const r = await fetch(STATUS_URL, { cache: 'no-store' });
+            if (!r.ok) return;
+            const s = await r.json();   // snake_case payload (API uses SnakeCaseLower)
+
+            const pageCount = s.page_count || 0;
+            const pagesProcessed = s.pages_processed || 0;
+            const expectedSec = (s.last_page_duration_sec != null && s.last_page_duration_sec > 0)
+                ? Number(s.last_page_duration_sec) : DEFAULT_PAGE_SEC;
+
+            let pageElapsedAtSnapSec = null;
+            if (s.current_page_started_at_utc && s.server_now_utc) {
+                const started = Date.parse(s.current_page_started_at_utc);
+                const serverNow = Date.parse(s.server_now_utc);
+                if (isFinite(started) && isFinite(serverNow)) {
+                    pageElapsedAtSnapSec = Math.max(0, (serverNow - started) / 1000);
+                }
+            }
+
+            snap = { pageCount, pagesProcessed, expectedSec, pageElapsedAtSnapSec, localAnchorMs: Date.now() };
+            render();
+
+            if (!ACTIVE_STATUSES.includes(s.status)) {
+                clearInterval(pollTimer);
+                clearInterval(tickTimer);
+                fill.style.width = '100%';
+                percent.textContent = '100%';
+                setTimeout(() => location.reload(), 250);
+            }
+        } catch (e) {
+            // Network blip — keep polling.
+        }
+    }
+
+    pollTimer = setInterval(poll, 1500);
+    tickTimer = setInterval(render, 250);
+    poll();
+})();
+</script>
