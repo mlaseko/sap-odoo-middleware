@@ -26,7 +26,11 @@
 </div>
 
 @* Live progress (shared partial; targets the Autohub status endpoint) *@
-<partial name="/Pages/Shared/_ExtractionProgress.cshtml" model="new ExtractionProgressVm(Model.Doc.Id, Model.Doc.Status, $"/api/autohub/documents/{Model.Doc.Id}/status")" />
+@{
+    var progressVm = new ExtractionProgressVm(
+        Model.Doc.Id, Model.Doc.Status, $"/api/autohub/documents/{Model.Doc.Id}/status");
+}
+<partial name="/Pages/Shared/_ExtractionProgress.cshtml" model="progressVm" />
 
 @* Invoice metadata *@
 <div class="card">
