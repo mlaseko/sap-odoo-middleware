@@ -133,6 +133,20 @@ builder.Services.AddScoped<InvoiceItemCreationService>();
 builder.Services.AddSingleton<IDocumentAutoMatchQueue, DocumentAutoMatchQueue>();
 builder.Services.AddHostedService<InvoiceAutoMatchWorker>();
 
+// --- Autohub (parts) extraction pipeline — parallel to Lubes, isolated queue/worker ---
+builder.Services.AddSingleton<PartsInvoiceValidator>();
+builder.Services.AddScoped<PartsExtractionJob>();
+builder.Services.AddScoped<PartsDocumentUploadService>();
+builder.Services.AddHttpClient<IInvoicePartsExtractor, HttpPartsInvoiceExtractor>((sp, http) =>
+{
+    // Endpoint + base URL are resolved per-request from the tenant inside the extractor; only the
+    // long vision timeout is configured here.
+    var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
+    http.Timeout = TimeSpan.FromSeconds(vs.TimeoutSeconds);
+});
+builder.Services.AddSingleton<IPartsExtractionQueue, PartsExtractionQueue>();
+builder.Services.AddHostedService<PartsExtractionWorker>();
+
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
 
