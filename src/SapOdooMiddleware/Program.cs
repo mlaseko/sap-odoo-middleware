@@ -12,6 +12,7 @@ using SapOdooMiddleware.Middleware;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
+using SapOdooMiddleware.Services.Autohub;
 using SapOdooMiddleware.Services.Vision;
 using SapOdooMiddleware.Workers;
 
@@ -146,6 +147,17 @@ builder.Services.AddHttpClient<IInvoicePartsExtractor, HttpPartsInvoiceExtractor
 });
 builder.Services.AddSingleton<IPartsExtractionQueue, PartsExtractionQueue>();
 builder.Services.AddHostedService<PartsExtractionWorker>();
+
+// --- Autohub Phase B foundation: pricing/forex/sku tables + pure services (no hosted service) ---
+builder.Services.Configure<AutohubPricingSettings>(builder.Configuration.GetSection(AutohubPricingSettings.SectionName));
+builder.Services.AddMemoryCache();
+builder.Services.AddScoped<IForexRateRepository, ForexRateRepository>();
+builder.Services.AddScoped<ISkuCounterRepository, SkuCounterRepository>();
+builder.Services.AddScoped<IPricingBrandRatioRepository, PricingBrandRatioRepository>();
+builder.Services.AddSingleton<IOemFilterService, OemFilterService>();          // pure logic, no DB
+builder.Services.AddScoped<IForexConversionService, ForexConversionService>();
+builder.Services.AddScoped<IPricingCalculationService, PricingCalculationService>();
+builder.Services.AddScoped<ISkuGenerationService, SkuGenerationService>();
 
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
