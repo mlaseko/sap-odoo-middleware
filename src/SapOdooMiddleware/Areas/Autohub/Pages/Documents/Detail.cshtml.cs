@@ -7,16 +7,21 @@ namespace SapOdooMiddleware.Areas.Autohub.Pages.Documents;
 public class DetailModel : PageModel
 {
     private readonly IStagingPartsDocumentRepository _docs;
-    private readonly IStagingPartsLineRepository _lines;
+    private readonly IPartsReviewRepository _review;
 
-    public DetailModel(IStagingPartsDocumentRepository docs, IStagingPartsLineRepository lines)
+    public DetailModel(IStagingPartsDocumentRepository docs, IPartsReviewRepository review)
     {
         _docs = docs;
-        _lines = lines;
+        _review = review;
     }
 
     public StagingPartsDocumentRow Doc { get; private set; } = default!;
-    public IReadOnlyList<StagingPartsLineRow> Lines { get; private set; } = Array.Empty<StagingPartsLineRow>();
+    public IReadOnlyList<PartsReviewLineRow> Lines { get; private set; } = Array.Empty<PartsReviewLineRow>();
+
+    /// <summary>Review UI shows once extracted (and stays visible, read-only, after review).</summary>
+    public bool ShowReview => Doc.Status is "extracted" or "reviewed";
+    public bool IsReviewed => Doc.Status == "reviewed";
+    public bool IsEditable => Doc.Status == "extracted";
 
     public async Task<IActionResult> OnGetAsync(Guid id, CancellationToken ct)
     {
@@ -24,10 +29,22 @@ public class DetailModel : PageModel
         if (doc is null) return NotFound();
 
         Doc = doc;
-        Lines = await _lines.ListByDocumentAsync(id, ct);
+        Lines = await _review.ListByDocumentAsync(id, ct);
         ViewData["Title"] = doc.InvoiceNumber ?? doc.OriginalFilename;
         return Page();
     }
+
+    public int Count(string status) => Lines.Count(l => l.ReviewStatus == status);
+
+    public static (string Css, string Text) LinePill(string status) => status switch
+    {
+        "matched"       => ("pill-green", "matched"),
+        "created"       => ("pill-green", "created"),
+        "create_new"    => ("pill-blue", "create new"),
+        "skip"          => ("pill-grey", "skip"),
+        "create_failed" => ("pill-red", "create failed"),
+        _               => ("pill-yellow", "pending"),
+    };
 
     public (string Css, string Text) ValidationBadge()
     {

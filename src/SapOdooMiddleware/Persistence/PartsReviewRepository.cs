@@ -26,6 +26,7 @@ public interface IPartsReviewRepository
     Task<int> BulkSetPendingToCreateNewAsync(Guid documentId, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
     Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
+    Task ConfirmEnrichmentAsync(Guid lineId, string confirmedBy, CancellationToken ct);
     Task RecordCreatedAsync(Guid lineId, string itemCode, decimal pl01, decimal pl03, decimal pl05, decimal forexRate, CancellationToken ct);
     Task RecordCreateFailedAsync(Guid lineId, string error, CancellationToken ct);
     Task<IReadOnlyList<PartsProvisioningLine>> ListCreateNewAsync(Guid documentId, CancellationToken ct);
@@ -138,6 +139,20 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         cmd.Parameters.AddWithValue("ba", (object?)borrowedArticle ?? DBNull.Value);
         cmd.Parameters.AddWithValue("bs", (object?)borrowedSupplier ?? DBNull.Value);
         cmd.Parameters.AddWithValue("by", (object?)confirmedBy ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task ConfirmEnrichmentAsync(Guid lineId, string confirmedBy, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "EnrichmentConfirmedBy" = @by, "EnrichmentConfirmedAt" = NOW()
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("by", confirmedBy);
         cmd.Parameters.AddWithValue("id", lineId);
         await cmd.ExecuteNonQueryAsync(ct);
     }

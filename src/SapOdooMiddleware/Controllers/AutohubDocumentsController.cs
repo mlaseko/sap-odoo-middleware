@@ -153,7 +153,7 @@ public class AutohubDocumentsController : ControllerBase
 
         await _review.SetReviewStatusAsync(lineId, "create_new", null, ct);
         if (body?.Confirmed == true)
-            await _review.SetEnrichmentAsync(lineId, line.EnrichmentSource, line.BorrowedFromArticle, null, CurrentUser, ct);
+            await _review.ConfirmEnrichmentAsync(lineId, CurrentUser, ct);
 
         return Ok(await _review.GetByIdAsync(lineId, ct));
     }
