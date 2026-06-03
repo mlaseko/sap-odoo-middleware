@@ -43,4 +43,18 @@ public class SkuGenerationServiceTests
         var svc = new SkuGenerationService(new FakeCounterRepo(1));
         await Assert.ThrowsAsync<ArgumentException>(() => svc.GenerateAsync(prefix, CancellationToken.None));
     }
+
+    [Theory]
+    [InlineData("MIN")]
+    [InlineData("min")]
+    [InlineData("MINI")]
+    [InlineData(" mini ")]
+    public async Task Generate_CanonicalisesMiniToFourCharPrefix(string input)
+    {
+        var repo = new FakeCounterRepo(10001);
+        var svc = new SkuGenerationService(repo);
+        var code = await svc.GenerateAsync(input, CancellationToken.None);
+        Assert.Equal("MINI10001", code);
+        Assert.Equal("MINI", repo.LastPrefix);   // counter keyed on the corrected 4-char prefix
+    }
 }

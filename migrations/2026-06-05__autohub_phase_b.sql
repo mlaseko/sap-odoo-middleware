@@ -52,10 +52,15 @@ FROM (VALUES
     ('MB',  100000::bigint),
     ('LR',  100600::bigint),
     ('FRD', 10000::bigint),
-    ('MIN', 10000::bigint),
+    ('MINI', 10000::bigint),    -- MINI uses the 4-char SAP prefix, not 'MIN'
     ('VOL', 10000::bigint)
 ) AS v("Prefix","CurrentValue")
 WHERE NOT EXISTS (SELECT 1 FROM sku_counters sc WHERE sc."Prefix" = v."Prefix");
+
+-- Correct the historical 3-char 'MIN' prefix to the 4-char 'MINI' (SAP convention). Idempotent:
+-- if an earlier run of this migration already seeded 'MIN', drop it — the 'MINI' row above is the
+-- canonical counter and SapSkuCounterRefreshService will repopulate it from the live SAP MAX.
+DELETE FROM sku_counters WHERE "Prefix" = 'MIN';
 
 -- 4.3 pricing_brand_ratios --------------------------------------------------
 CREATE TABLE IF NOT EXISTS pricing_brand_ratios (
