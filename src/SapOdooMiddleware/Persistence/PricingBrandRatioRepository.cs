@@ -6,15 +6,16 @@ namespace SapOdooMiddleware.Persistence;
 public interface IPricingBrandRatioRepository
 {
     /// <summary>
-    /// PL01→PL03 ratio for the brand band containing <paramref name="pl01Tzs"/>, or null if no
-    /// active band matches (caller falls back to a default).
+    /// Retail→Wholesale ratio (PL05 = Retail × ratio) for the brand band containing the retail
+    /// price <paramref name="retailTzs"/>, or null if no active band matches (caller uses a default).
     /// </summary>
-    Task<decimal?> GetRatioAsync(string brand, decimal pl01Tzs, CancellationToken ct);
+    Task<decimal?> GetRatioAsync(string brand, decimal retailTzs, CancellationToken ct);
 }
 
 /// <summary>
 /// Reads pricing_brand_ratios in parts_catalog. Picks the tightest active band whose
-/// [PriceBandMin, PriceBandMax) contains the PL01 value. Connection per-tenant via ICompanyContext.
+/// [PriceBandMin, PriceBandMax) contains the retail (selling) price. The "Pl01ToPl03" column holds
+/// the retail→wholesale ratio. Connection per-tenant via ICompanyContext.
 /// </summary>
 public sealed class PricingBrandRatioRepository : IPricingBrandRatioRepository
 {
@@ -23,14 +24,14 @@ public sealed class PricingBrandRatioRepository : IPricingBrandRatioRepository
 
     private string ConnectionString => _company.Current.Neon.ConnectionString;
 
-    public async Task<decimal?> GetRatioAsync(string brand, decimal pl01Tzs, CancellationToken ct)
+    public async Task<decimal?> GetRatioAsync(string brand, decimal retailTzs, CancellationToken ct)
     {
         const string sql = """
             SELECT "Pl01ToPl03"
             FROM pricing_brand_ratios
             WHERE "Brand" = @brand
-              AND "PriceBandMin" <= @pl01
-              AND ("PriceBandMax" IS NULL OR "PriceBandMax" > @pl01)
+              AND "PriceBandMin" <= @retail
+              AND ("PriceBandMax" IS NULL OR "PriceBandMax" > @retail)
               AND "EffectiveTo" IS NULL
             ORDER BY "PriceBandMin" DESC
             LIMIT 1;
@@ -39,7 +40,7 @@ public sealed class PricingBrandRatioRepository : IPricingBrandRatioRepository
         await conn.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("brand", brand);
-        cmd.Parameters.AddWithValue("pl01", pl01Tzs);
+        cmd.Parameters.AddWithValue("retail", retailTzs);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is null or DBNull ? null : Convert.ToDecimal(result);
     }
