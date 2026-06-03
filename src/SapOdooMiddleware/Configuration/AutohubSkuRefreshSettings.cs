@@ -17,13 +17,4 @@ public sealed class AutohubSkuRefreshSettings
 
     /// <summary>Interval between background refreshes. Default 24h.</summary>
     public int IntervalHours { get; set; } = 24;
-
-    /// <summary>
-    /// Gap that marks the end of the contiguous ItemCode sequence (filters out test outliers like
-    /// VAG9999 / VAG20000+). Default 100.
-    /// </summary>
-    public int DefaultGapThreshold { get; set; } = 100;
-
-    /// <summary>Per-prefix overrides for the gap threshold (case-insensitive).</summary>
-    public Dictionary<string, int> GapThresholdByPrefix { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }

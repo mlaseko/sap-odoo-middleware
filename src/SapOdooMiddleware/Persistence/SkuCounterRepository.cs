@@ -18,8 +18,9 @@ public interface ISkuCounterRepository
 /// formats prefix + value (e.g. "LR" + 100601 → "LR100601"). Connection per-tenant via ICompanyContext.
 ///
 /// Neon is the hot allocation path; these counters are NOT manually seeded — SapSkuCounterRefreshService
-/// bumps them up to the live SAP MAX (max(neon, sap), never backwards) on startup, daily, and on demand
-/// via POST /api/admin/sku-counters/refresh.
+/// bumps them up to the live SAP MAX (max(neon, sap), never backwards; capped at the per-prefix
+/// "MaxAllowed" ceiling that excludes parked test items) on startup, daily, and on demand via
+/// POST /api/admin/sku-counters/refresh.
 /// </summary>
 public sealed class SkuCounterRepository : ISkuCounterRepository
 {
