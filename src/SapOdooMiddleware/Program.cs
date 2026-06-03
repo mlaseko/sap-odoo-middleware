@@ -4,6 +4,7 @@ using Microsoft.OpenApi.Models;
 using MolasLubes.Infrastructure.Integrations.LiquiMoly;
 using Serilog;
 using SapOdooMiddleware.Configuration;
+using SapOdooMiddleware.Diagnostics;
 using SapOdooMiddleware.Filters;
 using SapOdooMiddleware.Ingestion;
 using SapOdooMiddleware.Integrations.Classifier;
@@ -170,6 +171,11 @@ builder.Services.AddHttpClient<IEnrichmentClient, HttpEnrichmentClient>((sp, htt
     var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
     http.Timeout = TimeSpan.FromSeconds(vs.TimeoutSeconds);
 });
+// Startup schema probe: validates the auto-match SQL shapes + status constraints against the live
+// DBs and idles the worker on a confirmed mismatch. Registered BEFORE the worker so its StartAsync
+// runs first and the guard is set before the first poll.
+builder.Services.AddSingleton<SchemaGuard>();
+builder.Services.AddHostedService<SchemaProbeService>();
 builder.Services.AddHostedService<AutoMatchWorker>();
 
 // --- Autohub Phase B: review + SAP item provisioning ---
@@ -182,7 +188,12 @@ builder.Services.AddScoped<PartsItemCreationService>();
 builder.Services.AddRazorPages();
 
 // --- Controllers ---
-builder.Services.AddControllers()
+builder.Services.AddControllers(options =>
+    {
+        // Any unhandled exception from an /api/* action returns a JSON error envelope (never a raw
+        // exception string), so the browser UI always gets parseable JSON.
+        options.Filters.Add<ApiExceptionFilter>();
+    })
     .AddJsonOptions(options =>
     {
         options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower;

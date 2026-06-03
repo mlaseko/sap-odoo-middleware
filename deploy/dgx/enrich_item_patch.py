@@ -85,6 +85,10 @@ def _oem_bridge_lookup(oem_numbers):
 
 def _ah_package_from_germax(row, clean_oems, noise):
     return {
+        # neon_oitm_id is REQUIRED by the middleware: after the SAP create, NeonBridgeService runs
+        # UPDATE oitm SET item_code=<sap> WHERE id=neon_oitm_id. Enrichment must have created/found
+        # this oitm row (item_code NULL) and return its id here.
+        "neon_oitm_id": row.get("id"),
         "enrichment_source": "germax_scraped",
         "borrowed_from": None,
         "confirmation_required": True,
@@ -152,6 +156,7 @@ async def enrich_item(request: Request):
             data = _fetch_tecdoc_full(article, brand)            # TecDoc-direct (auto-accept)
             data.setdefault("filtered_oems", clean)
             return JSONResponse({
+                "neon_oitm_id": data.get("neon_oitm_id"),
                 "enrichment_source": "tecdoc_direct", "borrowed_from": None,
                 "confirmation_required": False, "item_data": data, "noise_filtered_tokens": noise,
             })
@@ -162,6 +167,7 @@ async def enrich_item(request: Request):
             data = _fetch_tecdoc_full(borrowed["article_number"], borrowed.get("supplier_name"))
             data.setdefault("filtered_oems", clean)
             return JSONResponse({
+                "neon_oitm_id": data.get("neon_oitm_id"),
                 "enrichment_source": "borrowed_oem_bridge", "borrowed_from": borrowed,
                 "confirmation_required": True, "item_data": data, "noise_filtered_tokens": noise,
             })

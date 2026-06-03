@@ -14,6 +14,8 @@ public sealed record EnrichmentRequest(
 
 public sealed record EnrichmentResponse
 {
+    /// <summary>parts_catalog oitm.id of the pre-enriched row — the only id NeonBridge needs to link.</summary>
+    [JsonPropertyName("neon_oitm_id")]          public int?               NeonOitmId          { get; init; }
     [JsonPropertyName("enrichment_source")]     public string?            EnrichmentSource    { get; init; }
     [JsonPropertyName("borrowed_from")]         public BorrowedFrom?      BorrowedFrom        { get; init; }
     [JsonPropertyName("confirmation_required")] public bool               ConfirmationRequired{ get; init; }
