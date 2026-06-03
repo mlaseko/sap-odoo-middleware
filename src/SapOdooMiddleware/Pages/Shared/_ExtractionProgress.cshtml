@@ -6,18 +6,31 @@
 *@
 <div id="progress-card" class="progress-card" style="display:none">
     <div class="progress-header">
-        <span class="progress-label">Extracting…</span>
-        <span class="progress-page-text">Page <span id="pp-current">0</span> of <span id="pp-total">0</span></span>
+        <span class="progress-label" id="pp-label">Extracting…</span>
+        <span class="progress-page-text" id="pp-pagetext">Preparing…</span>
     </div>
     <div class="progress-bar-track">
         <div class="progress-bar-fill" id="pp-fill" style="width: 0%"></div>
     </div>
     <div class="progress-meta">
-        <span id="pp-percent">0%</span>
+        <span id="pp-percent"></span>
         <span id="pp-elapsed"></span>
         <span id="pp-eta"></span>
     </div>
 </div>
+
+<style>
+    /* Indeterminate "warming up" sweep, shown while no page has completed yet (PagesProcessed == 0). */
+    .progress-bar-fill.indeterminate {
+        width: 35% !important;
+        background-image: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent);
+        animation: pp-indeterminate 1.2s ease-in-out infinite;
+    }
+    @@keyframes pp-indeterminate {
+        0%   { transform: translateX(-120%); }
+        100% { transform: translateX(320%); }
+    }
+</style>
 
 <script>
 (function () {
@@ -29,8 +42,8 @@
 
     const card = document.getElementById('progress-card');
     const fill = document.getElementById('pp-fill');
-    const current = document.getElementById('pp-current');
-    const total = document.getElementById('pp-total');
+    const label = document.getElementById('pp-label');
+    const pageText = document.getElementById('pp-pagetext');
     const percent = document.getElementById('pp-percent');
     const elapsed = document.getElementById('pp-elapsed');
     const eta = document.getElementById('pp-eta');
@@ -43,6 +56,7 @@
     let pollTimer = null;
     let tickTimer = null;
     let snap = null;
+    let maxPct = 0;   // monotonic guard: the bar never moves backwards within a session
 
     function fmtSec(s) {
         if (s == null || !isFinite(s) || s < 0) return '';
@@ -59,20 +73,47 @@
 
     function render() {
         if (!snap) return;
-        const { pageCount, pagesProcessed, expectedSec } = snap;
+        const { pageCount, pagesProcessed, expectedSec, status } = snap;
         const elapsedSec = pageElapsedNow();
+
+        // Until the first page actually completes, per-page progress is unreliable (a cold DGX may
+        // retry page 1, cycling CurrentPageStartedAt) — so show an honest indeterminate state with
+        // a live activity message instead of a number that flickers 0 → 2% → 0.
+        if (pagesProcessed === 0) {
+            fill.classList.add('indeterminate');
+            percent.textContent = '';
+            eta.textContent = '';
+            if (status === 'uploaded') {
+                label.textContent = 'Queued…';
+                pageText.textContent = 'Waiting in the extraction queue';
+                elapsed.textContent = '';
+            } else if (elapsedSec != null) {
+                label.textContent = 'Extracting…';
+                pageText.textContent = pageCount > 0 ? ('Page 1 of ' + pageCount) : 'Page 1';
+                elapsed.textContent = 'page time: ' + fmtSec(elapsedSec);
+            } else {
+                label.textContent = 'Starting…';
+                pageText.textContent = 'Waiting for the extractor to start';
+                elapsed.textContent = '';
+            }
+            return;
+        }
+
+        fill.classList.remove('indeterminate');
 
         let frac = 0;
         if (elapsedSec != null && expectedSec > 0) {
             frac = Math.min(elapsedSec / expectedSec, INTRA_PAGE_CAP);
         }
         const done = pageCount > 0 ? (pagesProcessed + frac) / pageCount : 0;
-        const pct = Math.max(0, Math.min(100, done * 100));
+        let pct = Math.max(0, Math.min(100, done * 100));
+        pct = Math.max(pct, maxPct);   // never go backwards
+        maxPct = pct;
 
+        label.textContent = 'Extracting…';
         fill.style.width = pct.toFixed(1) + '%';
         percent.textContent = Math.floor(pct) + '%';
-        current.textContent = pagesProcessed;
-        total.textContent = pageCount;
+        pageText.textContent = 'Page ' + pagesProcessed + ' of ' + pageCount;
 
         elapsed.textContent = elapsedSec != null ? 'page time: ' + fmtSec(elapsedSec) : '';
 
@@ -102,12 +143,13 @@
                 }
             }
 
-            snap = { pageCount, pagesProcessed, expectedSec, pageElapsedAtSnapSec, localAnchorMs: Date.now() };
+            snap = { status: s.status, pageCount, pagesProcessed, expectedSec, pageElapsedAtSnapSec, localAnchorMs: Date.now() };
             render();
 
             if (!ACTIVE_STATUSES.includes(s.status)) {
                 clearInterval(pollTimer);
                 clearInterval(tickTimer);
+                fill.classList.remove('indeterminate');
                 fill.style.width = '100%';
                 percent.textContent = '100%';
                 setTimeout(() => location.reload(), 250);
