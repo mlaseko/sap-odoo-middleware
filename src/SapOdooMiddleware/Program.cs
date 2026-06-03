@@ -151,14 +151,21 @@ builder.Services.AddHostedService<PartsExtractionWorker>();
 
 // --- Autohub Phase B foundation: pricing/forex/sku tables + pure services (no hosted service) ---
 builder.Services.Configure<AutohubPricingSettings>(builder.Configuration.GetSection(AutohubPricingSettings.SectionName));
+builder.Services.Configure<AutohubSkuRefreshSettings>(builder.Configuration.GetSection(AutohubSkuRefreshSettings.SectionName));
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<IForexRateRepository, ForexRateRepository>();
 builder.Services.AddScoped<ISkuCounterRepository, SkuCounterRepository>();
 builder.Services.AddScoped<IPricingBrandRatioRepository, PricingBrandRatioRepository>();
+builder.Services.AddScoped<IPricingRoundingRuleRepository, PricingRoundingRuleRepository>();
 builder.Services.AddSingleton<IOemFilterService, OemFilterService>();          // pure logic, no DB
 builder.Services.AddScoped<IForexConversionService, ForexConversionService>();
 builder.Services.AddScoped<IPricingCalculationService, PricingCalculationService>();
 builder.Services.AddScoped<ISkuGenerationService, SkuGenerationService>();
+
+// SKU counter auto-refresh from SAP (reads the Autohub tenant config directly, so it's a singleton
+// usable by both the daily background job and the on-demand /api/admin/sku-counters/refresh endpoint).
+builder.Services.AddSingleton<ISapSkuCounterRefreshService, SapSkuCounterRefreshService>();
+builder.Services.AddHostedService<SkuCounterRefreshHostedService>();
 
 // --- Autohub Phase B: auto-match + enrichment ---
 builder.Services.AddScoped<IOitmMatchRepository, OitmMatchRepository>();

@@ -16,6 +16,10 @@ public interface ISkuCounterRepository
 /// Atomic per-prefix ItemCode counter in parts_catalog. Uses <c>UPDATE ... RETURNING</c> so the
 /// increment-and-read is a single atomic statement (no SELECT ... FOR UPDATE race). The caller
 /// formats prefix + value (e.g. "LR" + 100601 → "LR100601"). Connection per-tenant via ICompanyContext.
+///
+/// Neon is the hot allocation path; these counters are NOT manually seeded — SapSkuCounterRefreshService
+/// bumps them up to the live SAP MAX (max(neon, sap), never backwards) on startup, daily, and on demand
+/// via POST /api/admin/sku-counters/refresh.
 /// </summary>
 public sealed class SkuCounterRepository : ISkuCounterRepository
 {
