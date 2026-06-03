@@ -1,4 +1,5 @@
 using SapOdooMiddleware.Configuration;
+using SapOdooMiddleware.Diagnostics;
 using SapOdooMiddleware.Persistence;
 
 namespace SapOdooMiddleware.Services.Autohub;
@@ -16,11 +17,14 @@ public sealed class AutoMatchWorker : BackgroundService
     private const int BatchSize = 200;
 
     private readonly IServiceProvider _sp;
+    private readonly SchemaGuard _guard;
     private readonly ILogger<AutoMatchWorker> _logger;
+    private bool _loggedDisabled;
 
-    public AutoMatchWorker(IServiceProvider sp, ILogger<AutoMatchWorker> logger)
+    public AutoMatchWorker(IServiceProvider sp, SchemaGuard guard, ILogger<AutoMatchWorker> logger)
     {
         _sp = sp;
+        _guard = guard;
         _logger = logger;
     }
 
@@ -31,6 +35,18 @@ public sealed class AutoMatchWorker : BackgroundService
 
         do
         {
+            // Refuse to run against a drifted schema (set by the startup probe) — loud once, not
+            // an exception every tick.
+            if (!_guard.AutohubMatchOk)
+            {
+                if (!_loggedDisabled)
+                {
+                    _logger.LogCritical("[FTL] AutoMatchWorker idle: Autohub schema probe failed. Fix the parts_catalog schema and restart the service.");
+                    _loggedDisabled = true;
+                }
+                continue;
+            }
+
             try
             {
                 await RunPassAsync(stoppingToken);

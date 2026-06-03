@@ -123,17 +123,26 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             return await Fail(line.Id, $"SAP item write failed: {ex.Message}", ct);
         }
 
-        // Bridge to the Neon mirror so Tier-1/Tier-2 auto-match finds this item next time.
-        // Best-effort: the item already exists in SAP, so a bridge failure must NOT mark the line
-        // failed (that would mint a duplicate on retry) — log it; re-publishing can heal the mirror.
-        try
+        // Bridge: stamp the SAP ItemCode onto the pre-enriched parts_catalog row so auto-match finds
+        // it. Best-effort: the item already exists in SAP, so a bridge failure must NOT mark the line
+        // failed (that would mint a duplicate on retry) — log it; an admin reconcile can re-link by id.
+        if (enr.NeonOitmId is { } neonOitmId)
         {
-            await _bridge.PublishAsync(itemCode, article!, filtered, sapReq.Description, line.Brand, ct);
+            try
+            {
+                await _bridge.LinkAsync(neonOitmId, itemCode, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "SAP item {ItemCode} created but Neon bridge link (oitm id {OitmId}) failed; reconcile required.",
+                    itemCode, neonOitmId);
+            }
         }
-        catch (Exception ex)
+        else
         {
-            _logger.LogError(ex,
-                "SAP item {ItemCode} created but Neon bridge failed; auto-match won't see it until re-published.",
+            _logger.LogWarning(
+                "SAP item {ItemCode} created but enrichment returned no neon_oitm_id; cannot link the Neon mirror.",
                 itemCode);
         }
 
