@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Ingestion;
 using SapOdooMiddleware.Persistence;
@@ -134,14 +135,33 @@ public class AutohubDocumentsController : ControllerBase
         }
         catch (Exception ex)
         {
+            // Hard transport failure — never silently drop the line; flag it for the operator (Q8).
+            await _review.RecordEnrichmentResultAsync(lineId, null, null, null, null, false, "failed", "dgx_unreachable", null, ct);
+            await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
             return StatusCode(502, new { error = "Enrichment service failed.", detail = ex.Message });
         }
 
-        // Record what was found (not yet confirmed); the operator confirms via create-new.
-        await _review.SetEnrichmentAsync(lineId, enr.EnrichmentSource,
-            enr.BorrowedFrom?.ArticleNumber, enr.BorrowedFrom?.SupplierName, confirmedBy: null, ct);
+        // Persist the full result (source, borrowed, neon_oitm_id, payload) so the modal, review page
+        // and bulk-create can read it without re-calling DGX. Not yet confirmed — operator confirms.
+        var status = enr.Status ?? (enr.ItemData is null ? "partial" : "success");
+        await _review.RecordEnrichmentResultAsync(lineId, enr.SourceLabel,
+            enr.BorrowedFrom?.ArticleNumber, enr.BorrowedFrom?.SupplierName, enr.NeonOitmId,
+            enr.ConfirmationRequired, status, enr.Error?.Code, JsonSerializer.Serialize(enr), ct);
+
+        // No usable enrichment (hard failure or partial/unmatched) → needs_manual; never auto-dropped (Q8).
+        if (enr.IsFailed || enr.ItemData is null)
+            await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
 
         return Ok(enr);
+    }
+
+    /// <summary>Reject a (borrowed) enrichment: move the line to 'needs_manual' so the operator can match-by-search (Q9).</summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/reject")]
+    public async Task<IActionResult> RejectLine(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
+        return Ok(await _review.GetByIdAsync(lineId, ct));
     }
 
     /// <summary>Mark a line 'create_new'. <c>confirmed=true</c> stamps the enrichment confirmation.</summary>
@@ -219,7 +239,8 @@ public class AutohubDocumentsController : ControllerBase
             return Conflict(new { error = $"Document is '{doc.Status}', not 'extracted'." });
 
         var counts = await _review.GetStatusCountsAsync(documentId, ct);
-        var blocking = counts.GetValueOrDefault("pending") + counts.GetValueOrDefault("create_failed") + counts.GetValueOrDefault("create_new");
+        var blocking = counts.GetValueOrDefault("pending") + counts.GetValueOrDefault("create_failed")
+            + counts.GetValueOrDefault("create_new") + counts.GetValueOrDefault("needs_manual");
         if (blocking > 0)
             return Conflict(new { error = "All lines must be matched, created, or skipped before completing review.", counts });
 
@@ -237,7 +258,8 @@ public class AutohubDocumentsController : ControllerBase
         var canComplete = doc.Status == "extracted"
             && counts.GetValueOrDefault("pending") == 0
             && counts.GetValueOrDefault("create_failed") == 0
-            && counts.GetValueOrDefault("create_new") == 0;
+            && counts.GetValueOrDefault("create_new") == 0
+            && counts.GetValueOrDefault("needs_manual") == 0;
 
         return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, canComplete, status = doc.Status });
     }

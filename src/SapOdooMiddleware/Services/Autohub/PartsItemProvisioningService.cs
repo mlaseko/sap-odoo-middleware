@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Services;
@@ -48,6 +50,12 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         _logger = logger;
     }
 
+    private static readonly JsonSerializerOptions EnrichmentJson = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,
+    };
+
     public async Task<PartsProvisioningOutcome> ProvisionAsync(PartsProvisioningLine line, string? currency, CancellationToken ct)
     {
         var article = line.SupplierArticleNumber?.Trim();
@@ -60,16 +68,33 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
 
         var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
 
-        // Enrichment (idempotent re-fetch — the operator already confirmed any borrowed data during review).
+        // Prefer the enrichment persisted at review time (what the operator saw/confirmed); only
+        // re-call DGX if the line was never enriched (e.g. created straight from a quick match).
+        // The re-fetch is idempotent — DGX returns the same oitm row for the same article+brand.
         EnrichmentResponse enr;
-        try
+        if (!string.IsNullOrWhiteSpace(line.EnrichmentPayloadJson))
         {
-            enr = await _enrichment.EnrichLineAsync(
-                new EnrichmentInput(article, filtered, line.Brand, line.Description, null), ct);
+            try
+            {
+                enr = JsonSerializer.Deserialize<EnrichmentResponse>(line.EnrichmentPayloadJson, EnrichmentJson)
+                      ?? throw new InvalidOperationException("empty payload");
+            }
+            catch (Exception ex)
+            {
+                return await Fail(line.Id, $"Stored enrichment could not be read: {ex.Message}", ct);
+            }
         }
-        catch (Exception ex)
+        else
         {
-            return await Fail(line.Id, $"Enrichment failed: {ex.Message}", ct);
+            try
+            {
+                enr = await _enrichment.EnrichLineAsync(
+                    new EnrichmentInput(article, filtered, line.Brand, line.Description, null), ct);
+            }
+            catch (Exception ex)
+            {
+                return await Fail(line.Id, $"Enrichment failed: {ex.Message}", ct);
+            }
         }
 
         if (enr.ItemData is null)

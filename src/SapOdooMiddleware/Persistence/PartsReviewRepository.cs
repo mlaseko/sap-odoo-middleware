@@ -13,10 +13,15 @@ public sealed record PartsReviewLineRow(
     bool IsPromotional, string ReviewStatus, string? MatchedItemCode, string? GeneratedItemCode,
     string? EnrichmentSource, string? BorrowedFromArticle, DateTime? EnrichmentConfirmedAt, string? CreateErrorMessage);
 
-/// <summary>A 'create_new' line reduced to what provisioning needs.</summary>
+/// <summary>A 'create_new' line reduced to what provisioning needs (incl. the persisted enrichment).</summary>
 public sealed record PartsProvisioningLine(
     Guid Id, string? SupplierArticleNumber, List<string> OemNumbers, string? Brand,
-    string? Description, decimal? UnitPriceForeign, bool EnrichmentConfirmed);
+    string? Description, decimal? UnitPriceForeign, bool EnrichmentConfirmed,
+    long? NeonOitmId, string? EnrichmentPayloadJson);
+
+/// <summary>A line awaiting background enrichment.</summary>
+public sealed record EnrichmentCandidate(
+    Guid Id, Guid DocumentId, string? SupplierArticleNumber, List<string> OemNumbers, string? Brand, string? Description);
 
 public interface IPartsReviewRepository
 {
@@ -26,10 +31,18 @@ public interface IPartsReviewRepository
     Task<int> BulkSetPendingToCreateNewAsync(Guid documentId, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
     Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
+
+    /// <summary>Persist the full enrichment outcome (source, borrowed, neon_oitm_id, status, payload) on the line.</summary>
+    Task RecordEnrichmentResultAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier,
+        long? neonOitmId, bool confirmationRequired, string status, string? errorCode, string? payloadJson, CancellationToken ct);
+
     Task ConfirmEnrichmentAsync(Guid lineId, string confirmedBy, CancellationToken ct);
     Task RecordCreatedAsync(Guid lineId, string itemCode, decimal pl01, decimal pl03, decimal pl05, decimal forexRate, CancellationToken ct);
     Task RecordCreateFailedAsync(Guid lineId, string error, CancellationToken ct);
     Task<IReadOnlyList<PartsProvisioningLine>> ListCreateNewAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>Pending, non-promotional, not-yet-enriched lines on extracted documents (background worker).</summary>
+    Task<IReadOnlyList<EnrichmentCandidate>> GetLinesNeedingEnrichmentAsync(int limit, CancellationToken ct);
 }
 
 /// <summary>
@@ -143,6 +156,70 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task RecordEnrichmentResultAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier,
+        long? neonOitmId, bool confirmationRequired, string status, string? errorCode, string? payloadJson, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "EnrichmentSource" = @source,
+                "BorrowedFromArticle" = @ba,
+                "BorrowedFromSupplier" = @bs,
+                "NeonOitmId" = @oitm,
+                "EnrichmentConfirmationRequired" = @confreq,
+                "EnrichmentStatus" = @status,
+                "EnrichmentErrorCode" = @err,
+                "EnrichedAt" = NOW(),
+                "EnrichmentPayloadJson" = @payload
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("source", (object?)source ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("ba", (object?)borrowedArticle ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("bs", (object?)borrowedSupplier ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("oitm", (object?)neonOitmId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("confreq", confirmationRequired);
+        cmd.Parameters.AddWithValue("status", status);
+        cmd.Parameters.AddWithValue("err", (object?)errorCode ?? DBNull.Value);
+        cmd.Parameters.Add(new NpgsqlParameter("payload", NpgsqlDbType.Jsonb)
+        {
+            Value = (object?)payloadJson ?? DBNull.Value
+        });
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<EnrichmentCandidate>> GetLinesNeedingEnrichmentAsync(int limit, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT l."Id", l."DocumentId", l."SupplierArticleNumber", l."OemNumbers", l."Brand", l."Description"
+            FROM public."staging_document_line" l
+            JOIN public."staging_document" d ON d."Id" = l."DocumentId"
+            WHERE d."Status" = 'extracted'
+              AND l."ReviewStatus" = 'pending'
+              AND l."EnrichmentSource" IS NULL
+              AND l."IsPromotional" = false
+            ORDER BY l."DocumentId", l."LineNumber"
+            LIMIT @limit;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("limit", limit);
+        var list = new List<EnrichmentCandidate>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            list.Add(new EnrichmentCandidate(
+                Id:                    r.GetGuid(0),
+                DocumentId:            r.GetGuid(1),
+                SupplierArticleNumber: r.IsDBNull(2) ? null : r.GetString(2),
+                OemNumbers:            ParseOems(r, 3),
+                Brand:                 r.IsDBNull(4) ? null : r.GetString(4),
+                Description:           r.IsDBNull(5) ? null : r.GetString(5)));
+        }
+        return list;
+    }
+
     public async Task ConfirmEnrichmentAsync(Guid lineId, string confirmedBy, CancellationToken ct)
     {
         const string sql = """
@@ -196,7 +273,8 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
     {
         const string sql = """
             SELECT "Id","SupplierArticleNumber","OemNumbers","Brand","Description","UnitPriceForeign",
-                   ("EnrichmentConfirmedAt" IS NOT NULL) AS confirmed
+                   ("EnrichmentConfirmedAt" IS NOT NULL) AS confirmed,
+                   "NeonOitmId", "EnrichmentPayloadJson"
             FROM public."staging_document_line"
             WHERE "DocumentId" = @doc AND "ReviewStatus" = 'create_new'
             ORDER BY "LineNumber";
@@ -215,7 +293,9 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
                 Brand:                 r.IsDBNull(3) ? null : r.GetString(3),
                 Description:           r.IsDBNull(4) ? null : r.GetString(4),
                 UnitPriceForeign:      r.IsDBNull(5) ? null : r.GetDecimal(5),
-                EnrichmentConfirmed:   !r.IsDBNull(6) && r.GetBoolean(6)));
+                EnrichmentConfirmed:   !r.IsDBNull(6) && r.GetBoolean(6),
+                NeonOitmId:            r.IsDBNull(7) ? null : r.GetInt64(7),
+                EnrichmentPayloadJson: r.IsDBNull(8) ? null : r.GetString(8)));
         }
         return list;
     }

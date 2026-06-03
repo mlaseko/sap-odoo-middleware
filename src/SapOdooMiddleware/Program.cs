@@ -171,6 +171,7 @@ builder.Services.AddHostedService<SkuCounterRefreshHostedService>();
 builder.Services.AddScoped<IOitmMatchRepository, OitmMatchRepository>();
 builder.Services.AddScoped<IPartsLineMatchRepository, PartsLineMatchRepository>();
 builder.Services.AddScoped<IAutoMatchService, AutoMatchService>();
+builder.Services.Configure<EnrichmentSettings>(builder.Configuration.GetSection(EnrichmentSettings.SectionName));
 builder.Services.AddScoped<IEnrichmentService, EnrichmentService>();
 builder.Services.AddHttpClient<IEnrichmentClient, HttpEnrichmentClient>((sp, http) =>
 {
@@ -178,6 +179,8 @@ builder.Services.AddHttpClient<IEnrichmentClient, HttpEnrichmentClient>((sp, htt
     var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
     http.Timeout = TimeSpan.FromSeconds(vs.TimeoutSeconds);
 });
+// Background enricher (Q1): auto-enriches pending lines after extraction so review loads ready.
+builder.Services.AddHostedService<EnrichmentBackgroundWorker>();
 // Startup schema probe: validates the auto-match SQL shapes + status constraints against the live
 // DBs and idles the worker on a confirmed mismatch. Registered BEFORE the worker so its StartAsync
 // runs first and the guard is set before the first poll.
