@@ -127,6 +127,10 @@ internal sealed class SapB1DiApiServiceStub : ISapB1Service
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
+    public Task CreateAutohubItemAsync(SapAutohubItemRequest request) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
     public Task UpdateOdooProductIdAsync(string itemCode, string odooProductId) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");

@@ -170,6 +170,14 @@ public interface ISapB1Service
     Task CreateLubesItemAsync(SapLubesItemRequest request);
 
     /// <summary>
+    /// Creates a spare-parts item master (OITM) in SAP B1 (Molas Autohub) via DI API:
+    /// item type I, Inventory/Sales/Purchase = Y, UoM group "Packing Units", VAT groups O1/I1,
+    /// TZS prices on price lists 1/3/5 (Cost/Retail/Wholesale), and the U_Article_No / U_Description /
+    /// U_FitForAuto / U_ImageUrl UDFs. OEM cross-references are NOT written to SAP (kept in Neon).
+    /// </summary>
+    Task CreateAutohubItemAsync(SapAutohubItemRequest request);
+
+    /// <summary>
     /// Stamps the Odoo product id onto the SAP item's <c>U_Odoo_Product_ID</c> UDF.
     /// Used by the backref worker once the Neon → Odoo automation has created the product.
     /// </summary>

@@ -12,6 +12,7 @@ using SapOdooMiddleware.Middleware;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
+using SapOdooMiddleware.Services.Autohub;
 using SapOdooMiddleware.Services.Vision;
 using SapOdooMiddleware.Workers;
 
@@ -146,6 +147,36 @@ builder.Services.AddHttpClient<IInvoicePartsExtractor, HttpPartsInvoiceExtractor
 });
 builder.Services.AddSingleton<IPartsExtractionQueue, PartsExtractionQueue>();
 builder.Services.AddHostedService<PartsExtractionWorker>();
+
+// --- Autohub Phase B foundation: pricing/forex/sku tables + pure services (no hosted service) ---
+builder.Services.Configure<AutohubPricingSettings>(builder.Configuration.GetSection(AutohubPricingSettings.SectionName));
+builder.Services.AddMemoryCache();
+builder.Services.AddScoped<IForexRateRepository, ForexRateRepository>();
+builder.Services.AddScoped<ISkuCounterRepository, SkuCounterRepository>();
+builder.Services.AddScoped<IPricingBrandRatioRepository, PricingBrandRatioRepository>();
+builder.Services.AddSingleton<IOemFilterService, OemFilterService>();          // pure logic, no DB
+builder.Services.AddScoped<IForexConversionService, ForexConversionService>();
+builder.Services.AddScoped<IPricingCalculationService, PricingCalculationService>();
+builder.Services.AddScoped<ISkuGenerationService, SkuGenerationService>();
+
+// --- Autohub Phase B: auto-match + enrichment ---
+builder.Services.AddScoped<IOitmMatchRepository, OitmMatchRepository>();
+builder.Services.AddScoped<IPartsLineMatchRepository, PartsLineMatchRepository>();
+builder.Services.AddScoped<IAutoMatchService, AutoMatchService>();
+builder.Services.AddScoped<IEnrichmentService, EnrichmentService>();
+builder.Services.AddHttpClient<IEnrichmentClient, HttpEnrichmentClient>((sp, http) =>
+{
+    // Enrichment can trigger a Germax scrape on a cold item — allow the full vision timeout.
+    var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
+    http.Timeout = TimeSpan.FromSeconds(vs.TimeoutSeconds);
+});
+builder.Services.AddHostedService<AutoMatchWorker>();
+
+// --- Autohub Phase B: review + SAP item provisioning ---
+builder.Services.AddScoped<IPartsReviewRepository, PartsReviewRepository>();
+builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
+builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();
+builder.Services.AddScoped<PartsItemCreationService>();
 
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
