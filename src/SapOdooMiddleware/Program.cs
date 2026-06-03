@@ -172,6 +172,12 @@ builder.Services.AddHttpClient<IEnrichmentClient, HttpEnrichmentClient>((sp, htt
 });
 builder.Services.AddHostedService<AutoMatchWorker>();
 
+// --- Autohub Phase B: review + SAP item provisioning ---
+builder.Services.AddScoped<IPartsReviewRepository, PartsReviewRepository>();
+builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
+builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();
+builder.Services.AddScoped<PartsItemCreationService>();
+
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
 

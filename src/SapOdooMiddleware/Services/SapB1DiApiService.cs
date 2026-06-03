@@ -3934,6 +3934,73 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    public async Task CreateAutohubItemAsync(SapAutohubItemRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                items.ItemCode       = request.ItemCode;
+                items.ItemName       = Truncate(request.ItemName, 200);
+                items.ItemType       = ItemTypeEnum.itItems;
+                items.InventoryItem  = BoYesNoEnum.tYES;
+                items.SalesItem      = BoYesNoEnum.tYES;
+                items.PurchaseItem   = BoYesNoEnum.tYES;
+                items.ItemsGroupCode = request.ItemsGroupCode;
+
+                // UoM group "Packing Units" (entry 1), same as Lubes.
+                items.UoMGroupEntry  = 1;
+
+                items.SalesVATGroup    = "O1";
+                items.PurchaseVATGroup = "I1";
+
+                // Autohub price lists: PL01=Cost (idx 0), PL03=Retail (idx 2), PL05=Wholesale (idx 4).
+                items.PriceList.SetCurrentLine(0);
+                items.PriceList.Price    = (double)request.CostPrice;
+                items.PriceList.Currency = "TZS";
+
+                items.PriceList.SetCurrentLine(2);
+                items.PriceList.Price    = (double)request.RetailPrice;
+                items.PriceList.Currency = "TZS";
+
+                items.PriceList.SetCurrentLine(4);
+                items.PriceList.Price    = (double)request.WholesalePrice;
+                items.PriceList.Currency = "TZS";
+
+                // UDFs (confirmed to exist on OITM). U_Article_No is also the Tier-2 match key.
+                var ctx = $"item {request.ItemCode}";
+                TrySetUserField(items.UserFields, "U_Article_No",  request.ArticleNumber ?? string.Empty, ctx);
+                TrySetUserField(items.UserFields, "U_Description", request.Description ?? string.Empty, ctx);
+                TrySetUserField(items.UserFields, "U_FitForAuto",  request.FitForAuto ?? string.Empty, ctx);
+                TrySetUserField(items.UserFields, "U_ImageUrl",    request.ImageUrl ?? string.Empty, ctx);
+
+                int result = items.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Add failed for {request.ItemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP Autohub item created: ItemCode={ItemCode}, ItemName={ItemName}, Group={Group}",
+                    request.ItemCode, items.ItemName, request.ItemsGroupCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task UpdateOdooProductIdAsync(string itemCode, string odooProductId)
     {
         await _lock.WaitAsync();

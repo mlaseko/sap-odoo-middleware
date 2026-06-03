@@ -56,6 +56,9 @@ public interface IStagingPartsDocumentRepository
     Task SetTotalPagesAsync(Guid id, int pageCount, CancellationToken ct);
     Task MarkPageStartedAsync(Guid id, int pageNo, CancellationToken ct);
     Task RecordPageCompletedAsync(Guid id, int pageNo, double durationSec, CancellationToken ct);
+
+    /// <summary>Phase B: transition the document to 'reviewed' and stamp the operator/time.</summary>
+    Task MarkReviewedAsync(Guid id, string reviewedBy, CancellationToken ct);
 }
 
 public class StagingPartsDocumentRepository : IStagingPartsDocumentRepository
@@ -220,6 +223,20 @@ public class StagingPartsDocumentRepository : IStagingPartsDocumentRepository
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("pageNo", pageNo);
         cmd.Parameters.AddWithValue("durationSec", (decimal)durationSec);
+        cmd.Parameters.AddWithValue("id", id);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task MarkReviewedAsync(Guid id, string reviewedBy, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document"
+            SET "Status" = 'reviewed', "ReviewedBy" = @by, "ReviewedAt" = NOW()
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("by", reviewedBy);
         cmd.Parameters.AddWithValue("id", id);
         await cmd.ExecuteNonQueryAsync(ct);
     }

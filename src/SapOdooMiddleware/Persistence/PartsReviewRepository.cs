@@ -1,0 +1,237 @@
+using System.Text.Json;
+using Npgsql;
+using NpgsqlTypes;
+using SapOdooMiddleware.Configuration;
+
+namespace SapOdooMiddleware.Persistence;
+
+/// <summary>Rich staging line for the Phase B review UI (base extraction fields + review/audit state).</summary>
+public sealed record PartsReviewLineRow(
+    Guid Id, Guid DocumentId, int LineNumber, int? PageNumber,
+    string? SupplierArticleNumber, List<string> OemNumbers, string? Description, string? Brand,
+    decimal? Quantity, string? Unit, decimal? UnitPriceForeign, decimal? DiscountPct, decimal? LineTotalForeign,
+    bool IsPromotional, string ReviewStatus, string? MatchedItemCode, string? GeneratedItemCode,
+    string? EnrichmentSource, string? BorrowedFromArticle, DateTime? EnrichmentConfirmedAt, string? CreateErrorMessage);
+
+/// <summary>A 'create_new' line reduced to what provisioning needs.</summary>
+public sealed record PartsProvisioningLine(
+    Guid Id, string? SupplierArticleNumber, List<string> OemNumbers, string? Brand,
+    string? Description, decimal? UnitPriceForeign, bool EnrichmentConfirmed);
+
+public interface IPartsReviewRepository
+{
+    Task<IReadOnlyList<PartsReviewLineRow>> ListByDocumentAsync(Guid documentId, CancellationToken ct);
+    Task<PartsReviewLineRow?> GetByIdAsync(Guid lineId, CancellationToken ct);
+    Task SetReviewStatusAsync(Guid lineId, string status, string? matchedItemCode, CancellationToken ct);
+    Task<int> BulkSetPendingToCreateNewAsync(Guid documentId, CancellationToken ct);
+    Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
+    Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
+    Task RecordCreatedAsync(Guid lineId, string itemCode, decimal pl01, decimal pl03, decimal pl05, decimal forexRate, CancellationToken ct);
+    Task RecordCreateFailedAsync(Guid lineId, string error, CancellationToken ct);
+    Task<IReadOnlyList<PartsProvisioningLine>> ListCreateNewAsync(Guid documentId, CancellationToken ct);
+}
+
+/// <summary>
+/// Phase B review + provisioning operations on parts_catalog.staging_document_line. Separate from
+/// the Phase A repo (extraction) and the slice-2 match repo (worker). Connection per-tenant via
+/// ICompanyContext.
+/// </summary>
+public sealed class PartsReviewRepository : IPartsReviewRepository
+{
+    private const string Cols =
+        "\"Id\",\"DocumentId\",\"LineNumber\",\"PageNumber\",\"SupplierArticleNumber\",\"OemNumbers\"," +
+        "\"Description\",\"Brand\",\"Quantity\",\"Unit\",\"UnitPriceForeign\",\"DiscountPct\"," +
+        "\"LineTotalForeign\",\"IsPromotional\",\"ReviewStatus\",\"MatchedItemCode\",\"GeneratedItemCode\"," +
+        "\"EnrichmentSource\",\"BorrowedFromArticle\",\"EnrichmentConfirmedAt\",\"CreateErrorMessage\"";
+
+    private readonly ICompanyContext _company;
+    public PartsReviewRepository(ICompanyContext company) => _company = company;
+    private string ConnectionString => _company.Current.Neon.ConnectionString;
+
+    private async Task<NpgsqlConnection> OpenAsync(CancellationToken ct)
+    {
+        var c = new NpgsqlConnection(ConnectionString);
+        await c.OpenAsync(ct);
+        return c;
+    }
+
+    public async Task<IReadOnlyList<PartsReviewLineRow>> ListByDocumentAsync(Guid documentId, CancellationToken ct)
+    {
+        var sql = $"SELECT {Cols} FROM public.\"staging_document_line\" WHERE \"DocumentId\" = @doc ORDER BY \"LineNumber\";";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        var list = new List<PartsReviewLineRow>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct)) list.Add(Map(r));
+        return list;
+    }
+
+    public async Task<PartsReviewLineRow?> GetByIdAsync(Guid lineId, CancellationToken ct)
+    {
+        var sql = $"SELECT {Cols} FROM public.\"staging_document_line\" WHERE \"Id\" = @id;";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        return await r.ReadAsync(ct) ? Map(r) : null;
+    }
+
+    public async Task SetReviewStatusAsync(Guid lineId, string status, string? matchedItemCode, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = @status,
+                "MatchedItemCode" = COALESCE(@code, "MatchedItemCode")
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("status", status);
+        cmd.Parameters.AddWithValue("code", (object?)matchedItemCode ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> BulkSetPendingToCreateNewAsync(Guid documentId, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'create_new'
+            WHERE "DocumentId" = @doc AND "ReviewStatus" = 'pending' AND "IsPromotional" = false;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT "ReviewStatus", COUNT(*) FROM public."staging_document_line"
+            WHERE "DocumentId" = @doc GROUP BY "ReviewStatus";
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        var counts = new Dictionary<string, int>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct)) counts[r.GetString(0)] = (int)r.GetInt64(1);
+        return counts;
+    }
+
+    public async Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "EnrichmentSource" = @source,
+                "BorrowedFromArticle" = @ba,
+                "BorrowedFromSupplier" = @bs,
+                "EnrichmentConfirmedBy" = @by,
+                "EnrichmentConfirmedAt" = CASE WHEN @by IS NULL THEN NULL ELSE NOW() END
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("source", (object?)source ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("ba", (object?)borrowedArticle ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("bs", (object?)borrowedSupplier ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("by", (object?)confirmedBy ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RecordCreatedAsync(Guid lineId, string itemCode, decimal pl01, decimal pl03, decimal pl05, decimal forexRate, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'created', "GeneratedItemCode" = @code, "CreatedSku" = @code,
+                "MatchedItemCode" = @code, "Pl01Tzs" = @pl01, "Pl03Tzs" = @pl03, "Pl05Tzs" = @pl05,
+                "ForexRateUsed" = @rate, "WrittenToSapAt" = NOW(), "CreatedAt" = NOW(),
+                "CreateErrorMessage" = NULL
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("code", itemCode);
+        cmd.Parameters.AddWithValue("pl01", pl01);
+        cmd.Parameters.AddWithValue("pl03", pl03);
+        cmd.Parameters.AddWithValue("pl05", pl05);
+        cmd.Parameters.AddWithValue("rate", forexRate);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RecordCreateFailedAsync(Guid lineId, string error, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'create_failed', "CreateErrorMessage" = @err
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("err", error.Length > 1000 ? error[..1000] : error);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<PartsProvisioningLine>> ListCreateNewAsync(Guid documentId, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT "Id","SupplierArticleNumber","OemNumbers","Brand","Description","UnitPriceForeign",
+                   ("EnrichmentConfirmedAt" IS NOT NULL) AS confirmed
+            FROM public."staging_document_line"
+            WHERE "DocumentId" = @doc AND "ReviewStatus" = 'create_new'
+            ORDER BY "LineNumber";
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        var list = new List<PartsProvisioningLine>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+        {
+            list.Add(new PartsProvisioningLine(
+                Id:                    r.GetGuid(0),
+                SupplierArticleNumber: r.IsDBNull(1) ? null : r.GetString(1),
+                OemNumbers:            ParseOems(r, 2),
+                Brand:                 r.IsDBNull(3) ? null : r.GetString(3),
+                Description:           r.IsDBNull(4) ? null : r.GetString(4),
+                UnitPriceForeign:      r.IsDBNull(5) ? null : r.GetDecimal(5),
+                EnrichmentConfirmed:   !r.IsDBNull(6) && r.GetBoolean(6)));
+        }
+        return list;
+    }
+
+    private static PartsReviewLineRow Map(NpgsqlDataReader r) => new(
+        Id:                    r.GetGuid(0),
+        DocumentId:            r.GetGuid(1),
+        LineNumber:            r.GetInt32(2),
+        PageNumber:            r.IsDBNull(3) ? null : r.GetInt32(3),
+        SupplierArticleNumber: r.IsDBNull(4) ? null : r.GetString(4),
+        OemNumbers:            ParseOems(r, 5),
+        Description:           r.IsDBNull(6) ? null : r.GetString(6),
+        Brand:                 r.IsDBNull(7) ? null : r.GetString(7),
+        Quantity:              r.IsDBNull(8) ? null : r.GetDecimal(8),
+        Unit:                  r.IsDBNull(9) ? null : r.GetString(9),
+        UnitPriceForeign:      r.IsDBNull(10) ? null : r.GetDecimal(10),
+        DiscountPct:           r.IsDBNull(11) ? null : r.GetDecimal(11),
+        LineTotalForeign:      r.IsDBNull(12) ? null : r.GetDecimal(12),
+        IsPromotional:         !r.IsDBNull(13) && r.GetBoolean(13),
+        ReviewStatus:          r.IsDBNull(14) ? "pending" : r.GetString(14),
+        MatchedItemCode:       r.IsDBNull(15) ? null : r.GetString(15),
+        GeneratedItemCode:     r.IsDBNull(16) ? null : r.GetString(16),
+        EnrichmentSource:      r.IsDBNull(17) ? null : r.GetString(17),
+        BorrowedFromArticle:   r.IsDBNull(18) ? null : r.GetString(18),
+        EnrichmentConfirmedAt: r.IsDBNull(19) ? null : r.GetDateTime(19),
+        CreateErrorMessage:    r.IsDBNull(20) ? null : r.GetString(20));
+
+    private static List<string> ParseOems(NpgsqlDataReader r, int ordinal)
+    {
+        if (r.IsDBNull(ordinal)) return new List<string>();
+        try { return JsonSerializer.Deserialize<List<string>>(r.GetString(ordinal)) ?? new List<string>(); }
+        catch (JsonException) { return new List<string>(); }
+    }
+}
