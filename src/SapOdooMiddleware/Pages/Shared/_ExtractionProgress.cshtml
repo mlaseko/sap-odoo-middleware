@@ -2,18 +2,38 @@
 @*
     Shared live extraction-progress card + poller. Anchors page-elapsed to the server clock
     (skew-free) and interpolates locally between polls so the bar moves smoothly within a page.
-    Reusable across tenants via the StatusUrl. (Lubes Detail still inlines its own copy today.)
+
+    Two hardening behaviours so the bar never looks stuck or jumps backwards:
+      - Monotonic fill: the bar tracks a high-water mark and never decreases (the server clears
+        CurrentPageStartedAt between pages, which would otherwise momentarily drop the fraction).
+      - Phase labels + indeterminate animation for the phases where there is genuinely nothing to
+        count yet: 'queued' (waiting for the worker) and 'preparing' (rendering the PDF / warming
+        up the vision model before page 1 reports). These are the slow phases that previously
+        showed a frozen 0%.
+
+    Reusable across tenants via StatusUrl. (Lubes Detail still inlines its own copy today.)
 *@
+<style>
+    .progress-bar-fill.indeterminate {
+        width: 35% !important;
+        animation: pp-indet 1.25s ease-in-out infinite;
+    }
+    @@keyframes pp-indet {
+        0%   { margin-left: -35%; }
+        100% { margin-left: 100%; }
+    }
+</style>
+
 <div id="progress-card" class="progress-card" style="display:none">
     <div class="progress-header">
-        <span class="progress-label">Extracting…</span>
-        <span class="progress-page-text">Page <span id="pp-current">0</span> of <span id="pp-total">0</span></span>
+        <span class="progress-label" id="pp-phase">Starting…</span>
+        <span class="progress-page-text" id="pp-pagetext"></span>
     </div>
     <div class="progress-bar-track">
         <div class="progress-bar-fill" id="pp-fill" style="width: 0%"></div>
     </div>
     <div class="progress-meta">
-        <span id="pp-percent">0%</span>
+        <span id="pp-percent"></span>
         <span id="pp-elapsed"></span>
         <span id="pp-eta"></span>
     </div>
@@ -29,8 +49,8 @@
 
     const card = document.getElementById('progress-card');
     const fill = document.getElementById('pp-fill');
-    const current = document.getElementById('pp-current');
-    const total = document.getElementById('pp-total');
+    const phase = document.getElementById('pp-phase');
+    const pageText = document.getElementById('pp-pagetext');
     const percent = document.getElementById('pp-percent');
     const elapsed = document.getElementById('pp-elapsed');
     const eta = document.getElementById('pp-eta');
@@ -42,7 +62,8 @@
 
     let pollTimer = null;
     let tickTimer = null;
-    let snap = null;
+    let snap = null;          // latest poll snapshot
+    let maxPct = 0;           // high-water mark — the bar never goes backwards
 
     function fmtSec(s) {
         if (s == null || !isFinite(s) || s < 0) return '';
@@ -57,8 +78,37 @@
         return snap.pageElapsedAtSnapSec + (Date.now() - snap.localAnchorMs) / 1000;
     }
 
+    // Returns the phase: 'queued' | 'preparing' | 'extracting'.
+    function phaseOf(s) {
+        if (s.status === 'uploaded') return 'queued';
+        if (s.status === 'extracting' && (s.pageCount || 0) === 0) return 'preparing';
+        return 'extracting';
+    }
+
+    function setIndeterminate(label) {
+        fill.classList.add('indeterminate');
+        fill.style.width = '';        // let the CSS rule drive width while animating
+        phase.textContent = label;
+        pageText.textContent = '';
+        percent.textContent = '';
+        elapsed.textContent = '';
+        eta.textContent = '';
+    }
+
     function render() {
         if (!snap) return;
+
+        if (snap.phase === 'queued') {
+            setIndeterminate('Queued — waiting for the extraction worker…');
+            return;
+        }
+        if (snap.phase === 'preparing') {
+            setIndeterminate('Preparing — rendering the PDF and warming up the vision model…');
+            return;
+        }
+
+        // Determinate: counting pages.
+        fill.classList.remove('indeterminate');
         const { pageCount, pagesProcessed, expectedSec } = snap;
         const elapsedSec = pageElapsedNow();
 
@@ -67,12 +117,18 @@
             frac = Math.min(elapsedSec / expectedSec, INTRA_PAGE_CAP);
         }
         const done = pageCount > 0 ? (pagesProcessed + frac) / pageCount : 0;
-        const pct = Math.max(0, Math.min(100, done * 100));
+        let pct = Math.max(0, Math.min(100, done * 100));
+
+        // Never move backwards (between-page resets, late polls, etc.).
+        maxPct = Math.max(maxPct, pct);
+        pct = maxPct;
 
         fill.style.width = pct.toFixed(1) + '%';
         percent.textContent = Math.floor(pct) + '%';
-        current.textContent = pagesProcessed;
-        total.textContent = pageCount;
+
+        const onPage = elapsedSec != null ? Math.min(pagesProcessed + 1, pageCount) : pagesProcessed;
+        phase.textContent = 'Extracting…';
+        pageText.textContent = 'Page ' + onPage + ' of ' + pageCount;
 
         elapsed.textContent = elapsedSec != null ? 'page time: ' + fmtSec(elapsedSec) : '';
 
@@ -102,12 +158,18 @@
                 }
             }
 
-            snap = { pageCount, pagesProcessed, expectedSec, pageElapsedAtSnapSec, localAnchorMs: Date.now() };
+            snap = {
+                status: s.status,
+                phase: phaseOf({ status: s.status, pageCount }),
+                pageCount, pagesProcessed, expectedSec,
+                pageElapsedAtSnapSec, localAnchorMs: Date.now()
+            };
             render();
 
             if (!ACTIVE_STATUSES.includes(s.status)) {
                 clearInterval(pollTimer);
                 clearInterval(tickTimer);
+                fill.classList.remove('indeterminate');
                 fill.style.width = '100%';
                 percent.textContent = '100%';
                 setTimeout(() => location.reload(), 250);
