@@ -117,7 +117,18 @@
             <td class="num">@(l.UnitPriceForeign is { } up ? sym + up.ToString("N2") : "")</td>
             <td class="num">@(l.LineTotalForeign is { } lt ? sym + lt.ToString("N2") : "")</td>
             <td class="num">@(l.DiscountPct?.ToString("0.##"))</td>
-            <td class="status-cell"><span class="pill @pill.Css">@pill.Text</span></td>
+            <td class="status-cell">
+                <span class="pill @pill.Css">@pill.Text</span>
+                @if (l.MatchStrategy is "borrowed_oem_bridge_auto_match" or "enrichment_direct_auto_match")
+                {
+                    var donor = l.BorrowedFromArticle;
+                    var sup = l.BorrowedFromSupplier;
+                    var tip = !string.IsNullOrEmpty(donor)
+                        ? $"Auto-matched to existing SAP item {l.MatchedItemCode} — donor article {donor}{(string.IsNullOrEmpty(sup) ? "" : $" ({sup})")} shares an OEM."
+                        : $"Auto-matched to existing SAP item {l.MatchedItemCode} via enrichment.";
+                    <span class="pill pill-blue" title="@tip" style="margin-left:4px;">OEM&nbsp;bridge</span>
+                }
+            </td>
             @if (Model.IsEditable)
             {
                 <td class="actions-cell">
@@ -268,14 +279,29 @@
     });
 
     async function createNewFlow(row, lineId) {
-        // 1) enrich; 2) failed/unmatched -> needs_manual; 3) borrowed -> confirm/reject modal;
-        //    4) auto-accepted -> mark create_new.
-        let enr;
-        try { enr = await api('POST', '/lines/' + lineId + '/enrich'); }
+        // 1) enrich; 2) auto-matched to an existing SAP item (Path C1) -> show, no create;
+        //    3) failed/unmatched -> needs_manual; 4) borrowed -> confirm/reject modal;
+        //    5) auto-accepted -> mark create_new.
+        let resp;
+        try { resp = await api('POST', '/lines/' + lineId + '/enrich'); }
         catch (e) {
             // The server has already flagged the line 'needs manual' on a hard failure.
             setRowPill(row, 'needs_manual');
             alert('Enrichment failed: ' + e.message + '\nLine flagged "needs manual".');
+            await refreshSummary();
+            return;
+        }
+        // New shape: { enrichment, routing, matched_item_code }. Tolerate the old flat shape too.
+        const enr = resp.enrichment || resp;
+
+        // Path C1 — the donor part is already a SAP item; the server auto-matched. No creation.
+        if (resp.routing === 'auto_matched') {
+            setRowPill(row, 'matched');
+            openModal(
+                '<h3>Auto-matched via OEM bridge</h3><p>This line matches an existing SAP item <strong>' +
+                esc(resp.matched_item_code) + '</strong> (the donor part is already in SAP), so no new item ' +
+                'will be created.</p>',
+                [{ label: 'OK', primary: true, onClick: closeModal }]);
             await refreshSummary();
             return;
         }

@@ -11,7 +11,8 @@ public sealed record PartsReviewLineRow(
     string? SupplierArticleNumber, List<string> OemNumbers, string? Description, string? Brand,
     decimal? Quantity, string? Unit, decimal? UnitPriceForeign, decimal? DiscountPct, decimal? LineTotalForeign,
     bool IsPromotional, string ReviewStatus, string? MatchedItemCode, string? GeneratedItemCode,
-    string? EnrichmentSource, string? BorrowedFromArticle, DateTime? EnrichmentConfirmedAt, string? CreateErrorMessage);
+    string? EnrichmentSource, string? BorrowedFromArticle, DateTime? EnrichmentConfirmedAt, string? CreateErrorMessage,
+    string? MatchStrategy, string? BorrowedFromSupplier);
 
 /// <summary>A 'create_new' line reduced to what provisioning needs (incl. the persisted enrichment).</summary>
 public sealed record PartsProvisioningLine(
@@ -32,9 +33,10 @@ public interface IPartsReviewRepository
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
     Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
 
-    /// <summary>Persist the full enrichment outcome (source, borrowed, neon_oitm_id, status, payload) on the line.</summary>
+    /// <summary>Persist the full enrichment outcome (source, borrowed, neon_oitm_id, status, strategy, payload) on the line.</summary>
     Task RecordEnrichmentResultAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier,
-        long? neonOitmId, bool confirmationRequired, string status, string? errorCode, string? payloadJson, CancellationToken ct);
+        long? neonOitmId, bool confirmationRequired, string status, string? errorCode, string? matchStrategy,
+        string? payloadJson, CancellationToken ct);
 
     Task ConfirmEnrichmentAsync(Guid lineId, string confirmedBy, CancellationToken ct);
     Task RecordCreatedAsync(Guid lineId, string itemCode, decimal pl01, decimal pl03, decimal pl05, decimal forexRate, CancellationToken ct);
@@ -56,7 +58,8 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         "\"Id\",\"DocumentId\",\"LineNumber\",\"PageNumber\",\"SupplierArticleNumber\",\"OemNumbers\"," +
         "\"Description\",\"Brand\",\"Quantity\",\"Unit\",\"UnitPriceForeign\",\"DiscountPct\"," +
         "\"LineTotalForeign\",\"IsPromotional\",\"ReviewStatus\",\"MatchedItemCode\",\"GeneratedItemCode\"," +
-        "\"EnrichmentSource\",\"BorrowedFromArticle\",\"EnrichmentConfirmedAt\",\"CreateErrorMessage\"";
+        "\"EnrichmentSource\",\"BorrowedFromArticle\",\"EnrichmentConfirmedAt\",\"CreateErrorMessage\"," +
+        "\"MatchStrategy\",\"BorrowedFromSupplier\"";
 
     private readonly ICompanyContext _company;
     public PartsReviewRepository(ICompanyContext company) => _company = company;
@@ -157,7 +160,8 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
     }
 
     public async Task RecordEnrichmentResultAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier,
-        long? neonOitmId, bool confirmationRequired, string status, string? errorCode, string? payloadJson, CancellationToken ct)
+        long? neonOitmId, bool confirmationRequired, string status, string? errorCode, string? matchStrategy,
+        string? payloadJson, CancellationToken ct)
     {
         const string sql = """
             UPDATE public."staging_document_line"
@@ -168,6 +172,7 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
                 "EnrichmentConfirmationRequired" = @confreq,
                 "EnrichmentStatus" = @status,
                 "EnrichmentErrorCode" = @err,
+                "MatchStrategy" = @ms,
                 "EnrichedAt" = NOW(),
                 "EnrichmentPayloadJson" = @payload
             WHERE "Id" = @id;
@@ -181,6 +186,7 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         cmd.Parameters.AddWithValue("confreq", confirmationRequired);
         cmd.Parameters.AddWithValue("status", status);
         cmd.Parameters.AddWithValue("err", (object?)errorCode ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("ms", (object?)matchStrategy ?? DBNull.Value);
         cmd.Parameters.Add(new NpgsqlParameter("payload", NpgsqlDbType.Jsonb)
         {
             Value = (object?)payloadJson ?? DBNull.Value
@@ -321,7 +327,9 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         EnrichmentSource:      r.IsDBNull(17) ? null : r.GetString(17),
         BorrowedFromArticle:   r.IsDBNull(18) ? null : r.GetString(18),
         EnrichmentConfirmedAt: r.IsDBNull(19) ? null : r.GetDateTime(19),
-        CreateErrorMessage:    r.IsDBNull(20) ? null : r.GetString(20));
+        CreateErrorMessage:    r.IsDBNull(20) ? null : r.GetString(20),
+        MatchStrategy:         r.IsDBNull(21) ? null : r.GetString(21),
+        BorrowedFromSupplier:  r.IsDBNull(22) ? null : r.GetString(22));
 
     private static List<string> ParseOems(NpgsqlDataReader r, int ordinal)
     {

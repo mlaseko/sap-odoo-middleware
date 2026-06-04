@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Persistence;
@@ -64,12 +63,13 @@ public sealed class EnrichmentBackgroundWorker : BackgroundService
 
         var review = scope.ServiceProvider.GetRequiredService<IPartsReviewRepository>();
         var enrichment = scope.ServiceProvider.GetRequiredService<IEnrichmentService>();
+        var router = scope.ServiceProvider.GetRequiredService<IEnrichmentResultRouter>();
         var filter = scope.ServiceProvider.GetRequiredService<IOemFilterService>();
 
         var candidates = await review.GetLinesNeedingEnrichmentAsync(_settings.BatchSize, ct);
         if (candidates.Count == 0) return;
 
-        int enriched = 0, manual = 0;
+        int ready = 0, autoMatched = 0, manual = 0;
         foreach (var line in candidates)
         {
             ct.ThrowIfCancellationRequested();
@@ -79,26 +79,20 @@ public sealed class EnrichmentBackgroundWorker : BackgroundService
                 var enr = await enrichment.EnrichLineAsync(
                     new EnrichmentInput(line.SupplierArticleNumber, clean, line.Brand, line.Description, null), ct);
 
-                var status = enr.Status ?? (enr.ItemData is null ? "partial" : "success");
-                await review.RecordEnrichmentResultAsync(line.Id, enr.SourceLabel,
-                    enr.BorrowedFrom?.ArticleNumber, enr.BorrowedFrom?.SupplierName, enr.NeonOitmId,
-                    enr.ConfirmationRequired, status, enr.Error?.Code, JsonSerializer.Serialize(enr), ct);
-
-                if (enr.IsFailed || enr.ItemData is null)
+                // Persist + route (failed/partial → needs_manual; donor already a SAP item → auto-match).
+                var result = await router.ApplyAsync(line.Id, enr, ct);
+                switch (result.Routing)
                 {
-                    await review.SetReviewStatusAsync(line.Id, "needs_manual", null, ct);
-                    manual++;
-                }
-                else
-                {
-                    enriched++;
+                    case LineEnrichmentRouting.AutoMatched: autoMatched++; break;
+                    case LineEnrichmentRouting.NeedsManual: manual++; break;
+                    default:                                ready++; break;
                 }
             }
             catch (Exception ex)
             {
                 // Transport failure — flag for the operator and move on (don't re-pick next pass).
                 _logger.LogWarning(ex, "Enrichment failed for line {LineId}; moving to needs_manual.", line.Id);
-                await review.RecordEnrichmentResultAsync(line.Id, null, null, null, null, false, "failed", "dgx_unreachable", null, ct);
+                await review.RecordEnrichmentResultAsync(line.Id, null, null, null, null, false, "failed", "dgx_unreachable", "unmatched", null, ct);
                 await review.SetReviewStatusAsync(line.Id, "needs_manual", null, ct);
                 manual++;
             }
@@ -106,7 +100,7 @@ public sealed class EnrichmentBackgroundWorker : BackgroundService
             await Task.Delay(200, ct);   // be nice to DGX
         }
 
-        _logger.LogInformation("Enrichment pass: {Enriched} enriched, {Manual} → needs_manual (of {Total}).",
-            enriched, manual, candidates.Count);
+        _logger.LogInformation("Enrichment pass: {Ready} ready, {AutoMatched} auto-matched, {Manual} → needs_manual (of {Total}).",
+            ready, autoMatched, manual, candidates.Count);
     }
 }

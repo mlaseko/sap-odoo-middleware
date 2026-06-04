@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Ingestion;
 using SapOdooMiddleware.Persistence;
@@ -20,6 +19,7 @@ public class AutohubDocumentsController : ControllerBase
     private readonly PartsDocumentUploadService _uploads;
     private readonly IAutoMatchService _autoMatch;
     private readonly IEnrichmentService _enrichment;
+    private readonly IEnrichmentResultRouter _router;
     private readonly IOemFilterService _oemFilter;
     private readonly PartsItemCreationService _itemCreation;
 
@@ -29,6 +29,7 @@ public class AutohubDocumentsController : ControllerBase
         PartsDocumentUploadService uploads,
         IAutoMatchService autoMatch,
         IEnrichmentService enrichment,
+        IEnrichmentResultRouter router,
         IOemFilterService oemFilter,
         PartsItemCreationService itemCreation)
     {
@@ -37,6 +38,7 @@ public class AutohubDocumentsController : ControllerBase
         _uploads = uploads;
         _autoMatch = autoMatch;
         _enrichment = enrichment;
+        _router = router;
         _oemFilter = oemFilter;
         _itemCreation = itemCreation;
     }
@@ -136,23 +138,28 @@ public class AutohubDocumentsController : ControllerBase
         catch (Exception ex)
         {
             // Hard transport failure — never silently drop the line; flag it for the operator (Q8).
-            await _review.RecordEnrichmentResultAsync(lineId, null, null, null, null, false, "failed", "dgx_unreachable", null, ct);
+            await _review.RecordEnrichmentResultAsync(lineId, null, null, null, null, false, "failed", "dgx_unreachable", "unmatched", null, ct);
             await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
             return StatusCode(502, new { error = "Enrichment service failed.", detail = ex.Message });
         }
 
-        // Persist the full result (source, borrowed, neon_oitm_id, payload) so the modal, review page
-        // and bulk-create can read it without re-calling DGX. Not yet confirmed — operator confirms.
-        var status = enr.Status ?? (enr.ItemData is null ? "partial" : "success");
-        await _review.RecordEnrichmentResultAsync(lineId, enr.SourceLabel,
-            enr.BorrowedFrom?.ArticleNumber, enr.BorrowedFrom?.SupplierName, enr.NeonOitmId,
-            enr.ConfirmationRequired, status, enr.Error?.Code, JsonSerializer.Serialize(enr), ct);
-
-        // No usable enrichment (hard failure or partial/unmatched) → needs_manual; never auto-dropped (Q8).
-        if (enr.IsFailed || enr.ItemData is null)
-            await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
-
-        return Ok(enr);
+        // Persist + route: failed/partial → needs_manual; donor already a SAP item → auto-match (C1);
+        // otherwise ready for the operator to confirm + create (C2). The modal/review page read the
+        // persisted result without re-calling DGX.
+        var routing = await _router.ApplyAsync(lineId, enr, ct);
+        var routingLabel = routing.Routing switch
+        {
+            LineEnrichmentRouting.AutoMatched => "auto_matched",
+            LineEnrichmentRouting.NeedsManual => "needs_manual",
+            _                                 => "ready",
+        };
+        return Ok(new
+        {
+            enrichment = enr,
+            routing = routingLabel,
+            matched_item_code = routing.MatchedItemCode,
+            match_strategy = routing.MatchStrategy,
+        });
     }
 
     /// <summary>Reject a (borrowed) enrichment: move the line to 'needs_manual' so the operator can match-by-search (Q9).</summary>

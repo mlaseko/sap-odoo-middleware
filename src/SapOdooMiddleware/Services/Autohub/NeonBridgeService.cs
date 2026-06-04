@@ -3,16 +3,31 @@ using SapOdooMiddleware.Configuration;
 
 namespace SapOdooMiddleware.Services.Autohub;
 
+/// <summary>Outcome of a bridge link attempt (never throws on a blocked/missing row — the caller logs).</summary>
+public enum NeonBridgeLinkStatus { Linked, AlreadyLinkedSame, BlockedByExisting, NotFound }
+
+public sealed record NeonBridgeLinkResult(NeonBridgeLinkStatus Status, string? ExistingItemCode)
+{
+    public bool Written => Status == NeonBridgeLinkStatus.Linked;
+}
+
 public interface INeonBridgeService
 {
     /// <summary>
-    /// Links a freshly-created SAP item back to its pre-enriched parts_catalog row by stamping the
-    /// SAP ItemCode onto oitm. This is the middleware's ONLY write to the catalog — the enrichment
-    /// service (DGX) owns row creation/population (with item_code = NULL until now). Idempotent:
-    /// re-linking the same code is a no-op; linking a row that already carries a *different* code
-    /// throws (data-integrity guard rather than silent clobber).
+    /// Reads the SAP ItemCode currently linked to a parts_catalog <c>oitm</c> row, or null when the row is
+    /// unlinked (item_code NULL/empty) or missing. Used to detect Path C1 — a borrowed/direct enrichment
+    /// whose donor row is ALREADY a SAP item — so the line auto-matches instead of minting a duplicate.
     /// </summary>
-    Task LinkAsync(int neonOitmId, string sapItemCode, CancellationToken ct);
+    Task<string?> GetItemCodeAsync(int neonOitmId, CancellationToken ct);
+
+    /// <summary>
+    /// Links a freshly-created SAP item back to its pre-enriched parts_catalog row by stamping the SAP
+    /// ItemCode onto <c>oitm</c> (only WHERE item_code IS NULL — never overwrites a populated value).
+    /// This is the middleware's ONLY write to the catalog; the enrichment service (DGX) owns row
+    /// creation/population. Idempotent, and does NOT throw on a blocked/missing row — it returns a
+    /// <see cref="NeonBridgeLinkResult"/> the caller logs (a throw here could provoke a duplicate on retry).
+    /// </summary>
+    Task<NeonBridgeLinkResult> LinkAsync(int neonOitmId, string sapItemCode, CancellationToken ct);
 }
 
 /// <summary>
@@ -34,46 +49,64 @@ public sealed class NeonBridgeService : INeonBridgeService
 
     private string ConnectionString => _company.Current.Neon.ConnectionString;
 
-    public async Task LinkAsync(int neonOitmId, string sapItemCode, CancellationToken ct)
+    public async Task<string?> GetItemCodeAsync(int neonOitmId, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        const string sql = "SELECT item_code FROM oitm WHERE id = @id LIMIT 1;";
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", neonOitmId);
+        var result = await cmd.ExecuteScalarAsync(ct);
+
+        if (result is null or DBNull) return null;
+        var code = (string)result;
+        return string.IsNullOrWhiteSpace(code) ? null : code;
+    }
+
+    public async Task<NeonBridgeLinkResult> LinkAsync(int neonOitmId, string sapItemCode, CancellationToken ct)
     {
         await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync(ct);
 
         const string update = """
             UPDATE oitm SET item_code = @code, write_date = NOW()
-            WHERE id = @id AND item_code IS NULL;
+            WHERE id = @id AND (item_code IS NULL OR item_code = '');
             """;
         await using (var cmd = new NpgsqlCommand(update, conn))
         {
             cmd.Parameters.AddWithValue("code", sapItemCode);
             cmd.Parameters.AddWithValue("id", neonOitmId);
-            var rows = await cmd.ExecuteNonQueryAsync(ct);
-            if (rows == 1)
+            if (await cmd.ExecuteNonQueryAsync(ct) == 1)
             {
                 _logger.LogInformation("Neon bridge linked oitm id {OitmId} → ItemCode {ItemCode}.", neonOitmId, sapItemCode);
-                return;
+                return new NeonBridgeLinkResult(NeonBridgeLinkStatus.Linked, sapItemCode);
             }
         }
 
-        // No row updated — distinguish missing / already-linked-same (idempotent) / conflict.
+        // No row updated — classify (missing / already-linked-same / conflict). Never throw: the SAP
+        // item already exists, so we must not provoke a retry; the caller logs and an admin reconciles.
         const string check = "SELECT item_code FROM oitm WHERE id = @id;";
         await using var read = new NpgsqlCommand(check, conn);
         read.Parameters.AddWithValue("id", neonOitmId);
         var existing = await read.ExecuteScalarAsync(ct);
 
         if (existing is null)
-            throw new InvalidOperationException($"Neon bridge: oitm id {neonOitmId} not found.");
-        if (existing is DBNull)
-            throw new InvalidOperationException($"Neon bridge: oitm id {neonOitmId} update affected 0 rows unexpectedly.");
+        {
+            _logger.LogWarning("Neon bridge: oitm id {OitmId} not found; cannot link {ItemCode}.", neonOitmId, sapItemCode);
+            return new NeonBridgeLinkResult(NeonBridgeLinkStatus.NotFound, null);
+        }
 
-        var current = (string)existing;
+        var current = existing is DBNull ? null : (string)existing;
         if (string.Equals(current, sapItemCode, StringComparison.Ordinal))
         {
             _logger.LogInformation("Neon bridge: oitm id {OitmId} already linked to {ItemCode} (idempotent).", neonOitmId, sapItemCode);
-            return;
+            return new NeonBridgeLinkResult(NeonBridgeLinkStatus.AlreadyLinkedSame, current);
         }
 
-        throw new InvalidOperationException(
-            $"Neon bridge: oitm id {neonOitmId} is already linked to ItemCode '{current}', refusing to overwrite with '{sapItemCode}'.");
+        _logger.LogError(
+            "Neon bridge: oitm id {OitmId} already linked to '{Existing}', refusing to overwrite with '{New}'. Likely a duplicate SAP item — reconcile.",
+            neonOitmId, current, sapItemCode);
+        return new NeonBridgeLinkResult(NeonBridgeLinkStatus.BlockedByExisting, current);
     }
 }
