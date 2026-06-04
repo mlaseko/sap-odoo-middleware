@@ -62,6 +62,7 @@
             <span class="rc">@Model.Count("created") created</span> ·
             <span class="rc">@Model.Count("create_new") to create</span> ·
             <span class="rc">@Model.Count("skip") skipped</span> ·
+            <span class="rc">@Model.Count("needs_manual") needs manual</span> ·
             <span class="rc">@Model.Count("pending") pending</span> ·
             <span class="rc">@Model.Count("create_failed") failed</span>
         </div>
@@ -74,6 +75,7 @@
             <div class="review-actions">
                 <button id="btn-automatch" class="btn btn-sm" type="button">Auto-match again</button>
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
+                <button id="btn-skip-pending" class="btn btn-sm" type="button">Skip All Pending (<span id="cnt-skip-pending">@(Model.Count("pending") + Model.Count("needs_manual"))</span>)</button>
                 <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@Model.Count("create_new")</span>)</button>
                 <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>
             </div>
@@ -138,6 +140,10 @@
                             <button type="button" data-action="match">Match…</button>
                             <button type="button" data-action="create_new">Create New (enrich)</button>
                             <button type="button" data-action="skip">Skip</button>
+                            @if (l.ReviewStatus == "skip")
+                            {
+                                <button type="button" data-action="reopen">Reopen (needs manual)</button>
+                            }
                         </div>
                     </details>
                 </td>
@@ -203,10 +209,14 @@
             '<span class="rc">' + (b.created || 0) + ' created</span> · ' +
             '<span class="rc">' + (b.create_new || 0) + ' to create</span> · ' +
             '<span class="rc">' + (b.skip || 0) + ' skipped</span> · ' +
+            '<span class="rc">' + (b.needs_manual || 0) + ' needs manual</span> · ' +
             '<span class="rc">' + (b.pending || 0) + ' pending</span> · ' +
             '<span class="rc">' + (b.create_failed || 0) + ' failed</span>';
+        const skipN = (b.pending || 0) + (b.needs_manual || 0);
         const cnt = document.getElementById('cnt-createnew'); if (cnt) cnt.textContent = b.create_new || 0;
         const mp = document.getElementById('btn-markpending'); if (mp) mp.disabled = (b.pending || 0) === 0;
+        const sp = document.getElementById('cnt-skip-pending'); if (sp) sp.textContent = skipN;
+        const spb = document.getElementById('btn-skip-pending'); if (spb) spb.disabled = skipN === 0;
         const bc = document.getElementById('btn-bulkcreate'); if (bc) bc.disabled = (b.create_new || 0) === 0;
         const cp = document.getElementById('btn-complete'); if (cp) cp.disabled = !s.can_complete;
     }
@@ -267,6 +277,9 @@
                     if (updated) setRowPill(row, updated.review_status);
                 } else if (action === 'skip') {
                     const updated = await api('POST', '/lines/' + lineId + '/skip');
+                    if (updated) setRowPill(row, updated.review_status);
+                } else if (action === 'reopen') {
+                    const updated = await api('POST', '/lines/' + lineId + '/reopen');
                     if (updated) setRowPill(row, updated.review_status);
                 } else if (action === 'create_new') {
                     await createNewFlow(row, lineId);
@@ -359,6 +372,21 @@
     document.getElementById('btn-markpending').addEventListener('click', async () => {
         try { await api('POST', '/bulk-mark-pending-as-create-new'); location.reload(); }
         catch (err) { alert('Failed: ' + err.message); }
+    });
+
+    document.getElementById('btn-skip-pending').addEventListener('click', () => {
+        const n = document.getElementById('cnt-skip-pending').textContent;
+        openModal(
+            '<h3>Skip pending lines</h3><p>Skip <strong>' + n + '</strong> pending / needs-manual line(s)? ' +
+            'They will be marked skipped and excluded from this document\'s SAP items. ' +
+            'You can reopen individual lines (Actions → Reopen) before completing review.</p>',
+            [
+                { label: 'Cancel', onClick: closeModal },
+                { label: 'Skip ' + n + ' line(s)', primary: true, onClick: async () => {
+                    try { await api('POST', '/bulk-skip-pending'); location.reload(); }
+                    catch (e) { alert('Skip failed: ' + e.message); }
+                } }
+            ]);
     });
 
     document.getElementById('btn-bulkcreate').addEventListener('click', () => {
