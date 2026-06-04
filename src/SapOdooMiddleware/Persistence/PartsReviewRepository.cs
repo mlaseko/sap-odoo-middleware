@@ -30,6 +30,9 @@ public interface IPartsReviewRepository
     Task<PartsReviewLineRow?> GetByIdAsync(Guid lineId, CancellationToken ct);
     Task SetReviewStatusAsync(Guid lineId, string status, string? matchedItemCode, CancellationToken ct);
     Task<int> BulkSetPendingToCreateNewAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>Skip every unresolved (pending / needs_manual) line; sets MatchStrategy='skipped'. Returns the count affected.</summary>
+    Task<int> BulkSkipPendingAsync(Guid documentId, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
     Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
 
@@ -116,6 +119,21 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
             UPDATE public."staging_document_line"
             SET "ReviewStatus" = 'create_new'
             WHERE "DocumentId" = @doc AND "ReviewStatus" = 'pending' AND "IsPromotional" = false;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> BulkSkipPendingAsync(Guid documentId, CancellationToken ct)
+    {
+        // Idempotent: a second call finds nothing pending/needs_manual and affects 0 rows. Already-matched
+        // / created lines are untouched. Uses the existing 'skip' review status (terminal for completion).
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'skip', "MatchStrategy" = 'skipped'
+            WHERE "DocumentId" = @doc AND "ReviewStatus" IN ('pending', 'needs_manual');
             """;
         await using var conn = await OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);

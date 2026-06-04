@@ -171,6 +171,15 @@ public class AutohubDocumentsController : ControllerBase
         return Ok(await _review.GetByIdAsync(lineId, ct));
     }
 
+    /// <summary>Reopen a skipped line back to 'needs_manual' so the operator can match/create it (undo bulk-skip).</summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/reopen")]
+    public async Task<IActionResult> ReopenLine(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
+        return Ok(await _review.GetByIdAsync(lineId, ct));
+    }
+
     /// <summary>Mark a line 'create_new'. <c>confirmed=true</c> stamps the enrichment confirmation.</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/create-new")]
     public async Task<IActionResult> CreateNewLine(Guid documentId, Guid lineId, [FromBody] CreateNewRequest? body, CancellationToken ct)
@@ -219,6 +228,15 @@ public class AutohubDocumentsController : ControllerBase
     }
 
     /// <summary>Create items in SAP+Neon for every 'create_new' line (sequential, continues on failure).</summary>
+    /// <summary>Skip every unresolved (pending / needs_manual) line in one go (review-page bulk action).</summary>
+    [HttpPost("{documentId:guid}/bulk-skip-pending")]
+    public async Task<IActionResult> BulkSkipPending(Guid documentId, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(documentId, ct);
+        if (doc is null) return NotFound();
+        return Ok(new { skipped = await _review.BulkSkipPendingAsync(documentId, ct) });
+    }
+
     [HttpPost("{documentId:guid}/bulk-create")]
     public async Task<IActionResult> BulkCreate(Guid documentId, CancellationToken ct)
     {
