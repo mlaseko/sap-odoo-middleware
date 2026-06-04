@@ -14,13 +14,31 @@ public sealed record EnrichmentRequest(
 
 public sealed record EnrichmentResponse
 {
+    /// <summary>success | partial | failed (spec §3). Treated as success when DGX omits it (legacy).</summary>
+    [JsonPropertyName("status")]                public string?            Status              { get; init; }
     /// <summary>parts_catalog oitm.id of the pre-enriched row — the only id NeonBridge needs to link.</summary>
     [JsonPropertyName("neon_oitm_id")]          public int?               NeonOitmId          { get; init; }
+    /// <summary>Spec §3 alias for <see cref="EnrichmentSource"/> (source); either may be populated.</summary>
+    [JsonPropertyName("source")]                public string?            Source              { get; init; }
     [JsonPropertyName("enrichment_source")]     public string?            EnrichmentSource    { get; init; }
     [JsonPropertyName("borrowed_from")]         public BorrowedFrom?      BorrowedFrom        { get; init; }
     [JsonPropertyName("confirmation_required")] public bool               ConfirmationRequired{ get; init; }
     [JsonPropertyName("item_data")]             public EnrichmentItemData? ItemData           { get; init; }
+    [JsonPropertyName("error")]                 public EnrichmentError?   Error               { get; init; }
     [JsonPropertyName("noise_filtered_tokens")] public List<string>?      NoiseFilteredTokens { get; init; }
+
+    /// <summary>Canonical source label, tolerating either the spec ('source') or legacy ('enrichment_source') key.</summary>
+    [JsonIgnore] public string? SourceLabel => EnrichmentSource ?? Source;
+
+    /// <summary>True when DGX reported a hard failure (transient/permanent error) rather than a usable result.</summary>
+    [JsonIgnore] public bool IsFailed => string.Equals(Status, "failed", StringComparison.OrdinalIgnoreCase);
+}
+
+public sealed record EnrichmentError
+{
+    [JsonPropertyName("code")]      public string? Code      { get; init; }
+    [JsonPropertyName("message")]   public string? Message   { get; init; }
+    [JsonPropertyName("retryable")] public bool    Retryable { get; init; }
 }
 
 public sealed record BorrowedFrom

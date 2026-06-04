@@ -158,7 +158,8 @@
     const PILL = {
         matched: ['pill-green', 'matched'], create_new: ['pill-blue', 'create new'],
         skip: ['pill-grey', 'skip'], pending: ['pill-yellow', 'pending'],
-        created: ['pill-green', 'created'], create_failed: ['pill-red', 'create failed']
+        created: ['pill-green', 'created'], create_failed: ['pill-red', 'create failed'],
+        needs_manual: ['pill-orange', 'needs manual']
     };
 
     const API_KEY = document.querySelector('meta[name="api-key"]')?.content || '';
@@ -222,7 +223,7 @@
         const d = enr.item_data || {};
         const bf = enr.borrowed_from;
         let html = '<h3>Enrich &amp; create item</h3>';
-        html += '<p>Source: <strong>' + esc(enr.enrichment_source || 'unknown') + '</strong>';
+        html += '<p>Source: <strong>' + esc(enr.enrichment_source || enr.source || 'unknown') + '</strong>';
         if (enr.confirmation_required) html += ' <span class="pill pill-yellow">confirmation required</span>';
         html += '</p>';
         if (bf) {
@@ -267,10 +268,17 @@
     });
 
     async function createNewFlow(row, lineId) {
-        // 1) enrich; 2) if borrowed/uncertain, confirm in a modal; 3) mark create_new (confirmed).
+        // 1) enrich; 2) failed/unmatched -> needs_manual; 3) borrowed -> confirm/reject modal;
+        //    4) auto-accepted -> mark create_new.
         let enr;
         try { enr = await api('POST', '/lines/' + lineId + '/enrich'); }
-        catch (e) { alert('Enrichment failed: ' + e.message); return; }
+        catch (e) {
+            // The server has already flagged the line 'needs manual' on a hard failure.
+            setRowPill(row, 'needs_manual');
+            alert('Enrichment failed: ' + e.message + '\nLine flagged "needs manual".');
+            await refreshSummary();
+            return;
+        }
 
         const confirmCreate = async () => {
             const updated = await api('POST', '/lines/' + lineId + '/create-new', { confirmed: true });
@@ -278,10 +286,28 @@
             closeModal();
             await refreshSummary();
         };
+        const rejectManual = async () => {
+            const updated = await api('POST', '/lines/' + lineId + '/reject');
+            if (updated) setRowPill(row, updated.review_status);
+            closeModal();
+            await refreshSummary();
+        };
+
+        // No usable enrichment (failed / partial / unmatched) — server set needs_manual; tell operator.
+        if (enr.status === 'failed' || !enr.item_data) {
+            setRowPill(row, 'needs_manual');
+            openModal(
+                '<h3>No automatic enrichment</h3><p>This line could not be enriched automatically (' +
+                esc(enr.status || enr.enrichment_source || enr.source || 'unmatched') +
+                '). It is flagged <strong>needs manual</strong> — match it to an existing SAP item or skip it.</p>',
+                [{ label: 'Close', primary: true, onClick: closeModal }]);
+            await refreshSummary();
+            return;
+        }
 
         if (enr.confirmation_required) {
             openModal(enrichmentHtml(enr), [
-                { label: 'Cancel', onClick: closeModal },
+                { label: 'Reject (needs manual)', onClick: () => rejectManual().catch(e => alert('Failed: ' + e.message)) },
                 { label: 'Confirm & mark Create New', primary: true, onClick: () => confirmCreate().catch(e => alert('Failed: ' + e.message)) }
             ]);
         } else {
