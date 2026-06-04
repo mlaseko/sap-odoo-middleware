@@ -173,6 +173,7 @@ builder.Services.AddScoped<IPartsLineMatchRepository, PartsLineMatchRepository>(
 builder.Services.AddScoped<IAutoMatchService, AutoMatchService>();
 builder.Services.Configure<EnrichmentSettings>(builder.Configuration.GetSection(EnrichmentSettings.SectionName));
 builder.Services.AddScoped<IEnrichmentService, EnrichmentService>();
+builder.Services.AddScoped<IEnrichmentResultRouter, EnrichmentResultRouter>();
 builder.Services.AddHttpClient<IEnrichmentClient, HttpEnrichmentClient>((sp, http) =>
 {
     // Enrichment can trigger a Germax scrape on a cold item — allow the full vision timeout.

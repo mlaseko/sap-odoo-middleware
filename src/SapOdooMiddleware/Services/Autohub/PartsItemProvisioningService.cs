@@ -155,7 +155,15 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         {
             try
             {
-                await _bridge.LinkAsync(neonOitmId, itemCode, ct);
+                var link = await _bridge.LinkAsync(neonOitmId, itemCode, ct);
+                if (link.Status == NeonBridgeLinkStatus.BlockedByExisting)
+                    _logger.LogError(
+                        "SAP item {ItemCode} created but oitm id {OitmId} was already linked to '{Existing}' — likely a duplicate SAP item; reconcile.",
+                        itemCode, neonOitmId, link.ExistingItemCode);
+                else if (link.Status == NeonBridgeLinkStatus.NotFound)
+                    _logger.LogWarning(
+                        "SAP item {ItemCode} created but oitm id {OitmId} not found; cannot link the Neon mirror.",
+                        itemCode, neonOitmId);
             }
             catch (Exception ex)
             {
