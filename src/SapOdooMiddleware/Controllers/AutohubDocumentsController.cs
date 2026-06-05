@@ -277,13 +277,20 @@ public class AutohubDocumentsController : ControllerBase
         return Ok(new { skipped = await _review.BulkSkipPendingAsync(documentId, ct) });
     }
 
-    /// <summary>Undo bulk-skip: move every skipped line back to 'needs_manual' so the operator can start over.</summary>
+    /// <summary>
+    /// Undo bulk-skip. Default: skipped → 'needs_manual'. With <c>?reEnrich=true</c>: reset to 'pending'
+    /// with enrichment cleared so the background worker re-queries DGX and re-routes (C1/C2/needs_manual).
+    /// </summary>
     [HttpPost("{documentId:guid}/bulk-reopen-skipped")]
-    public async Task<IActionResult> BulkReopenSkipped(Guid documentId, CancellationToken ct)
+    public async Task<IActionResult> BulkReopenSkipped(Guid documentId, [FromQuery] bool reEnrich, CancellationToken ct)
     {
         var doc = await _docs.GetByIdAsync(documentId, ct);
         if (doc is null) return NotFound();
-        return Ok(new { reopened = await _review.BulkReopenSkippedAsync(documentId, ct) });
+
+        var count = reEnrich
+            ? await _review.BulkReenrichSkippedAsync(documentId, ct)
+            : await _review.BulkReopenSkippedAsync(documentId, ct);
+        return Ok(new { reopened = count, reEnriched = reEnrich });
     }
 
     [HttpPost("{documentId:guid}/bulk-create")]

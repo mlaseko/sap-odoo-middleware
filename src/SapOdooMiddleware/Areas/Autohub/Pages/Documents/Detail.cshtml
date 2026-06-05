@@ -506,14 +506,22 @@
 
     document.getElementById('btn-reopen-skipped').addEventListener('click', () => {
         const n = document.getElementById('cnt-reopen-skipped').textContent;
+        const reopen = async (q) => {
+            try { await api('POST', '/bulk-reopen-skipped' + q); location.reload(); }
+            catch (e) { alert('Reopen failed: ' + e.message); }
+        };
         openModal(
-            '<h3>Reopen skipped lines</h3><p>Move <strong>' + n + '</strong> skipped line(s) back to <em>needs manual</em> so you can review them again?</p>',
+            '<h3>Reopen skipped lines</h3>' +
+            '<p>Move <strong>' + n + '</strong> skipped line(s) back into review:</p>' +
+            '<ul style="margin:6px 0 0 18px;">' +
+            '<li><strong>Needs manual</strong> — you decide each line (match / create / skip).</li>' +
+            '<li><strong>Re-run enrichment</strong> — re-query DGX in the background, then auto-route ' +
+            '(promotional lines stay skipped). Lines show as <em>pending</em> until the worker finishes.</li>' +
+            '</ul>',
             [
                 { label: 'Cancel', onClick: closeModal },
-                { label: 'Reopen ' + n + ' line(s)', primary: true, onClick: async () => {
-                    try { await api('POST', '/bulk-reopen-skipped'); location.reload(); }
-                    catch (e) { alert('Reopen failed: ' + e.message); }
-                } }
+                { label: '→ Needs manual', onClick: () => reopen('') },
+                { label: 'Re-run enrichment', primary: true, onClick: () => reopen('?reEnrich=true') }
             ]);
     });
 

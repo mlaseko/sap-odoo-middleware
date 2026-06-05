@@ -49,7 +49,7 @@ public class AutohubBulkSkipTests
     }
 
     [Fact]
-    public async Task BulkReopenSkipped_DocExists_ReturnsCount()
+    public async Task BulkReopenSkipped_NeedsManual_CallsReopen()
     {
         var docId = Guid.NewGuid();
         var docs = new Mock<IStagingPartsDocumentRepository>();
@@ -57,10 +57,29 @@ public class AutohubBulkSkipTests
         var review = new Mock<IPartsReviewRepository>();
         review.Setup(r => r.BulkReopenSkippedAsync(docId, It.IsAny<CancellationToken>())).ReturnsAsync(24);
 
-        var result = await Build(docs, review).BulkReopenSkipped(docId, CancellationToken.None);
+        var result = await Build(docs, review).BulkReopenSkipped(docId, reEnrich: false, CancellationToken.None);
 
         var ok = Assert.IsType<OkObjectResult>(result);
         Assert.Equal(24, ok.Value!.GetType().GetProperty("reopened")!.GetValue(ok.Value));
+        review.Verify(r => r.BulkReopenSkippedAsync(docId, It.IsAny<CancellationToken>()), Times.Once);
+        review.Verify(r => r.BulkReenrichSkippedAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task BulkReopenSkipped_ReEnrich_CallsReenrich()
+    {
+        var docId = Guid.NewGuid();
+        var docs = new Mock<IStagingPartsDocumentRepository>();
+        docs.Setup(d => d.GetByIdAsync(docId, It.IsAny<CancellationToken>())).ReturnsAsync(Doc(docId));
+        var review = new Mock<IPartsReviewRepository>();
+        review.Setup(r => r.BulkReenrichSkippedAsync(docId, It.IsAny<CancellationToken>())).ReturnsAsync(22);
+
+        var result = await Build(docs, review).BulkReopenSkipped(docId, reEnrich: true, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(22, ok.Value!.GetType().GetProperty("reopened")!.GetValue(ok.Value));
+        review.Verify(r => r.BulkReenrichSkippedAsync(docId, It.IsAny<CancellationToken>()), Times.Once);
+        review.Verify(r => r.BulkReopenSkippedAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]

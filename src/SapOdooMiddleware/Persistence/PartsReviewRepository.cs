@@ -37,6 +37,9 @@ public interface IPartsReviewRepository
     /// <summary>Undo bulk-skip: move every skipped line back to 'needs_manual' (clears MatchStrategy). Returns the count.</summary>
     Task<int> BulkReopenSkippedAsync(Guid documentId, CancellationToken ct);
 
+    /// <summary>Re-run enrichment: reset skipped (non-promotional) lines to 'pending' with enrichment state cleared so the background worker re-queries DGX. Returns the count.</summary>
+    Task<int> BulkReenrichSkippedAsync(Guid documentId, CancellationToken ct);
+
     /// <summary>Operator edits to an extracted line before creation (qty / unit price / description). Recomputes the line total.</summary>
     Task UpdateLineFieldsAsync(Guid lineId, decimal? quantity, decimal? unitPriceForeign, string? description, CancellationToken ct);
 
@@ -157,6 +160,26 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
             UPDATE public."staging_document_line"
             SET "ReviewStatus" = 'needs_manual', "MatchStrategy" = NULL
             WHERE "DocumentId" = @doc AND "ReviewStatus" = 'skip';
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> BulkReenrichSkippedAsync(Guid documentId, CancellationToken ct)
+    {
+        // Full reset → 'pending' with enrichment state cleared, so the EnrichmentBackgroundWorker
+        // (pending + EnrichmentSource IS NULL + non-promotional) re-queries DGX and re-routes the line.
+        // Promotional lines are left skipped (the worker never enriches them, so they'd stick at pending).
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'pending',
+                "EnrichmentSource" = NULL, "BorrowedFromArticle" = NULL, "BorrowedFromSupplier" = NULL,
+                "NeonOitmId" = NULL, "EnrichmentStatus" = NULL, "EnrichmentErrorCode" = NULL,
+                "EnrichedAt" = NULL, "EnrichmentPayloadJson" = NULL, "EnrichmentConfirmationRequired" = false,
+                "EnrichmentConfirmedBy" = NULL, "EnrichmentConfirmedAt" = NULL, "MatchStrategy" = NULL
+            WHERE "DocumentId" = @doc AND "ReviewStatus" = 'skip' AND "IsPromotional" = false;
             """;
         await using var conn = await OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
