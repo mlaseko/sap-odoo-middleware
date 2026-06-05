@@ -43,9 +43,34 @@ else
                 <td class="num">@d.PageCount</td>
                 <td>@d.Status</td>
                 <td>@d.ValidationStatus</td>
-                <td><a href="/autohub/documents/@d.Id">View</a></td>
+                <td style="white-space:nowrap;">
+                    <a href="/autohub/documents/@d.Id">View</a>
+                    &nbsp;·&nbsp;
+                    <a href="#" class="del-doc" data-doc-id="@d.Id" data-name="@(d.InvoiceNumber ?? d.OriginalFilename)" style="color:#991b1b;">Delete</a>
+                </td>
             </tr>
         }
         </tbody>
     </table>
 }
+
+<script>
+(function () {
+    const apiKey = document.querySelector('meta[name="api-key"]')?.content || '';
+    document.querySelectorAll('a.del-doc').forEach(a => {
+        a.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const id = a.dataset.docId;
+            if (!confirm('Delete "' + (a.dataset.name || id) + '" and all its extracted lines? This cannot be undone.')) return;
+            try {
+                const r = await fetch('/api/autohub/documents/' + id, {
+                    method: 'DELETE',
+                    headers: apiKey ? { 'X-Api-Key': apiKey } : {}
+                });
+                if (!r.ok) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
+                a.closest('tr').remove();
+            } catch (err) { alert('Delete failed: ' + err.message); }
+        });
+    });
+})();
+</script>

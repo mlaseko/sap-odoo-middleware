@@ -59,6 +59,9 @@ public interface IStagingPartsDocumentRepository
 
     /// <summary>Phase B: transition the document to 'reviewed' and stamp the operator/time.</summary>
     Task MarkReviewedAsync(Guid id, string reviewedBy, CancellationToken ct);
+
+    /// <summary>Delete a staging document and its lines (FK cascade). Does not touch SAP/parts_catalog.</summary>
+    Task DeleteAsync(Guid id, CancellationToken ct);
 }
 
 public class StagingPartsDocumentRepository : IStagingPartsDocumentRepository
@@ -237,6 +240,16 @@ public class StagingPartsDocumentRepository : IStagingPartsDocumentRepository
         await using var conn = await OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("by", reviewedBy);
+        cmd.Parameters.AddWithValue("id", id);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DeleteAsync(Guid id, CancellationToken ct)
+    {
+        // Lines are removed via the staging_document_line → staging_document ON DELETE CASCADE FK.
+        const string sql = "DELETE FROM public.\"staging_document\" WHERE \"Id\" = @id;";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("id", id);
         await cmd.ExecuteNonQueryAsync(ct);
     }

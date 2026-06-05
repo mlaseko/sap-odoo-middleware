@@ -7,8 +7,36 @@
 
 <div style="display:flex; justify-content:space-between; align-items:center;">
     <h2 style="margin:0;">@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
-    <a href="/autohub/documents">← Back to list</a>
+    <div style="display:flex; gap:12px; align-items:center;">
+        <button id="btn-delete-doc" class="btn btn-sm btn-danger" type="button" data-doc-id="@Model.Doc.Id">Delete invoice</button>
+        <a href="/autohub/documents">← Back to list</a>
+    </div>
 </div>
+
+<style>
+    .hint { font-weight: normal; color: #6b7280; font-size: 13px; }
+    .btn-danger { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .btn-danger:hover { background: #fecaca; }
+    #lines-table thead th { position: sticky; top: 0; background: #f1f5f9; z-index: 2; }
+    #lines-table th.col-desc, #lines-table td.col-desc { min-width: 200px; }
+    #lines-table th.col-oems, #lines-table td.col-oems { min-width: 170px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #lines-table th.col-art, #lines-table td.col-art { white-space: nowrap; }
+    #lines-table td .unit { color: #9ca3af; font-size: 12px; }
+    #lines-table tr.line-row { cursor: pointer; }
+    #lines-table tr.line-row:hover { background: #f8fafc; }
+    #lines-table tr.line-row.expanded { background: #eff6ff; }
+    .line-detail { padding: 10px 14px; background: #f8fafc; border-left: 3px solid #93c5fd; }
+    .line-detail .ld-meta { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 8px; font-size: 13px; color: #374151; }
+    .line-detail .ld-meta label, .line-detail .ld-edit label { color: #6b7280; font-weight: 600; margin-right: 4px; font-size: 12px; }
+    .line-detail .ld-edit { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .line-detail .ld-edit input { padding: 4px 6px; border: 1px solid #cbd5e1; border-radius: 4px; }
+    .line-detail .ld-edit input.ld-qty, .line-detail .ld-edit input.ld-price { width: 90px; }
+    .line-detail .ld-desc-wrap { flex: 1 1 260px; }
+    .line-detail .ld-desc-wrap input { width: 100%; }
+    .line-detail .ld-enrichment { font-size: 13px; }
+    .line-detail .ld-enrichment h3 { font-size: 14px; margin: 4px 0; }
+    .line-detail .kv th { text-align: left; color: #6b7280; padding-right: 10px; font-weight: 600; vertical-align: top; }
+</style>
 
 @* Header card *@
 <div class="card">
@@ -76,6 +104,7 @@
                 <button id="btn-automatch" class="btn btn-sm" type="button">Auto-match again</button>
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
                 <button id="btn-skip-pending" class="btn btn-sm" type="button">Skip All Pending (<span id="cnt-skip-pending">@(Model.Count("pending") + Model.Count("needs_manual"))</span>)</button>
+                <button id="btn-reopen-skipped" class="btn btn-sm" type="button">Reopen Skipped (<span id="cnt-reopen-skipped">@Model.Count("skip")</span>)</button>
                 <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@Model.Count("create_new")</span>)</button>
                 <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>
             </div>
@@ -83,21 +112,19 @@
     </div>
 }
 
-<h3>Line items (@Model.Lines.Count)</h3>
+<h3>Line items (@Model.Lines.Count) <span class="hint">— click a row for details / edit</span></h3>
+@{ var colCount = Model.IsEditable ? 10 : 9; }
 <table id="lines-table">
     <thead>
         <tr>
             <th class="num">#</th>
-            <th class="num">Page</th>
-            <th>Supplier Art.</th>
-            <th>OEMs</th>
-            <th>Description</th>
+            <th class="col-art">Supplier Art.</th>
+            <th class="col-oems">OEMs</th>
+            <th class="col-desc">Description</th>
             <th>Brand</th>
             <th class="num">Qty</th>
-            <th>Unit</th>
             <th class="num">Unit Price</th>
             <th class="num">Line Total</th>
-            <th class="num">Disc %</th>
             <th>Status</th>
             @if (Model.IsEditable) { <th>Actions</th> }
         </tr>
@@ -109,16 +136,13 @@
         var pill = SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.LinePill(l.ReviewStatus);
         <tr class="line-row @(l.IsPromotional ? "promo" : null)" data-line-id="@l.Id">
             <td class="num">@l.LineNumber</td>
-            <td class="num">@l.PageNumber</td>
-            <td>@l.SupplierArticleNumber</td>
-            <td title="@oems" style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">@oems</td>
-            <td>@l.Description</td>
+            <td class="col-art">@l.SupplierArticleNumber</td>
+            <td class="col-oems" title="@oems">@oems</td>
+            <td class="col-desc">@l.Description</td>
             <td>@l.Brand</td>
-            <td class="num">@(l.Quantity?.ToString("0.###"))</td>
-            <td>@l.Unit</td>
+            <td class="num">@(l.Quantity?.ToString("0.###")) <span class="unit">@l.Unit</span></td>
             <td class="num">@(l.UnitPriceForeign is { } up ? sym + up.ToString("N2") : "")</td>
             <td class="num">@(l.LineTotalForeign is { } lt ? sym + lt.ToString("N2") : "")</td>
-            <td class="num">@(l.DiscountPct?.ToString("0.##"))</td>
             <td class="status-cell">
                 <span class="pill @pill.Css">@pill.Text</span>
                 @if (l.MatchStrategy is "borrowed_oem_bridge_auto_match" or "enrichment_direct_auto_match")
@@ -133,7 +157,7 @@
             </td>
             @if (Model.IsEditable)
             {
-                <td class="actions-cell">
+                <td class="actions-cell" data-noexpand="1">
                     <details class="actions-menu">
                         <summary>⋮</summary>
                         <div class="menu">
@@ -148,6 +172,29 @@
                     </details>
                 </td>
             }
+        </tr>
+        <tr class="detail-row" data-line-id="@l.Id" style="display:none">
+            <td colspan="@colCount">
+                <div class="line-detail">
+                    <div class="ld-meta">
+                        <span><label>Page</label> @l.PageNumber</span>
+                        <span><label>Unit</label> @l.Unit</span>
+                        <span><label>Disc %</label> @(l.DiscountPct?.ToString("0.##"))</span>
+                        <span class="ld-oems"><label>OEMs</label> @(oems.Length == 0 ? "—" : oems)</span>
+                    </div>
+                    @if (Model.IsEditable)
+                    {
+                        <div class="ld-edit">
+                            <label>Qty <input type="number" step="any" min="0" class="ld-qty" value="@(l.Quantity?.ToString("0.###"))"></label>
+                            <label>Unit price <input type="number" step="any" min="0" class="ld-price" value="@(l.UnitPriceForeign?.ToString("0.####"))"></label>
+                            <label class="ld-desc-wrap">Description <input type="text" class="ld-desc" value="@l.Description"></label>
+                            <button type="button" class="btn btn-sm ld-save">Save changes</button>
+                            <span class="ld-saved" style="display:none; color:#166534;">✓ saved</span>
+                        </div>
+                    }
+                    <div class="ld-enrichment" data-loaded="false"><em>Loading enrichment…</em></div>
+                </div>
+            </td>
         </tr>
     }
     </tbody>
@@ -193,6 +240,8 @@
     }
 
     const esc = s => (s == null ? '' : String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])));
+    const SYM = "@sym";
+    const fmtMoney = v => SYM + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
     function setRowPill(row, status) {
         const [cls, label] = PILL[status] || ['pill-grey', status];
@@ -217,6 +266,8 @@
         const mp = document.getElementById('btn-markpending'); if (mp) mp.disabled = (b.pending || 0) === 0;
         const sp = document.getElementById('cnt-skip-pending'); if (sp) sp.textContent = skipN;
         const spb = document.getElementById('btn-skip-pending'); if (spb) spb.disabled = skipN === 0;
+        const rs = document.getElementById('cnt-reopen-skipped'); if (rs) rs.textContent = b.skip || 0;
+        const rsb = document.getElementById('btn-reopen-skipped'); if (rsb) rsb.disabled = (b.skip || 0) === 0;
         const bc = document.getElementById('btn-bulkcreate'); if (bc) bc.disabled = (b.create_new || 0) === 0;
         const cp = document.getElementById('btn-complete'); if (cp) cp.disabled = !s.can_complete;
     }
@@ -288,6 +339,70 @@
             } catch (e) {
                 alert('Action failed: ' + e.message);
             }
+        });
+    });
+
+    // ---- expandable line detail + inline edit ----
+    function detailRowFor(lineId) {
+        return document.querySelector('#lines-table tr.detail-row[data-line-id="' + lineId + '"]');
+    }
+
+    document.querySelectorAll('#lines-table tr.line-row').forEach(row => {
+        row.addEventListener('click', async (e) => {
+            if (e.target.closest('[data-noexpand]')) return;   // clicks in the Actions menu don't expand
+            const lineId = row.dataset.lineId;
+            const detail = detailRowFor(lineId);
+            if (!detail) return;
+            const show = detail.style.display === 'none';
+            detail.style.display = show ? '' : 'none';
+            row.classList.toggle('expanded', show);
+            if (show) await loadEnrichment(lineId, detail);
+        });
+    });
+
+    async function loadEnrichment(lineId, detail) {
+        const box = detail.querySelector('.ld-enrichment');
+        if (!box || box.dataset.loaded === 'true') return;
+        box.dataset.loaded = 'true';
+        try {
+            const r = await fetch(base + '/lines/' + lineId + '/enrichment', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} });
+            if (r.status === 204) { box.innerHTML = '<em>No enrichment data (matched directly or not yet enriched).</em>'; return; }
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            box.innerHTML = enrichmentHtml(await r.json());
+        } catch (e) {
+            box.dataset.loaded = 'false';
+            box.innerHTML = '<em style="color:#991b1b;">Could not load enrichment: ' + esc(e.message) + '</em>';
+        }
+    }
+
+    document.querySelectorAll('#lines-table .ld-save').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            const detail = btn.closest('tr.detail-row');
+            const lineId = detail.dataset.lineId;
+            const qty = parseFloat(detail.querySelector('.ld-qty').value);
+            const price = parseFloat(detail.querySelector('.ld-price').value);
+            const body = {
+                quantity: isFinite(qty) ? qty : null,
+                unit_price_foreign: isFinite(price) ? price : null,
+                description: detail.querySelector('.ld-desc').value
+            };
+            btn.disabled = true;
+            try {
+                const updated = await api('PATCH', '/lines/' + lineId, body);
+                const mainRow = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
+                if (mainRow && updated) {
+                    const tds = mainRow.querySelectorAll('td');
+                    // cols: 0 # · 1 art · 2 oems · 3 desc · 4 brand · 5 qty · 6 unit price · 7 line total · 8 status
+                    tds[3].textContent = updated.description || '';
+                    tds[5].innerHTML = (updated.quantity != null ? Number(updated.quantity).toLocaleString(undefined, { maximumFractionDigits: 3 }) : '')
+                        + ' <span class="unit">' + esc(updated.unit || '') + '</span>';
+                    tds[6].textContent = updated.unit_price_foreign != null ? fmtMoney(updated.unit_price_foreign) : '';
+                    tds[7].textContent = updated.line_total_foreign != null ? fmtMoney(updated.line_total_foreign) : '';
+                }
+                const saved = detail.querySelector('.ld-saved');
+                if (saved) { saved.style.display = ''; setTimeout(() => { saved.style.display = 'none'; }, 2000); }
+            } catch (e) { alert('Save failed: ' + e.message); }
+            finally { btn.disabled = false; }
         });
     });
 
@@ -389,6 +504,19 @@
             ]);
     });
 
+    document.getElementById('btn-reopen-skipped').addEventListener('click', () => {
+        const n = document.getElementById('cnt-reopen-skipped').textContent;
+        openModal(
+            '<h3>Reopen skipped lines</h3><p>Move <strong>' + n + '</strong> skipped line(s) back to <em>needs manual</em> so you can review them again?</p>',
+            [
+                { label: 'Cancel', onClick: closeModal },
+                { label: 'Reopen ' + n + ' line(s)', primary: true, onClick: async () => {
+                    try { await api('POST', '/bulk-reopen-skipped'); location.reload(); }
+                    catch (e) { alert('Reopen failed: ' + e.message); }
+                } }
+            ]);
+    });
+
     document.getElementById('btn-bulkcreate').addEventListener('click', () => {
         const n = document.getElementById('cnt-createnew').textContent;
         openModal(
@@ -441,5 +569,25 @@
     }
 
     refreshSummary();
+})();
+
+// ---- delete invoice (works in any document state, so it lives outside the review IIFE) ----
+(function () {
+    const btn = document.getElementById('btn-delete-doc');
+    if (!btn) return;
+    const docId = btn.dataset.docId;
+    const apiKey = document.querySelector('meta[name="api-key"]')?.content || '';
+    btn.addEventListener('click', async () => {
+        if (!confirm('Delete this invoice and all its extracted lines? This cannot be undone. (Any SAP items already created are NOT affected.)')) return;
+        btn.disabled = true;
+        try {
+            const r = await fetch('/api/autohub/documents/' + docId, {
+                method: 'DELETE',
+                headers: apiKey ? { 'X-Api-Key': apiKey } : {}
+            });
+            if (!r.ok) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
+            window.location.href = '/autohub/documents';
+        } catch (e) { alert('Delete failed: ' + e.message); btn.disabled = false; }
+    });
 })();
 </script>
