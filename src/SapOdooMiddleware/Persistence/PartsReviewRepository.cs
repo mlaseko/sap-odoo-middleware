@@ -33,6 +33,18 @@ public interface IPartsReviewRepository
 
     /// <summary>Skip every unresolved (pending / needs_manual) line; sets MatchStrategy='skipped'. Returns the count affected.</summary>
     Task<int> BulkSkipPendingAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>Undo bulk-skip: move every skipped line back to 'needs_manual' (clears MatchStrategy). Returns the count.</summary>
+    Task<int> BulkReopenSkippedAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>Re-run enrichment: reset skipped (non-promotional) lines to 'pending' with enrichment state cleared so the background worker re-queries DGX. Returns the count.</summary>
+    Task<int> BulkReenrichSkippedAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>Operator edits to an extracted line before creation (qty / unit price / description). Recomputes the line total.</summary>
+    Task UpdateLineFieldsAsync(Guid lineId, decimal? quantity, decimal? unitPriceForeign, string? description, CancellationToken ct);
+
+    /// <summary>The persisted DGX enrichment JSON for a line (for the detail panel), or null if never enriched.</summary>
+    Task<string?> GetEnrichmentPayloadAsync(Guid lineId, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
     Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
 
@@ -139,6 +151,72 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("doc", documentId);
         return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> BulkReopenSkippedAsync(Guid documentId, CancellationToken ct)
+    {
+        // Inverse of BulkSkipPendingAsync: skipped → needs_manual so the operator can re-decide. Idempotent.
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'needs_manual', "MatchStrategy" = NULL
+            WHERE "DocumentId" = @doc AND "ReviewStatus" = 'skip';
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> BulkReenrichSkippedAsync(Guid documentId, CancellationToken ct)
+    {
+        // Full reset → 'pending' with enrichment state cleared, so the EnrichmentBackgroundWorker
+        // (pending + EnrichmentSource IS NULL + non-promotional) re-queries DGX and re-routes the line.
+        // Promotional lines are left skipped (the worker never enriches them, so they'd stick at pending).
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'pending',
+                "EnrichmentSource" = NULL, "BorrowedFromArticle" = NULL, "BorrowedFromSupplier" = NULL,
+                "NeonOitmId" = NULL, "EnrichmentStatus" = NULL, "EnrichmentErrorCode" = NULL,
+                "EnrichedAt" = NULL, "EnrichmentPayloadJson" = NULL, "EnrichmentConfirmationRequired" = false,
+                "EnrichmentConfirmedBy" = NULL, "EnrichmentConfirmedAt" = NULL, "MatchStrategy" = NULL
+            WHERE "DocumentId" = @doc AND "ReviewStatus" = 'skip' AND "IsPromotional" = false;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task UpdateLineFieldsAsync(Guid lineId, decimal? quantity, decimal? unitPriceForeign, string? description, CancellationToken ct)
+    {
+        // COALESCE keeps untouched fields; the line total is kept consistent with the edited qty/price.
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "Quantity" = COALESCE(@qty, "Quantity"),
+                "UnitPriceForeign" = COALESCE(@up, "UnitPriceForeign"),
+                "Description" = COALESCE(@desc, "Description"),
+                "LineTotalForeign" = ROUND(
+                    COALESCE(@qty, "Quantity") * COALESCE(@up, "UnitPriceForeign")
+                    * (1 - COALESCE("DiscountPct", 0) / 100.0), 2)
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("qty", (object?)quantity ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("up", (object?)unitPriceForeign ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("desc", (object?)description ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<string?> GetEnrichmentPayloadAsync(Guid lineId, CancellationToken ct)
+    {
+        const string sql = "SELECT \"EnrichmentPayloadJson\" FROM public.\"staging_document_line\" WHERE \"Id\" = @id;";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", lineId);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is null or DBNull ? null : (string)result;
     }
 
     public async Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct)

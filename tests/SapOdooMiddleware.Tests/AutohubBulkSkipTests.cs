@@ -47,4 +47,65 @@ public class AutohubBulkSkipTests
         Assert.IsType<NotFoundResult>(result);
         review.Verify(r => r.BulkSkipPendingAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    [Fact]
+    public async Task BulkReopenSkipped_NeedsManual_CallsReopen()
+    {
+        var docId = Guid.NewGuid();
+        var docs = new Mock<IStagingPartsDocumentRepository>();
+        docs.Setup(d => d.GetByIdAsync(docId, It.IsAny<CancellationToken>())).ReturnsAsync(Doc(docId));
+        var review = new Mock<IPartsReviewRepository>();
+        review.Setup(r => r.BulkReopenSkippedAsync(docId, It.IsAny<CancellationToken>())).ReturnsAsync(24);
+
+        var result = await Build(docs, review).BulkReopenSkipped(docId, reEnrich: false, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(24, ok.Value!.GetType().GetProperty("reopened")!.GetValue(ok.Value));
+        review.Verify(r => r.BulkReopenSkippedAsync(docId, It.IsAny<CancellationToken>()), Times.Once);
+        review.Verify(r => r.BulkReenrichSkippedAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task BulkReopenSkipped_ReEnrich_CallsReenrich()
+    {
+        var docId = Guid.NewGuid();
+        var docs = new Mock<IStagingPartsDocumentRepository>();
+        docs.Setup(d => d.GetByIdAsync(docId, It.IsAny<CancellationToken>())).ReturnsAsync(Doc(docId));
+        var review = new Mock<IPartsReviewRepository>();
+        review.Setup(r => r.BulkReenrichSkippedAsync(docId, It.IsAny<CancellationToken>())).ReturnsAsync(22);
+
+        var result = await Build(docs, review).BulkReopenSkipped(docId, reEnrich: true, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(22, ok.Value!.GetType().GetProperty("reopened")!.GetValue(ok.Value));
+        review.Verify(r => r.BulkReenrichSkippedAsync(docId, It.IsAny<CancellationToken>()), Times.Once);
+        review.Verify(r => r.BulkReopenSkippedAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Delete_DocExists_DeletesAndReturnsOk()
+    {
+        var docId = Guid.NewGuid();
+        var docs = new Mock<IStagingPartsDocumentRepository>();
+        docs.Setup(d => d.GetByIdAsync(docId, It.IsAny<CancellationToken>())).ReturnsAsync(Doc(docId));
+        var review = new Mock<IPartsReviewRepository>();
+
+        var result = await Build(docs, review).Delete(docId, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        docs.Verify(d => d.DeleteAsync(docId, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Delete_DocMissing_NotFound_NoDelete()
+    {
+        var docs = new Mock<IStagingPartsDocumentRepository>();
+        docs.Setup(d => d.GetByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>())).ReturnsAsync((StagingPartsDocumentRow?)null);
+        var review = new Mock<IPartsReviewRepository>();
+
+        var result = await Build(docs, review).Delete(Guid.NewGuid(), CancellationToken.None);
+
+        Assert.IsType<NotFoundResult>(result);
+        docs.Verify(d => d.DeleteAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 }

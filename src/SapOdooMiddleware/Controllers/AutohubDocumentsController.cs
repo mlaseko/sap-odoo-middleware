@@ -74,6 +74,26 @@ public class AutohubDocumentsController : ControllerBase
         return Ok(await _review.ListByDocumentAsync(id, ct));
     }
 
+    /// <summary>Delete an uploaded invoice and its staging lines (and the stored file). Does not affect SAP.</summary>
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(id, ct);
+        if (doc is null) return NotFound();
+
+        await _docs.DeleteAsync(id, ct);   // staging lines cascade
+
+        // Best-effort file cleanup — an orphaned file is harmless and must not fail the delete.
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(doc.FilePath) && System.IO.File.Exists(doc.FilePath))
+                System.IO.File.Delete(doc.FilePath);
+        }
+        catch { /* ignore */ }
+
+        return Ok(new { deleted = true });
+    }
+
     /// <summary>Extraction-progress probe for the Detail page poller (exempt from API key).</summary>
     [HttpGet("{id:guid}/status")]
     public async Task<ActionResult<DocumentStatusResponse>> GetStatus(Guid id, CancellationToken ct)
@@ -180,6 +200,26 @@ public class AutohubDocumentsController : ControllerBase
         return Ok(await _review.GetByIdAsync(lineId, ct));
     }
 
+    /// <summary>The persisted DGX enrichment for a line (detail panel). 204 if the line was never enriched.</summary>
+    [HttpGet("{documentId:guid}/lines/{lineId:guid}/enrichment")]
+    public async Task<IActionResult> GetLineEnrichment(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        var json = await _review.GetEnrichmentPayloadAsync(lineId, ct);
+        return string.IsNullOrWhiteSpace(json) ? NoContent() : Content(json, "application/json");
+    }
+
+    /// <summary>Operator edits to an extracted line before creation (qty / unit price / description).</summary>
+    [HttpPatch("{documentId:guid}/lines/{lineId:guid}")]
+    public async Task<IActionResult> UpdateLine(Guid documentId, Guid lineId, [FromBody] UpdateLineRequest body, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        if (body.Quantity is < 0 || body.UnitPriceForeign is < 0)
+            return BadRequest(new { error = "Quantity and unit price must be non-negative." });
+        await _review.UpdateLineFieldsAsync(lineId, body.Quantity, body.UnitPriceForeign, body.Description?.Trim(), ct);
+        return Ok(await _review.GetByIdAsync(lineId, ct));
+    }
+
     /// <summary>Mark a line 'create_new'. <c>confirmed=true</c> stamps the enrichment confirmation.</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/create-new")]
     public async Task<IActionResult> CreateNewLine(Guid documentId, Guid lineId, [FromBody] CreateNewRequest? body, CancellationToken ct)
@@ -237,6 +277,22 @@ public class AutohubDocumentsController : ControllerBase
         return Ok(new { skipped = await _review.BulkSkipPendingAsync(documentId, ct) });
     }
 
+    /// <summary>
+    /// Undo bulk-skip. Default: skipped → 'needs_manual'. With <c>?reEnrich=true</c>: reset to 'pending'
+    /// with enrichment cleared so the background worker re-queries DGX and re-routes (C1/C2/needs_manual).
+    /// </summary>
+    [HttpPost("{documentId:guid}/bulk-reopen-skipped")]
+    public async Task<IActionResult> BulkReopenSkipped(Guid documentId, [FromQuery] bool reEnrich, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(documentId, ct);
+        if (doc is null) return NotFound();
+
+        var count = reEnrich
+            ? await _review.BulkReenrichSkippedAsync(documentId, ct)
+            : await _review.BulkReopenSkippedAsync(documentId, ct);
+        return Ok(new { reopened = count, reEnriched = reEnrich });
+    }
+
     [HttpPost("{documentId:guid}/bulk-create")]
     public async Task<IActionResult> BulkCreate(Guid documentId, CancellationToken ct)
     {
@@ -292,3 +348,4 @@ public class AutohubDocumentsController : ControllerBase
 
 public sealed record PartsMatchRequest(string ItemCode);
 public sealed record CreateNewRequest(bool Confirmed);
+public sealed record UpdateLineRequest(decimal? Quantity, decimal? UnitPriceForeign, string? Description);
