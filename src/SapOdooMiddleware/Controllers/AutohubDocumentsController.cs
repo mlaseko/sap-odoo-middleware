@@ -166,12 +166,13 @@ public class AutohubDocumentsController : ControllerBase
         // Persist + route: failed/partial → needs_manual; donor already a SAP item → auto-match (C1);
         // otherwise ready for the operator to confirm + create (C2). The modal/review page read the
         // persisted result without re-calling DGX.
-        var routing = await _router.ApplyAsync(lineId, enr, ct);
+        var routing = await _router.ApplyAsync(lineId, line.Brand, enr, ct);
         var routingLabel = routing.Routing switch
         {
-            LineEnrichmentRouting.AutoMatched => "auto_matched",
-            LineEnrichmentRouting.NeedsManual => "needs_manual",
-            _                                 => "ready",
+            LineEnrichmentRouting.AutoMatched      => "auto_matched",
+            LineEnrichmentRouting.NeedsConfirmation => "needs_confirmation",
+            LineEnrichmentRouting.NeedsManual      => "needs_manual",
+            _                                      => "ready",
         };
         return Ok(new
         {
@@ -244,19 +245,24 @@ public class AutohubDocumentsController : ControllerBase
         var lines = await _review.ListByDocumentAsync(documentId, ct);
         var pending = lines.Where(l => l.ReviewStatus == "pending").ToList();
 
-        int newlyMatched = 0, stillPending = 0;
+        int newlyMatched = 0, needsConfirmation = 0, stillPending = 0;
         foreach (var l in pending)
         {
-            var candidate = new PartsLineMatchCandidate(l.Id, l.DocumentId, l.OemNumbers, l.SupplierArticleNumber, l.IsPromotional);
+            var candidate = new PartsLineMatchCandidate(l.Id, l.DocumentId, l.OemNumbers, l.SupplierArticleNumber, l.IsPromotional, l.Brand);
             var decision = await _autoMatch.DecideAsync(candidate, ct);
             switch (decision.Status)
             {
                 case "matched": await _review.SetReviewStatusAsync(l.Id, "matched", decision.ItemCode, ct); newlyMatched++; break;
                 case "skip":    await _review.SetReviewStatusAsync(l.Id, "skip", null, ct); break;
+                case "needs_confirmation":
+                    var d = decision.SuggestedDonor;
+                    await _review.SetNeedsConfirmationAsync(l.Id, d?.ItemCode, d?.OitmId, d?.SupplierName, decision.MatchStrategy, ct);
+                    needsConfirmation++;
+                    break;
                 default:        stillPending++; break;
             }
         }
-        return Ok(new { totalPending = pending.Count, newlyMatched, stillPending });
+        return Ok(new { totalPending = pending.Count, newlyMatched, needsConfirmation, stillPending });
     }
 
     [HttpPost("{documentId:guid}/bulk-mark-pending-as-create-new")]
@@ -321,7 +327,8 @@ public class AutohubDocumentsController : ControllerBase
 
         var counts = await _review.GetStatusCountsAsync(documentId, ct);
         var blocking = counts.GetValueOrDefault("pending") + counts.GetValueOrDefault("create_failed")
-            + counts.GetValueOrDefault("create_new") + counts.GetValueOrDefault("needs_manual");
+            + counts.GetValueOrDefault("create_new") + counts.GetValueOrDefault("needs_manual")
+            + counts.GetValueOrDefault("needs_confirmation");
         if (blocking > 0)
             return Conflict(new { error = "All lines must be matched, created, or skipped before completing review.", counts });
 
@@ -340,7 +347,8 @@ public class AutohubDocumentsController : ControllerBase
             && counts.GetValueOrDefault("pending") == 0
             && counts.GetValueOrDefault("create_failed") == 0
             && counts.GetValueOrDefault("create_new") == 0
-            && counts.GetValueOrDefault("needs_manual") == 0;
+            && counts.GetValueOrDefault("needs_manual") == 0
+            && counts.GetValueOrDefault("needs_confirmation") == 0;
 
         return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, canComplete, status = doc.Status });
     }

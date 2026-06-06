@@ -75,28 +75,33 @@ public sealed class AutoMatchWorker : BackgroundService
         var candidates = await lines.ListPendingMatchCandidatesAsync(BatchSize, ct);
         if (candidates.Count == 0) return;
 
-        int matched = 0, skipped = 0, pending = 0;
+        int matched = 0, skipped = 0, confirm = 0, pending = 0;
         foreach (var line in candidates)
         {
             var decision = await matcher.DecideAsync(line, ct);
             switch (decision.Status)
             {
                 case "matched":
-                    await lines.SetMatchedAsync(line.Id, decision.ItemCode!, ct);
+                    await lines.SetMatchedAsync(line.Id, decision.ItemCode!, decision.MatchStrategy, ct);
                     matched++;
                     break;
                 case "skip":
                     await lines.SetReviewStatusAsync(line.Id, "skip", ct);
                     skipped++;
                     break;
+                case "needs_confirmation":
+                    var d = decision.SuggestedDonor;
+                    await lines.SetNeedsConfirmationAsync(line.Id, d?.ItemCode, d?.OitmId, d?.SupplierName, decision.MatchStrategy, ct);
+                    confirm++;
+                    break;
                 default:
-                    pending++;   // left for the operator
+                    pending++;   // left for the operator / enrichment
                     break;
             }
         }
 
         _logger.LogInformation(
-            "AutoMatch pass: {Matched} matched, {Skipped} skipped, {Pending} left pending (of {Total}).",
-            matched, skipped, pending, candidates.Count);
+            "AutoMatch pass: {Matched} matched, {Skipped} skipped, {Confirm} needs-confirm, {Pending} left pending (of {Total}).",
+            matched, skipped, confirm, pending, candidates.Count);
     }
 }

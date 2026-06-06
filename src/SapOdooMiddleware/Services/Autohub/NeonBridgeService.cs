@@ -11,6 +11,9 @@ public sealed record NeonBridgeLinkResult(NeonBridgeLinkStatus Status, string? E
     public bool Written => Status == NeonBridgeLinkStatus.Linked;
 }
 
+/// <summary>A donor parts_catalog row with the fields needed to gate a supplier-identity match.</summary>
+public sealed record OitmRow(long Id, string? ItemCode, string? ArticleNumber, string? SupplierName);
+
 public interface INeonBridgeService
 {
     /// <summary>
@@ -19,6 +22,9 @@ public interface INeonBridgeService
     /// whose donor row is ALREADY a SAP item — so the line auto-matches instead of minting a duplicate.
     /// </summary>
     Task<string?> GetItemCodeAsync(int neonOitmId, CancellationToken ct);
+
+    /// <summary>Reads the donor row (item_code + supplier_name + article) so the router can enforce supplier identity. Null if missing.</summary>
+    Task<OitmRow?> GetOitmRowAsync(long neonOitmId, CancellationToken ct);
 
     /// <summary>
     /// Links a freshly-created SAP item back to its pre-enriched parts_catalog row by stamping the SAP
@@ -62,6 +68,23 @@ public sealed class NeonBridgeService : INeonBridgeService
         if (result is null or DBNull) return null;
         var code = (string)result;
         return string.IsNullOrWhiteSpace(code) ? null : code;
+    }
+
+    public async Task<OitmRow?> GetOitmRowAsync(long neonOitmId, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        const string sql = "SELECT id, item_code, article_number, supplier_name FROM oitm WHERE id = @id LIMIT 1;";
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", neonOitmId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct)) return null;
+        return new OitmRow(
+            Id:            r.GetInt64(0),
+            ItemCode:      r.IsDBNull(1) ? null : r.GetString(1),
+            ArticleNumber: r.IsDBNull(2) ? null : r.GetString(2),
+            SupplierName:  r.IsDBNull(3) ? null : r.GetString(3));
     }
 
     public async Task<NeonBridgeLinkResult> LinkAsync(int neonOitmId, string sapItemCode, CancellationToken ct)

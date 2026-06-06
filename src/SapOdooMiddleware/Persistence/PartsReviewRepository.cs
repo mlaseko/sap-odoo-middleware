@@ -12,7 +12,8 @@ public sealed record PartsReviewLineRow(
     decimal? Quantity, string? Unit, decimal? UnitPriceForeign, decimal? DiscountPct, decimal? LineTotalForeign,
     bool IsPromotional, string ReviewStatus, string? MatchedItemCode, string? GeneratedItemCode,
     string? EnrichmentSource, string? BorrowedFromArticle, DateTime? EnrichmentConfirmedAt, string? CreateErrorMessage,
-    string? MatchStrategy, string? BorrowedFromSupplier);
+    string? MatchStrategy, string? BorrowedFromSupplier,
+    string? SuggestedDonorItemCode, long? SuggestedDonorOitmId, string? SuggestedDonorSupplier);
 
 /// <summary>A 'create_new' line reduced to what provisioning needs (incl. the persisted enrichment).</summary>
 public sealed record PartsProvisioningLine(
@@ -29,6 +30,10 @@ public interface IPartsReviewRepository
     Task<IReadOnlyList<PartsReviewLineRow>> ListByDocumentAsync(Guid documentId, CancellationToken ct);
     Task<PartsReviewLineRow?> GetByIdAsync(Guid lineId, CancellationToken ct);
     Task SetReviewStatusAsync(Guid lineId, string status, string? matchedItemCode, CancellationToken ct);
+
+    /// <summary>Flag a line 'needs_confirmation' with the suggested donor SAP item (vehicle-group brand ambiguity).</summary>
+    Task SetNeedsConfirmationAsync(Guid lineId, string? suggestedItemCode, long? suggestedOitmId,
+        string? suggestedSupplier, string? matchStrategy, CancellationToken ct);
     Task<int> BulkSetPendingToCreateNewAsync(Guid documentId, CancellationToken ct);
 
     /// <summary>Skip every unresolved (pending / needs_manual) line; sets MatchStrategy='skipped'. Returns the count affected.</summary>
@@ -74,7 +79,8 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         "\"Description\",\"Brand\",\"Quantity\",\"Unit\",\"UnitPriceForeign\",\"DiscountPct\"," +
         "\"LineTotalForeign\",\"IsPromotional\",\"ReviewStatus\",\"MatchedItemCode\",\"GeneratedItemCode\"," +
         "\"EnrichmentSource\",\"BorrowedFromArticle\",\"EnrichmentConfirmedAt\",\"CreateErrorMessage\"," +
-        "\"MatchStrategy\",\"BorrowedFromSupplier\"";
+        "\"MatchStrategy\",\"BorrowedFromSupplier\"," +
+        "\"SuggestedDonorItemCode\",\"SuggestedDonorOitmId\",\"SuggestedDonorSupplier\"";
 
     private readonly ICompanyContext _company;
     public PartsReviewRepository(ICompanyContext company) => _company = company;
@@ -121,6 +127,25 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("status", status);
         cmd.Parameters.AddWithValue("code", (object?)matchedItemCode ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task SetNeedsConfirmationAsync(Guid lineId, string? suggestedItemCode, long? suggestedOitmId,
+        string? suggestedSupplier, string? matchStrategy, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'needs_confirmation', "MatchStrategy" = @ms,
+                "SuggestedDonorItemCode" = @code, "SuggestedDonorOitmId" = @oitm, "SuggestedDonorSupplier" = @sup
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("ms", (object?)matchStrategy ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("code", (object?)suggestedItemCode ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("oitm", (object?)suggestedOitmId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("sup", (object?)suggestedSupplier ?? DBNull.Value);
         cmd.Parameters.AddWithValue("id", lineId);
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -424,8 +449,11 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         BorrowedFromArticle:   r.IsDBNull(18) ? null : r.GetString(18),
         EnrichmentConfirmedAt: r.IsDBNull(19) ? null : r.GetDateTime(19),
         CreateErrorMessage:    r.IsDBNull(20) ? null : r.GetString(20),
-        MatchStrategy:         r.IsDBNull(21) ? null : r.GetString(21),
-        BorrowedFromSupplier:  r.IsDBNull(22) ? null : r.GetString(22));
+        MatchStrategy:          r.IsDBNull(21) ? null : r.GetString(21),
+        BorrowedFromSupplier:   r.IsDBNull(22) ? null : r.GetString(22),
+        SuggestedDonorItemCode: r.IsDBNull(23) ? null : r.GetString(23),
+        SuggestedDonorOitmId:   r.IsDBNull(24) ? null : r.GetInt64(24),
+        SuggestedDonorSupplier: r.IsDBNull(25) ? null : r.GetString(25));
 
     private static List<string> ParseOems(NpgsqlDataReader r, int ordinal)
     {
