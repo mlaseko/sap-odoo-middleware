@@ -30,6 +30,15 @@ public class EnrichmentStrategiesTests
         => Assert.Equal(expected, EnrichmentStrategies.ResolveSourceCrossSupplier(source));
 
     [Theory]
+    [InlineData("tecdoc_direct",        "tecdoc_direct_needs_confirmation")]
+    [InlineData("borrowed_oem_bridge",  "borrowed_oem_bridge_needs_confirmation")]
+    [InlineData("germax_local",         "germax_needs_confirmation")]
+    [InlineData("rapidapi_tecdoc_live", "rapidapi_needs_confirmation")]
+    [InlineData("something_else",       "vehicle_group_brand_needs_confirmation")]
+    public void ResolveSourceNeedsConfirmation_ReturnsExpected(string source, string expected)
+        => Assert.Equal(expected, EnrichmentStrategies.ResolveSourceNeedsConfirmation(source));
+
+    [Theory]
     [InlineData("borrowed_cross_supplier_create_new", true)]
     [InlineData("germax_cross_supplier_create_new", true)]
     [InlineData("rapidapi_cross_supplier_create_new", true)]

@@ -39,6 +39,16 @@ public static class EnrichmentStrategies
         _                      => "enrichment_cross_supplier_create_new",
     };
 
+    /// <summary>Invoice brand is a vehicle-group code (VAG/BMW/…) or missing → operator confirms (use donor / create-new).</summary>
+    public static string ResolveSourceNeedsConfirmation(string? source) => source switch
+    {
+        "tecdoc_direct"        => "tecdoc_direct_needs_confirmation",
+        "borrowed_oem_bridge"  => "borrowed_oem_bridge_needs_confirmation",
+        "germax_local"         => "germax_needs_confirmation",
+        "rapidapi_tecdoc_live" => "rapidapi_needs_confirmation",
+        _                      => "vehicle_group_brand_needs_confirmation",
+    };
+
     /// <summary>True for any cross-supplier create-new strategy (needs an own-identity oitm row, not a donor write).</summary>
     public static bool IsCrossSupplierStrategy(string? strategy) =>
         strategy is "borrowed_cross_supplier_create_new"

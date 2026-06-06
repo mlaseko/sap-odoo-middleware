@@ -77,9 +77,9 @@ public class EnrichmentResultRouterTests
         var r = await router.ApplyAsync(lineId, "VAG", Success(1959, "borrowed_oem_bridge"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.NeedsConfirmation, r.Routing);
-        Assert.Equal("vehicle_group_brand_needs_confirmation", r.MatchStrategy);
+        Assert.Equal("borrowed_oem_bridge_needs_confirmation", r.MatchStrategy);
         review.Verify(x => x.SetNeedsConfirmationAsync(lineId, "VAG11941", 1959L, "Borsehung",
-            "vehicle_group_brand_needs_confirmation", It.IsAny<CancellationToken>()), Times.Once);
+            "borrowed_oem_bridge_needs_confirmation", It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -95,16 +95,18 @@ public class EnrichmentResultRouterTests
     }
 
     [Fact]
-    public async Task DonorWithoutItemCode_ReadyForReview()
+    public async Task DonorWithoutItemCode_DifferentSupplier_RoutesCrossSupplier()
     {
+        // Slice 2.1: a donor with NO item_code under a different supplier must still route cross-supplier
+        // (pre-fix this fell through to a plain create-new and minted onto the wrong-supplier donor).
         var (router, review, bridge) = Build();
         var lineId = Guid.NewGuid();
-        Donor(bridge, 2000, null, "Borsehung");   // donor not yet a SAP item
+        Donor(bridge, 2000, null, "Borsehung");
 
         var r = await router.ApplyAsync(lineId, "vika", Success(2000, "borrowed_oem_bridge"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
-        Assert.Equal("borrowed_oem_bridge_create_new", r.MatchStrategy);
+        Assert.Equal("borrowed_cross_supplier_create_new", r.MatchStrategy);
         review.Verify(x => x.SetReviewStatusAsync(It.IsAny<Guid>(), "matched", It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -158,6 +160,55 @@ public class EnrichmentResultRouterTests
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
         Assert.Equal("rapidapi_cross_supplier_create_new", r.MatchStrategy);
+    }
+
+    // ── Slice 2.1: classify supplier identity even when the donor has item_code=NULL (fresh Path E). ──
+
+    [Fact]
+    public async Task PathE_DonorNullItemCode_SameSupplier_RoutesC2_WritesToDonor()
+    {
+        // Donor: supplier=VAICO, item_code=NULL (fresh RapidAPI row); invoice brand=VAICO.
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 10186, null, "VAICO");
+
+        var r = await router.ApplyAsync(lineId, "VAICO", Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
+        Assert.Equal("rapidapi_tecdoc_live_create_new", r.MatchStrategy);   // NOT cross-supplier → writes to donor
+        Assert.False(EnrichmentStrategies.IsCrossSupplierStrategy(r.MatchStrategy));
+        review.Verify(x => x.SetNeedsConfirmationAsync(It.IsAny<Guid>(), It.IsAny<string?>(), It.IsAny<long?>(), It.IsAny<string?>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task PathE_DonorNullItemCode_DifferentSupplier_RoutesCrossSupplier()
+    {
+        // The production bug: donor supplier=VAICO, item_code=NULL; invoice brand=vika.
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 10186, null, "VAICO");
+
+        var r = await router.ApplyAsync(lineId, "vika", Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
+        Assert.Equal("rapidapi_cross_supplier_create_new", r.MatchStrategy);
+        Assert.True(EnrichmentStrategies.IsCrossSupplierStrategy(r.MatchStrategy));  // → own-identity row at Bulk Create
+    }
+
+    [Fact]
+    public async Task PathE_DonorNullItemCode_VehicleGroupBrand_RoutesNeedsConfirmation()
+    {
+        // Donor: supplier=VAICO, item_code=NULL; invoice brand=VAG (vehicle-group code).
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 10186, null, "VAICO");
+
+        var r = await router.ApplyAsync(lineId, "VAG", Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.NeedsConfirmation, r.Routing);
+        Assert.Equal("rapidapi_needs_confirmation", r.MatchStrategy);
+        review.Verify(x => x.SetNeedsConfirmationAsync(lineId, null, 10186L, "VAICO",
+            "rapidapi_needs_confirmation", It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

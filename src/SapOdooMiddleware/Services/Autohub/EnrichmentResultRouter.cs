@@ -15,15 +15,16 @@ public interface IEnrichmentResultRouter
 
 /// <summary>
 /// Persists a DGX <c>/enrich_item</c> result on the line and decides its fate, enforcing supplier
-/// identity (Slice 1.6 — a SAP item is exactly one supplier+article):
+/// identity (Slice 1.6 — a SAP item is exactly one supplier+article). Supplier identity is classified
+/// FIRST, whether or not the donor already carries an <c>item_code</c> (Slice 2.1 — fresh Path E /
+/// Germax donors start with <c>item_code=NULL</c>):
 /// <list type="bullet">
 ///   <item>no usable data (failed / partial) → <c>needs_manual</c>;</item>
-///   <item>donor already a SAP item AND same supplier → <b>auto-match</b> (Path C1);</item>
-///   <item>donor already a SAP item BUT a vehicle-group / unknown brand → <c>needs_confirmation</c>
-///         (operator picks use-existing / create-new / skip);</item>
-///   <item>donor already a SAP item BUT a different supplier → create-new with borrowed enrichment
-///         (never link across suppliers);</item>
-///   <item>donor not yet a SAP item → ready for review (Path C2).</item>
+///   <item>same supplier AND donor already a SAP item → <b>auto-match</b> (Path C1);</item>
+///   <item>same supplier but donor has no code yet → create-new ON the donor row (Path C2);</item>
+///   <item>vehicle-group / unknown brand → <c>needs_confirmation</c> (operator picks use-existing / create-new / skip);</item>
+///   <item>different specific supplier → create-new with borrowed enrichment, minting an own-identity
+///         row (never link across suppliers, never write our code to the donor).</item>
 /// </list>
 /// Shared by the on-demand endpoint and the background worker so both route identically.
 /// </summary>
@@ -67,13 +68,19 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
             catch (Exception ex) { _logger.LogWarning(ex, "Donor lookup failed for oitm {OitmId}; treating as create-new.", oitmId); }
         }
 
-        // Donor already maps to a SAP item — supplier identity decides what to do.
-        if (donor is not null && !string.IsNullOrWhiteSpace(donor.ItemCode))
+        // Donor row resolved — supplier identity decides what to do, EVEN when the donor has no SAP
+        // code yet. Fresh Path E (RapidAPI) / Germax rows start with item_code=NULL, so classifying
+        // only when item_code was present (the Slice 2 bug) let cross-supplier lines fall through to a
+        // plain create-new and mint SAP items onto the wrong-supplier donor row (Slice 2.1 fix).
+        if (donor is not null)
         {
+            var donorHasItemCode = !string.IsNullOrWhiteSpace(donor.ItemCode);
             switch (BrandClassifier.Classify(invoiceBrand, donor.SupplierName))
             {
-                case BrandClassifier.MatchKind.SameSupplier:
+                // Same brand as the donor → the donor IS our row.
+                case BrandClassifier.MatchKind.SameSupplier when donorHasItemCode:
                 {
+                    // C1 — donor is already a SAP item: direct auto-match.
                     var strategy = EnrichmentStrategies.ResolveSourceAutoMatch(source);
                     await Record(confirmationRequired: false, strategy);
                     await _review.SetReviewStatusAsync(lineId, "matched", donor.ItemCode, ct);
@@ -82,30 +89,44 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
                     return new EnrichmentApplyResult(LineEnrichmentRouting.AutoMatched, donor.ItemCode, strategy);
                 }
 
+                case BrandClassifier.MatchKind.SameSupplier:
+                {
+                    // C2 — donor exists for OUR brand but has no SAP code yet: Bulk Create writes the new
+                    // item_code onto this donor row (no own-identity row needed — it's already ours).
+                    var strategy = EnrichmentStrategies.ResolveSourceCreateNew(source);
+                    await Record(enr.ConfirmationRequired, strategy);
+                    _logger.LogInformation("Line {LineId} → create-new on same-supplier donor {OitmId} ({Supplier}) via {Strategy}.",
+                        lineId, donor.Id, donor.SupplierName, strategy);
+                    return new EnrichmentApplyResult(LineEnrichmentRouting.ReadyForReview, null, strategy);
+                }
+
+                case BrandClassifier.MatchKind.DifferentSupplier:
+                {
+                    // Different specific supplier — borrow the enrichment but mint a NEW own-identity SAP
+                    // item; never link across suppliers and never write our code to the donor. Fires now
+                    // regardless of donor.ItemCode (the Slice 2.1 fix for fresh Path E donors).
+                    var strategy = EnrichmentStrategies.ResolveSourceCrossSupplier(source);
+                    await Record(confirmationRequired: false, strategy);
+                    _logger.LogInformation("Line {LineId} cross-supplier (brand '{Brand}' vs donor {Supplier}, donorHasItemCode={Has}) → create-new borrowed.",
+                        lineId, invoiceBrand, donor.SupplierName, donorHasItemCode);
+                    return new EnrichmentApplyResult(LineEnrichmentRouting.ReadyForReview, null, strategy);
+                }
+
                 case BrandClassifier.MatchKind.VehicleGroupBrand:
                 case BrandClassifier.MatchKind.NoBrandOnInvoice:
                 {
-                    const string strategy = "vehicle_group_brand_needs_confirmation";
+                    // Generic / missing invoice brand → operator decides (use donor's part or create new).
+                    var strategy = EnrichmentStrategies.ResolveSourceNeedsConfirmation(source);
                     await Record(confirmationRequired: true, strategy);
                     await _review.SetNeedsConfirmationAsync(lineId, donor.ItemCode, donor.Id, donor.SupplierName, strategy, ct);
                     _logger.LogInformation("Line {LineId} → needs_confirmation: brand '{Brand}' vs donor {Code} ({Supplier}).",
                         lineId, invoiceBrand, donor.ItemCode, donor.SupplierName);
                     return new EnrichmentApplyResult(LineEnrichmentRouting.NeedsConfirmation, donor.ItemCode, strategy);
                 }
-
-                case BrandClassifier.MatchKind.DifferentSupplier:
-                {
-                    // Different supplier — borrow the enrichment but mint a NEW SAP item; never link across suppliers.
-                    var strategy = EnrichmentStrategies.ResolveSourceCrossSupplier(source);
-                    await Record(confirmationRequired: false, strategy);
-                    _logger.LogInformation("Line {LineId} cross-supplier (brand '{Brand}' vs donor {Supplier}) → create-new borrowed.",
-                        lineId, invoiceBrand, donor.SupplierName);
-                    return new EnrichmentApplyResult(LineEnrichmentRouting.ReadyForReview, null, strategy);
-                }
             }
         }
 
-        // Donor not yet a SAP item (or unknown) → usual create-new path (Path C2).
+        // No donor row at all (unknown oitm) → plain create-new (Path C2).
         var createStrategy = EnrichmentStrategies.ResolveSourceCreateNew(source);
         await Record(enr.ConfirmationRequired, createStrategy);
         return new EnrichmentApplyResult(LineEnrichmentRouting.ReadyForReview, null, createStrategy);
