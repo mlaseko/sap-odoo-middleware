@@ -48,7 +48,10 @@ BEGIN
           AND l."Brand" IS NOT NULL
           AND lower(btrim(l."Brand")) <> lower(btrim(o.supplier_name))   -- guard: only true drift
     LOOP
-        -- 1) mint the own-identity row under our brand
+        -- 1) FIRST clear donor's item_code (releases unique constraint slot)
+        UPDATE oitm SET item_code = NULL WHERE id = rec.donor_id;
+
+        -- 2) NOW mint the own-identity row under our brand (no conflict)
         INSERT INTO oitm (article_number, supplier_name, canonical_oem_number, item_code, tecdoc_article_id, source)
         VALUES (rec.article_number,
                 rec.brand,
@@ -60,14 +63,11 @@ BEGIN
                      ELSE 'molas_rapidapi_cross_supplier' END)
         RETURNING id INTO new_id;
 
-        -- 2) carry the donor's OEM cross-references onto the new row
+        -- 3) carry the donor's OEM cross-references onto the new row
         INSERT INTO oitm_cross_reference (oitm_id, oem_number, reference_type)
         SELECT new_id, oem_number, reference_type
         FROM oitm_cross_reference
         WHERE oitm_id = rec.donor_id AND reference_type = 'oem';
-
-        -- 3) restore the donor's TecDoc identity (no SAP code)
-        UPDATE oitm SET item_code = NULL WHERE id = rec.donor_id;
 
         -- 4) repoint the staging line at its real SAP item
         UPDATE staging_document_line SET "NeonOitmId" = new_id WHERE "Id" = rec.line_id;
@@ -88,4 +88,4 @@ WHERE id IN (10186, 10187, 10189, 10190, 10191, 10193, 10194, 10195)   -- donors
    OR source LIKE 'molas_%cross_supplier%'                              -- new rows: expect supplier='vika'
 ORDER BY id;
 
-ROLLBACK;   -- DRY RUN. Review the NOTICE + verification output above, then change to COMMIT and re-run.
+COMMIT;  Review the NOTICE + verification output above, then change to COMMIT and re-run.
