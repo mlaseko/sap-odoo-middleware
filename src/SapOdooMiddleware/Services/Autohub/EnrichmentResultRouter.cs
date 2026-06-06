@@ -43,7 +43,6 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
     public async Task<EnrichmentApplyResult> ApplyAsync(Guid lineId, string? invoiceBrand, EnrichmentResponse enr, CancellationToken ct)
     {
         var source = enr.SourceLabel;
-        var borrowed = string.Equals(source, "borrowed_oem_bridge", StringComparison.OrdinalIgnoreCase);
         var status = enr.Status ?? (enr.ItemData is null ? "partial" : "success");
         var payload = JsonSerializer.Serialize(enr);
 
@@ -75,7 +74,7 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
             {
                 case BrandClassifier.MatchKind.SameSupplier:
                 {
-                    var strategy = borrowed ? "borrowed_oem_bridge_auto_match" : "enrichment_direct_auto_match";
+                    var strategy = EnrichmentStrategies.ResolveSourceAutoMatch(source);
                     await Record(confirmationRequired: false, strategy);
                     await _review.SetReviewStatusAsync(lineId, "matched", donor.ItemCode, ct);
                     _logger.LogInformation("Line {LineId} auto-matched to {Code} via {Strategy} (same supplier {Supplier}).",
@@ -97,7 +96,7 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
                 case BrandClassifier.MatchKind.DifferentSupplier:
                 {
                     // Different supplier — borrow the enrichment but mint a NEW SAP item; never link across suppliers.
-                    const string strategy = "borrowed_cross_supplier_create_new";
+                    var strategy = EnrichmentStrategies.ResolveSourceCrossSupplier(source);
                     await Record(confirmationRequired: false, strategy);
                     _logger.LogInformation("Line {LineId} cross-supplier (brand '{Brand}' vs donor {Supplier}) → create-new borrowed.",
                         lineId, invoiceBrand, donor.SupplierName);
@@ -107,7 +106,7 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
         }
 
         // Donor not yet a SAP item (or unknown) → usual create-new path (Path C2).
-        var createStrategy = borrowed ? "borrowed_oem_bridge_create_new" : "enrichment_direct";
+        var createStrategy = EnrichmentStrategies.ResolveSourceCreateNew(source);
         await Record(enr.ConfirmationRequired, createStrategy);
         return new EnrichmentApplyResult(LineEnrichmentRouting.ReadyForReview, null, createStrategy);
     }

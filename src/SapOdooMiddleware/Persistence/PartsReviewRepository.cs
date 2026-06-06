@@ -19,7 +19,7 @@ public sealed record PartsReviewLineRow(
 public sealed record PartsProvisioningLine(
     Guid Id, string? SupplierArticleNumber, List<string> OemNumbers, string? Brand,
     string? Description, decimal? UnitPriceForeign, bool EnrichmentConfirmed,
-    long? NeonOitmId, string? EnrichmentPayloadJson);
+    long? NeonOitmId, string? EnrichmentPayloadJson, string? MatchStrategy);
 
 /// <summary>A line awaiting background enrichment.</summary>
 public sealed record EnrichmentCandidate(
@@ -50,6 +50,9 @@ public interface IPartsReviewRepository
 
     /// <summary>The persisted DGX enrichment JSON for a line (for the detail panel), or null if never enriched.</summary>
     Task<string?> GetEnrichmentPayloadAsync(Guid lineId, CancellationToken ct);
+
+    /// <summary>Repoint a line at a different parts_catalog row (after a cross-supplier own-identity row is minted).</summary>
+    Task UpdateNeonOitmIdAsync(Guid lineId, long neonOitmId, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
     Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
 
@@ -244,6 +247,16 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         return result is null or DBNull ? null : (string)result;
     }
 
+    public async Task UpdateNeonOitmIdAsync(Guid lineId, long neonOitmId, CancellationToken ct)
+    {
+        const string sql = "UPDATE public.\"staging_document_line\" SET \"NeonOitmId\" = @oitm WHERE \"Id\" = @id;";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("oitm", neonOitmId);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct)
     {
         const string sql = """
@@ -401,7 +414,7 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         const string sql = """
             SELECT "Id","SupplierArticleNumber","OemNumbers","Brand","Description","UnitPriceForeign",
                    ("EnrichmentConfirmedAt" IS NOT NULL) AS confirmed,
-                   "NeonOitmId", "EnrichmentPayloadJson"
+                   "NeonOitmId", "EnrichmentPayloadJson", "MatchStrategy"
             FROM public."staging_document_line"
             WHERE "DocumentId" = @doc AND "ReviewStatus" = 'create_new'
             ORDER BY "LineNumber";
@@ -422,7 +435,8 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
                 UnitPriceForeign:      r.IsDBNull(5) ? null : r.GetDecimal(5),
                 EnrichmentConfirmed:   !r.IsDBNull(6) && r.GetBoolean(6),
                 NeonOitmId:            r.IsDBNull(7) ? null : r.GetInt64(7),
-                EnrichmentPayloadJson: r.IsDBNull(8) ? null : r.GetString(8)));
+                EnrichmentPayloadJson: r.IsDBNull(8) ? null : r.GetString(8),
+                MatchStrategy:         r.IsDBNull(9) ? null : r.GetString(9)));
         }
         return list;
     }

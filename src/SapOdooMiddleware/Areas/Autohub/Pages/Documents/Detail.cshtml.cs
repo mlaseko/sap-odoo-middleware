@@ -48,6 +48,19 @@ public class DetailModel : PageModel
         _               => ("pill-yellow", "pending"),
     };
 
+    /// <summary>Small "where did this match come from" badge derived from MatchStrategy (Slice 2). Empty = no badge.</summary>
+    public static (string Label, string Css) SourceBadge(string? matchStrategy)
+    {
+        var s = matchStrategy ?? "";
+        if (s.Contains("cross_supplier"))                          return ("Cross-supplier", "pill-grey");
+        if (s.Contains("germax"))                                  return ("Germax", "pill-purple");
+        if (s.Contains("rapidapi"))                               return ("RapidAPI", "pill-orange");
+        if (s.Contains("borrowed_oem_bridge"))                    return ("OEM bridge", "pill-blue");
+        if (s is "tier1_oem" or "tier2_article")                  return ("SAP mirror", "pill-green");
+        if (s.Contains("tecdoc") || s.Contains("enrichment_direct")) return ("TecDoc", "pill-green");
+        return ("", "");
+    }
+
     public (string Css, string Text) ValidationBadge()
     {
         if (Doc.Status == "failed") return ("badge-red", "failed");

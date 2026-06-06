@@ -136,7 +136,8 @@
         var oems = string.Join(", ", l.OemNumbers);
         var pill = SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.LinePill(l.ReviewStatus);
         <tr class="line-row @(l.IsPromotional ? "promo" : null)" data-line-id="@l.Id"
-            data-suggested-code="@l.SuggestedDonorItemCode" data-suggested-supplier="@l.SuggestedDonorSupplier">
+            data-suggested-code="@l.SuggestedDonorItemCode" data-suggested-supplier="@l.SuggestedDonorSupplier"
+            data-source="@l.EnrichmentSource">
             <td class="num">@l.LineNumber</td>
             <td class="col-art">@l.SupplierArticleNumber</td>
             <td class="col-oems" title="@oems">@oems</td>
@@ -147,14 +148,10 @@
             <td class="num">@(l.LineTotalForeign is { } lt ? sym + lt.ToString("N2") : "")</td>
             <td class="status-cell">
                 <span class="pill @pill.Css">@pill.Text</span>
-                @if (l.MatchStrategy is "borrowed_oem_bridge_auto_match" or "enrichment_direct_auto_match")
+                @{ var sb = SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.SourceBadge(l.MatchStrategy); }
+                @if (sb.Label.Length > 0)
                 {
-                    var donor = l.BorrowedFromArticle;
-                    var sup = l.BorrowedFromSupplier;
-                    var tip = !string.IsNullOrEmpty(donor)
-                        ? $"Auto-matched to existing SAP item {l.MatchedItemCode} — donor article {donor}{(string.IsNullOrEmpty(sup) ? "" : $" ({sup})")} shares an OEM."
-                        : $"Auto-matched to existing SAP item {l.MatchedItemCode} via enrichment.";
-                    <span class="pill pill-blue" title="@tip" style="margin-left:4px;">OEM&nbsp;bridge</span>
+                    <span class="pill @sb.Css" title="@l.MatchStrategy" style="margin-left:4px;">@sb.Label</span>
                 }
             </td>
             @if (Model.IsEditable)
@@ -423,6 +420,7 @@
         const brand = tds[4].textContent.trim();
         const code = row.dataset.suggestedCode || '';
         const sup = row.dataset.suggestedSupplier || '';
+        const src = row.dataset.source || '';
 
         let html = '<h3>Confirm match — vehicle-group brand</h3>' +
             '<p>The invoice brand is a group code, not a supplier, so this match needs your confirmation.</p>' +
@@ -433,7 +431,7 @@
             '</table>';
         if (code) {
             html += '<p style="margin-top:8px;">Suggested existing SAP item: <strong>' + esc(code) + '</strong>' +
-                (sup ? ' — ' + esc(sup) : '') + '</p>';
+                (sup ? ' — ' + esc(sup) : '') + (src ? ' <span class="hint">(source: ' + esc(src) + ')</span>' : '') + '</p>';
         }
 
         const act = async (path, body, label) => {
