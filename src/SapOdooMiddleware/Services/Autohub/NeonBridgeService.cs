@@ -27,6 +27,14 @@ public interface INeonBridgeService
     Task<OitmRow?> GetOitmRowAsync(long neonOitmId, CancellationToken ct);
 
     /// <summary>
+    /// Cross-supplier create-new: mint a NEW own-identity oitm row for the freshly-created SAP item (under
+    /// our supplier), copying the donor's canonical OEM + OEM cross-references so future invoices auto-match
+    /// it — WITHOUT touching the donor. Returns the new oitm id, or null if the donor row was not found.
+    /// </summary>
+    Task<long?> CreateOwnIdentityRowAsync(long donorOitmId, string sapItemCode, string source,
+        string? articleNumber, string? supplierName, CancellationToken ct);
+
+    /// <summary>
     /// Links a freshly-created SAP item back to its pre-enriched parts_catalog row by stamping the SAP
     /// ItemCode onto <c>oitm</c> (only WHERE item_code IS NULL — never overwrites a populated value).
     /// This is the middleware's ONLY write to the catalog; the enrichment service (DGX) owns row
@@ -85,6 +93,56 @@ public sealed class NeonBridgeService : INeonBridgeService
             ItemCode:      r.IsDBNull(1) ? null : r.GetString(1),
             ArticleNumber: r.IsDBNull(2) ? null : r.GetString(2),
             SupplierName:  r.IsDBNull(3) ? null : r.GetString(3));
+    }
+
+    public async Task<long?> CreateOwnIdentityRowAsync(long donorOitmId, string sapItemCode, string source,
+        string? articleNumber, string? supplierName, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        // Insert the new row, copying canonical_oem_number (and article fallback) from the donor. Defaults
+        // handle cleanup_status / is_kit / create_date / write_date / id. Donor is left untouched.
+        const string insert = """
+            INSERT INTO oitm (article_number, supplier_name, canonical_oem_number, item_code, tecdoc_article_id, source)
+            SELECT COALESCE(@article, d.article_number), @supplier, d.canonical_oem_number, @itemCode, NULL, @source
+            FROM oitm d WHERE d.id = @donor
+            RETURNING id;
+            """;
+        long newId;
+        await using (var cmd = new NpgsqlCommand(insert, conn))
+        {
+            cmd.Parameters.AddWithValue("article", (object?)articleNumber ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("supplier", (object?)supplierName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("itemCode", sapItemCode);
+            cmd.Parameters.AddWithValue("source", source);
+            cmd.Parameters.AddWithValue("donor", donorOitmId);
+            var res = await cmd.ExecuteScalarAsync(ct);
+            if (res is null or DBNull)
+            {
+                _logger.LogWarning("Cross-supplier: donor oitm {Donor} not found; cannot mint own-identity row for {Code}.", donorOitmId, sapItemCode);
+                return null;
+            }
+            newId = Convert.ToInt64(res);
+        }
+
+        // Carry the donor's OEM cross-references onto the new row (new id → no conflicts possible).
+        const string copy = """
+            INSERT INTO oitm_cross_reference (oitm_id, oem_number, reference_type)
+            SELECT @to, oem_number, reference_type
+            FROM oitm_cross_reference WHERE oitm_id = @from AND reference_type = 'oem';
+            """;
+        await using (var cmd = new NpgsqlCommand(copy, conn))
+        {
+            cmd.Parameters.AddWithValue("to", newId);
+            cmd.Parameters.AddWithValue("from", donorOitmId);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        _logger.LogInformation(
+            "Cross-supplier: minted own-identity oitm {NewId} (supplier {Supplier}, ItemCode {Code}); copied OEMs from donor {Donor}.",
+            newId, supplierName, sapItemCode, donorOitmId);
+        return newId;
     }
 
     public async Task<NeonBridgeLinkResult> LinkAsync(int neonOitmId, string sapItemCode, CancellationToken ct)

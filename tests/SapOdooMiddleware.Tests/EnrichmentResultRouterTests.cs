@@ -109,6 +109,58 @@ public class EnrichmentResultRouterTests
     }
 
     [Fact]
+    public async Task GermaxLocal_SameSupplier_AutoMatches()
+    {
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 3001, "LR15000", "GERMAX");
+
+        var r = await router.ApplyAsync(lineId, "GERMAX", Success(3001, "germax_local"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.AutoMatched, r.Routing);
+        Assert.Equal("germax_local_auto_match", r.MatchStrategy);
+    }
+
+    [Fact]
+    public async Task GermaxLocal_DifferentSupplier_CrossSupplier()
+    {
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 3002, "LR15001", "GERMAX");
+
+        var r = await router.ApplyAsync(lineId, "Borsehung", Success(3002, "germax_local"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
+        Assert.Equal("germax_cross_supplier_create_new", r.MatchStrategy);
+    }
+
+    [Fact]
+    public async Task RapidApi_DonorWithoutItemCode_RoutesToCreateNew()
+    {
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 4001, null, "BREMBO");   // RapidAPI minted a row with no SAP code yet
+
+        var r = await router.ApplyAsync(lineId, "BREMBO", Success(4001, "rapidapi_tecdoc_live"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
+        Assert.Equal("rapidapi_tecdoc_live_create_new", r.MatchStrategy);
+    }
+
+    [Fact]
+    public async Task RapidApi_DifferentSupplier_CrossSupplier()
+    {
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 4002, "BM33000", "BREMBO");
+
+        var r = await router.ApplyAsync(lineId, "MEYLE", Success(4002, "rapidapi_tecdoc_live"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
+        Assert.Equal("rapidapi_cross_supplier_create_new", r.MatchStrategy);
+    }
+
+    [Fact]
     public async Task PartialEnrichment_NeedsManual_NoDonorLookup()
     {
         var (router, review, bridge) = Build();

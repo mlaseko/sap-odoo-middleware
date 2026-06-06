@@ -155,15 +155,33 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         {
             try
             {
-                var link = await _bridge.LinkAsync(neonOitmId, itemCode, ct);
-                if (link.Status == NeonBridgeLinkStatus.BlockedByExisting)
-                    _logger.LogError(
-                        "SAP item {ItemCode} created but oitm id {OitmId} was already linked to '{Existing}' — likely a duplicate SAP item; reconcile.",
-                        itemCode, neonOitmId, link.ExistingItemCode);
-                else if (link.Status == NeonBridgeLinkStatus.NotFound)
-                    _logger.LogWarning(
-                        "SAP item {ItemCode} created but oitm id {OitmId} not found; cannot link the Neon mirror.",
-                        itemCode, neonOitmId);
+                if (EnrichmentStrategies.IsCrossSupplierStrategy(line.MatchStrategy))
+                {
+                    // Cross-supplier: never write our code to the donor (different supplier). Mint an
+                    // own-identity oitm row for the new SAP item and repoint the line at it, so future
+                    // invoices for this (brand, article) auto-match instead of minting another duplicate.
+                    var newId = await _bridge.CreateOwnIdentityRowAsync(
+                        neonOitmId, itemCode, EnrichmentStrategies.ResolveOwnIdentitySource(line.MatchStrategy),
+                        line.SupplierArticleNumber, line.Brand, ct);
+                    if (newId is { } nid)
+                        await _review.UpdateNeonOitmIdAsync(line.Id, nid, ct);
+                    else
+                        _logger.LogWarning(
+                            "SAP item {ItemCode} created but donor oitm {OitmId} missing; own-identity row not minted.",
+                            itemCode, neonOitmId);
+                }
+                else
+                {
+                    var link = await _bridge.LinkAsync(neonOitmId, itemCode, ct);
+                    if (link.Status == NeonBridgeLinkStatus.BlockedByExisting)
+                        _logger.LogError(
+                            "SAP item {ItemCode} created but oitm id {OitmId} was already linked to '{Existing}' — likely a duplicate SAP item; reconcile.",
+                            itemCode, neonOitmId, link.ExistingItemCode);
+                    else if (link.Status == NeonBridgeLinkStatus.NotFound)
+                        _logger.LogWarning(
+                            "SAP item {ItemCode} created but oitm id {OitmId} not found; cannot link the Neon mirror.",
+                            itemCode, neonOitmId);
+                }
             }
             catch (Exception ex)
             {
