@@ -44,6 +44,7 @@ public class DetailModel : PageModel
         "skip"          => ("pill-grey", "skip"),
         "create_failed" => ("pill-red", "create failed"),
         "needs_manual"  => ("pill-orange", "needs manual"),
+        "needs_confirmation" => ("pill-purple", "confirm match"),
         _               => ("pill-yellow", "pending"),
     };
 

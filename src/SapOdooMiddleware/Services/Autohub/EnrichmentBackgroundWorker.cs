@@ -69,7 +69,7 @@ public sealed class EnrichmentBackgroundWorker : BackgroundService
         var candidates = await review.GetLinesNeedingEnrichmentAsync(_settings.BatchSize, ct);
         if (candidates.Count == 0) return;
 
-        int ready = 0, autoMatched = 0, manual = 0;
+        int ready = 0, autoMatched = 0, confirm = 0, manual = 0;
         foreach (var line in candidates)
         {
             ct.ThrowIfCancellationRequested();
@@ -79,13 +79,15 @@ public sealed class EnrichmentBackgroundWorker : BackgroundService
                 var enr = await enrichment.EnrichLineAsync(
                     new EnrichmentInput(line.SupplierArticleNumber, clean, line.Brand, line.Description, null), ct);
 
-                // Persist + route (failed/partial → needs_manual; donor already a SAP item → auto-match).
-                var result = await router.ApplyAsync(line.Id, enr, ct);
+                // Persist + route (failed/partial → needs_manual; donor already a SAP item → auto-match
+                // when same supplier, needs_confirmation for vehicle-group brands, create-new cross-supplier).
+                var result = await router.ApplyAsync(line.Id, line.Brand, enr, ct);
                 switch (result.Routing)
                 {
-                    case LineEnrichmentRouting.AutoMatched: autoMatched++; break;
-                    case LineEnrichmentRouting.NeedsManual: manual++; break;
-                    default:                                ready++; break;
+                    case LineEnrichmentRouting.AutoMatched:      autoMatched++; break;
+                    case LineEnrichmentRouting.NeedsConfirmation: confirm++; break;
+                    case LineEnrichmentRouting.NeedsManual:      manual++; break;
+                    default:                                     ready++; break;
                 }
             }
             catch (Exception ex)
@@ -100,7 +102,7 @@ public sealed class EnrichmentBackgroundWorker : BackgroundService
             await Task.Delay(200, ct);   // be nice to DGX
         }
 
-        _logger.LogInformation("Enrichment pass: {Ready} ready, {AutoMatched} auto-matched, {Manual} → needs_manual (of {Total}).",
-            ready, autoMatched, manual, candidates.Count);
+        _logger.LogInformation("Enrichment pass: {Ready} ready, {AutoMatched} auto-matched, {Confirm} needs-confirm, {Manual} → needs_manual (of {Total}).",
+            ready, autoMatched, confirm, manual, candidates.Count);
     }
 }

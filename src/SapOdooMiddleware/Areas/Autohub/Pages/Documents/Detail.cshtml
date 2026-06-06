@@ -91,6 +91,7 @@
             <span class="rc">@Model.Count("create_new") to create</span> ·
             <span class="rc">@Model.Count("skip") skipped</span> ·
             <span class="rc">@Model.Count("needs_manual") needs manual</span> ·
+            <span class="rc">@Model.Count("needs_confirmation") confirm</span> ·
             <span class="rc">@Model.Count("pending") pending</span> ·
             <span class="rc">@Model.Count("create_failed") failed</span>
         </div>
@@ -134,7 +135,8 @@
     {
         var oems = string.Join(", ", l.OemNumbers);
         var pill = SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.LinePill(l.ReviewStatus);
-        <tr class="line-row @(l.IsPromotional ? "promo" : null)" data-line-id="@l.Id">
+        <tr class="line-row @(l.IsPromotional ? "promo" : null)" data-line-id="@l.Id"
+            data-suggested-code="@l.SuggestedDonorItemCode" data-suggested-supplier="@l.SuggestedDonorSupplier">
             <td class="num">@l.LineNumber</td>
             <td class="col-art">@l.SupplierArticleNumber</td>
             <td class="col-oems" title="@oems">@oems</td>
@@ -161,6 +163,10 @@
                     <details class="actions-menu">
                         <summary>⋮</summary>
                         <div class="menu">
+                            @if (l.ReviewStatus == "needs_confirmation")
+                            {
+                                <button type="button" data-action="confirm">Confirm match…</button>
+                            }
                             <button type="button" data-action="match">Match…</button>
                             <button type="button" data-action="create_new">Create New (enrich)</button>
                             <button type="button" data-action="skip">Skip</button>
@@ -223,7 +229,7 @@
         matched: ['pill-green', 'matched'], create_new: ['pill-blue', 'create new'],
         skip: ['pill-grey', 'skip'], pending: ['pill-yellow', 'pending'],
         created: ['pill-green', 'created'], create_failed: ['pill-red', 'create failed'],
-        needs_manual: ['pill-orange', 'needs manual']
+        needs_manual: ['pill-orange', 'needs manual'], needs_confirmation: ['pill-purple', 'confirm match']
     };
 
     const API_KEY = document.querySelector('meta[name="api-key"]')?.content || '';
@@ -259,6 +265,7 @@
             '<span class="rc">' + (b.create_new || 0) + ' to create</span> · ' +
             '<span class="rc">' + (b.skip || 0) + ' skipped</span> · ' +
             '<span class="rc">' + (b.needs_manual || 0) + ' needs manual</span> · ' +
+            '<span class="rc">' + (b.needs_confirmation || 0) + ' confirm</span> · ' +
             '<span class="rc">' + (b.pending || 0) + ' pending</span> · ' +
             '<span class="rc">' + (b.create_failed || 0) + ' failed</span>';
         const skipN = (b.pending || 0) + (b.needs_manual || 0);
@@ -332,6 +339,8 @@
                 } else if (action === 'reopen') {
                     const updated = await api('POST', '/lines/' + lineId + '/reopen');
                     if (updated) setRowPill(row, updated.review_status);
+                } else if (action === 'confirm') {
+                    openConfirmModal(row, lineId);
                 } else if (action === 'create_new') {
                     await createNewFlow(row, lineId);
                 }
@@ -405,6 +414,43 @@
             finally { btn.disabled = false; }
         });
     });
+
+    // ---- needs_confirmation: vehicle-group brand, operator picks use-existing / create-new / skip ----
+    function openConfirmModal(row, lineId) {
+        const tds = row.querySelectorAll('td');
+        const article = tds[1].textContent.trim();
+        const oems = (tds[2].getAttribute('title') || tds[2].textContent).trim();
+        const brand = tds[4].textContent.trim();
+        const code = row.dataset.suggestedCode || '';
+        const sup = row.dataset.suggestedSupplier || '';
+
+        let html = '<h3>Confirm match — vehicle-group brand</h3>' +
+            '<p>The invoice brand is a group code, not a supplier, so this match needs your confirmation.</p>' +
+            '<table class="kv">' +
+            '<tr><th>Brand</th><td>' + esc(brand) + '</td></tr>' +
+            '<tr><th>Article</th><td>' + esc(article) + '</td></tr>' +
+            '<tr><th>OEMs</th><td>' + esc(oems) + '</td></tr>' +
+            '</table>';
+        if (code) {
+            html += '<p style="margin-top:8px;">Suggested existing SAP item: <strong>' + esc(code) + '</strong>' +
+                (sup ? ' — ' + esc(sup) : '') + '</p>';
+        }
+
+        const act = async (path, body, label) => {
+            try {
+                const u = await api('POST', '/lines/' + lineId + path, body);
+                if (u) setRowPill(row, u.review_status);
+                closeModal();
+                await refreshSummary();
+            } catch (e) { alert(label + ' failed: ' + e.message); }
+        };
+
+        const actions = [{ label: 'Cancel', onClick: closeModal }];
+        if (code) actions.push({ label: 'Use ' + code, primary: true, onClick: () => act('/match', { item_code: code }, 'Match') });
+        actions.push({ label: 'Create new', onClick: () => act('/create-new', { confirmed: true }, 'Create new') });
+        actions.push({ label: 'Skip', onClick: () => act('/skip', undefined, 'Skip') });
+        openModal(html, actions);
+    }
 
     async function createNewFlow(row, lineId) {
         // 1) enrich; 2) auto-matched to an existing SAP item (Path C1) -> show, no create;
