@@ -30,7 +30,8 @@ DECLARE
     new_id  BIGINT;
     n_done  INT := 0;
 BEGIN
-    FOR rec IN
+    -- Materialise the target set BEFORE mutating, so the loop never scans oitm while we change it.
+    CREATE TEMP TABLE _slice21_targets ON COMMIT DROP AS
         SELECT o.id            AS donor_id,
                o.item_code     AS minted_code,
                o.article_number,
@@ -46,9 +47,15 @@ BEGIN
         WHERE o.id IN (10186, 10187, 10189, 10190, 10191, 10193, 10194, 10195)
           AND o.item_code IS NOT NULL
           AND l."Brand" IS NOT NULL
-          AND lower(btrim(l."Brand")) <> lower(btrim(o.supplier_name))   -- guard: only true drift
-    LOOP
-        -- 1) mint the own-identity row under our brand
+          AND lower(btrim(l."Brand")) <> lower(btrim(o.supplier_name));   -- guard: only true drift
+
+    FOR rec IN SELECT * FROM _slice21_targets LOOP
+        -- 1) free the donor's item_code FIRST. There is a unique index on oitm.item_code, so the new
+        --    own-identity row cannot carry the same code while the donor still holds it. rec already
+        --    captured the donor's values, so nulling it now is safe. (The index allows many NULLs.)
+        UPDATE oitm SET item_code = NULL WHERE id = rec.donor_id;
+
+        -- 2) mint the own-identity row under our brand, now holding the minted code
         INSERT INTO oitm (article_number, supplier_name, canonical_oem_number, item_code, tecdoc_article_id, source)
         VALUES (rec.article_number,
                 rec.brand,
@@ -60,14 +67,11 @@ BEGIN
                      ELSE 'molas_rapidapi_cross_supplier' END)
         RETURNING id INTO new_id;
 
-        -- 2) carry the donor's OEM cross-references onto the new row
+        -- 3) carry the donor's OEM cross-references onto the new row
         INSERT INTO oitm_cross_reference (oitm_id, oem_number, reference_type)
         SELECT new_id, oem_number, reference_type
         FROM oitm_cross_reference
         WHERE oitm_id = rec.donor_id AND reference_type = 'oem';
-
-        -- 3) restore the donor's TecDoc identity (no SAP code)
-        UPDATE oitm SET item_code = NULL WHERE id = rec.donor_id;
 
         -- 4) repoint the staging line at its real SAP item
         UPDATE staging_document_line SET "NeonOitmId" = new_id WHERE "Id" = rec.line_id;
