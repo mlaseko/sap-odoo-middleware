@@ -49,7 +49,7 @@ public class NeonLiquiMolyRepository : INeonLiquiMolyRepository
                 "PrimaryBarcodeUomEntry","PrimaryBarcodeBaseQtyInGroup","HasUnitBarcode",
                 "Approvals","SpecificationItems","OverviewProperties",
                 "Application","LiquiMolyRecommendations",
-                "ProductInfoPdfUrl","SafetyDataSheetPdfUrl"
+                "ProductInfoPdfUrl","SafetyDataSheetPdfUrl","IsActive"
             ) VALUES (
                 @ArticleNumber,@Name,@ProductUrl,
                 @Category,@SubCategory,@Description,
@@ -59,7 +59,7 @@ public class NeonLiquiMolyRepository : INeonLiquiMolyRepository
                 @PrimaryBarcodeUomEntry,@PrimaryBarcodeBaseQtyInGroup,@HasUnitBarcode,
                 @Approvals,@SpecificationItems,@OverviewProperties,
                 @Application,@LiquiMolyRecommendations,
-                @ProductInfoPdfUrl,@SafetyDataSheetPdfUrl
+                @ProductInfoPdfUrl,@SafetyDataSheetPdfUrl,TRUE
             )
             ON CONFLICT ("ArticleNumber") DO UPDATE SET
                 "Name"                        = EXCLUDED."Name",
