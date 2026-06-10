@@ -83,7 +83,16 @@ builder.Services.AddHttpClient<ICategoryClassifier, HttpCategoryClassifier>((sp,
 });
 
 // --- Liqui Moly scraper (typed HttpClient) ---
-builder.Services.AddHttpClient<LiquiMolyProductScraperService>();
+// Send browser-like headers: the site's bot protection 403s requests with no/odd User-Agent, which
+// the scraper would otherwise surface as "Liqui Moly returned no data for this article".
+builder.Services.AddHttpClient<LiquiMolyProductScraperService>((sp, http) =>
+{
+    var s = sp.GetRequiredService<IOptions<LiquiMolyScraperSettings>>().Value;
+    http.Timeout = TimeSpan.FromSeconds(s.HttpTimeoutSeconds > 0 ? s.HttpTimeoutSeconds : 30);
+    http.DefaultRequestHeaders.UserAgent.ParseAdd(s.UserAgent);
+    http.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+    http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+});
 
 // --- Item Provisioning components ---
 builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
