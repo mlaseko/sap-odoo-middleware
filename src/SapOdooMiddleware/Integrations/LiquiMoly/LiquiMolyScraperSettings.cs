@@ -68,6 +68,16 @@ public class LiquiMolyScraperSettings
     public int WarmupIntervalHours { get; set; } = 22;
 
     /// <summary>
+    /// Explicit product-page URLs for "orphan" items that Liqui Moly does NOT list in any crawlable
+    /// category and that its (currently broken, HTTP 500) on-site search can't resolve — e.g. Coolant
+    /// KFS 18 (23152). Each page is fetched directly during the index build and ALL of its variant SKUs
+    /// are mined in (so one URL covers the product and every pack size). Values may be relative
+    /// ("/en/coolant-antifreeze-kfs-18-p005722.html") or absolute. Add a line and restart to onboard a
+    /// straggler — no code change or rebuild required.
+    /// </summary>
+    public List<string> ExtraProductUrls { get; set; } = new();
+
+    /// <summary>
     /// Optional hard-coded OWW API prefix (e.g. "/api/v2/oww/101/TZA/ENG/1").
     /// When empty the prefix is auto-detected from the fragment of the first
     /// oil-guide redirect (e.g. "#oww:/api/v2/oww/101/TZA/ENG/1/...")

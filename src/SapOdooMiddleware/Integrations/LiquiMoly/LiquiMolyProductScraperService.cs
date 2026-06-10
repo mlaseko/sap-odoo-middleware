@@ -339,6 +339,51 @@ public class LiquiMolyProductScraperService
                 map.Count - before, productBaseUrls.Count, before, map.Count);
         }
 
+        // Phase 2c — "orphan" products that LiquiMoly doesn't list in ANY crawlable category and that its
+        // (HTTP 500) on-site search can't resolve. Fetch each configured product URL directly and mine all
+        // of its variant SKUs. Config-driven (LiquiMoly:ExtraProductUrls) so onboarding a straggler is a
+        // settings line + restart, not a code change.
+        if (_settings.ExtraProductUrls is { Count: > 0 })
+        {
+            var urls = _settings.ExtraProductUrls
+                .Where(u => !string.IsNullOrWhiteSpace(u))
+                .Select(u => u.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                    ? u
+                    : _settings.BaseUrl.TrimEnd('/') + "/" + u.TrimStart('/'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var before = map.Count;
+            await ForEachBoundedAsync(urls, _settings.MaxParallelRequests, async url =>
+            {
+                try
+                {
+                    var html = await FetchHtmlAsync(url, ct);
+                    if (string.IsNullOrWhiteSpace(html))
+                    {
+                        _logger.LogWarning(_logPrefix + "Extra product URL returned empty: {Url}", url);
+                        return;
+                    }
+
+                    var doc = new HtmlDocument();
+                    doc.LoadHtml(html);
+                    var added = 0;
+                    foreach (var sku in ExtractVariantSkusFromPage(doc))
+                        if (map.TryAdd(sku, url + "#" + sku)) added++;
+
+                    _logger.LogInformation(_logPrefix + "Extra product URL {Url} -> {Added} SKU(s)", url, added);
+                    await Task.Delay(_settings.DelayBetweenRequestsMs, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, _logPrefix + "Extra product URL failed: {Url}", url);
+                }
+            }, ct);
+
+            _logger.LogInformation(
+                _logPrefix + "Extra product URLs: +{New} SKU(s) from {Count} URL(s)", map.Count - before, urls.Count);
+        }
+
         var result   = new Dictionary<string, string>(map, StringComparer.OrdinalIgnoreCase);
         var sizesMap = new Dictionary<string, string>(skuSizes, StringComparer.OrdinalIgnoreCase);
         var allSizes = allSizesByBase.ToDictionary(
