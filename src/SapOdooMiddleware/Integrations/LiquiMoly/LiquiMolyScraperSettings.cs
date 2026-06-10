@@ -2,6 +2,14 @@ public class LiquiMolyScraperSettings
 {
     public string BaseUrl { get; set; } = "https://www.liqui-moly.com";
 
+    /// <summary>
+    /// Storefront/region path for the catalogue SEARCH fallback (e.g. "/en/gb"). The international
+    /// "/en" search endpoint returns HTTP 500 and omits region-only products (e.g. Pro-Line items,
+    /// which live at "/en/gb/...#&lt;sku&gt;"). Used ONLY for the search fallback — the category crawl
+    /// still uses <see cref="CategoryPaths"/>, so already-indexed SKUs are unaffected.
+    /// </summary>
+    public string SearchStorefrontPath { get; set; } = "/en/gb";
+
     public int DelayBetweenCategoriesMs { get; set; } = 1200;
 
     public int MaxParallelRequests { get; set; } = 6;

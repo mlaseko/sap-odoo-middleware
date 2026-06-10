@@ -1391,14 +1391,17 @@ public class LiquiMolyProductScraperService
     /// Searches the Magento 2 catalogue for a single SKU and returns its product URL
     /// (with fragment) if found, or null.
     ///
-    /// Endpoint: /en/catalogsearch/result/?q={sku}
+    /// Endpoint: {SearchStorefrontPath}/catalogsearch/result/?q={sku} (e.g. /en/gb/...).
     /// The result page contains the same <c>a.product-variation</c> links as category
     /// pages, so we can reuse <see cref="ExtractSkuMappingsFromPage"/>.
     /// </summary>
     private async Task<string?> TrySearchForSkuAsync(string sku, CancellationToken ct)
     {
+        // Search on the regional storefront (e.g. "/en/gb"): the international "/en" search 500s and
+        // omits region-only products (e.g. Pro-Line), which is why those SKUs miss the "/en" index.
+        var region = "/" + (_settings.SearchStorefrontPath ?? "/en/gb").Trim('/');
         var searchUrl = _settings.BaseUrl.TrimEnd('/')
-                      + "/en/catalogsearch/result/?q=" + sku;
+                      + region + "/catalogsearch/result/?q=" + Uri.EscapeDataString(sku);
         try
         {
             var html = await FetchHtmlAsync(searchUrl, ct);
