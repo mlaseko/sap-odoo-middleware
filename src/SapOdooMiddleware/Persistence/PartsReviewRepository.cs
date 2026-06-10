@@ -411,12 +411,16 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
 
     public async Task<IReadOnlyList<PartsProvisioningLine>> ListCreateNewAsync(Guid documentId, CancellationToken ct)
     {
+        // Includes 'create_failed' so a re-run of Bulk Create retries lines that failed earlier (e.g.
+        // DGX/enrichment was offline). This is safe: a line only reaches 'create_failed' BEFORE the SAP
+        // item is written (enrichment/forex/SAP-write errors all fail fast); once SAP creation succeeds
+        // the line becomes 'created', so retrying a failed line can never double-create a SAP item.
         const string sql = """
             SELECT "Id","SupplierArticleNumber","OemNumbers","Brand","Description","UnitPriceForeign",
                    ("EnrichmentConfirmedAt" IS NOT NULL) AS confirmed,
                    "NeonOitmId", "EnrichmentPayloadJson", "MatchStrategy"
             FROM public."staging_document_line"
-            WHERE "DocumentId" = @doc AND "ReviewStatus" = 'create_new'
+            WHERE "DocumentId" = @doc AND "ReviewStatus" IN ('create_new', 'create_failed')
             ORDER BY "LineNumber";
             """;
         await using var conn = await OpenAsync(ct);

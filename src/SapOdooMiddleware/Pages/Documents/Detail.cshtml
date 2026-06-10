@@ -77,7 +77,7 @@
             <div class="review-actions">
                 <button id="btn-automatch" class="btn btn-sm" type="button">Auto-match again</button>
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
-                <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@C("create_new")</span>)</button>
+                <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@(C("create_new") + C("create_failed"))</span>)</button>
                 <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>
             </div>
         }
@@ -228,9 +228,10 @@
             '<span class="rc">' + (b.skip || 0) + ' skipped</span> · ' +
             '<span class="rc">' + (b.pending || 0) + ' pending</span> · ' +
             '<span class="rc">' + (b.create_failed || 0) + ' failed</span>';
-        const cnt = document.getElementById('cnt-createnew'); if (cnt) cnt.textContent = b.create_new || 0;
+        const createN = (b.create_new || 0) + (b.create_failed || 0);   // failed lines are retried by Bulk Create
+        const cnt = document.getElementById('cnt-createnew'); if (cnt) cnt.textContent = createN;
         const mp = document.getElementById('btn-markpending'); if (mp) mp.disabled = (b.pending || 0) === 0;
-        const bc = document.getElementById('btn-bulkcreate'); if (bc) bc.disabled = (b.create_new || 0) === 0;
+        const bc = document.getElementById('btn-bulkcreate'); if (bc) bc.disabled = createN === 0;
         const cp = document.getElementById('btn-complete'); if (cp) cp.disabled = !s.can_complete;
     }
 
@@ -350,7 +351,7 @@
     document.getElementById('btn-bulkcreate').addEventListener('click', () => {
         const n = document.getElementById('cnt-createnew').textContent;
         openModal(
-            '<h3>Bulk create items</h3><p>You are about to create <strong>' + n + '</strong> item(s) in SAP and Odoo. This is irreversible. Continue?</p>',
+            '<h3>Bulk create items</h3><p>You are about to create <strong>' + n + '</strong> item(s) in SAP and Odoo (including any previously failed lines, which will be retried). This is irreversible. Continue?</p>',
             [
                 { label: 'Cancel', onClick: closeModal },
                 { label: 'Create ' + n + ' item(s)', primary: true, onClick: runBulkCreate }
