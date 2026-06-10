@@ -2,6 +2,14 @@ public class LiquiMolyScraperSettings
 {
     public string BaseUrl { get; set; } = "https://www.liqui-moly.com";
 
+    /// <summary>
+    /// Storefront/region path for the catalogue SEARCH fallback (e.g. "/en/gb"). The international
+    /// "/en" search endpoint returns HTTP 500 and omits region-only products (e.g. Pro-Line items,
+    /// which live at "/en/gb/...#&lt;sku&gt;"). Used ONLY for the search fallback — the category crawl
+    /// still uses <see cref="CategoryPaths"/>, so already-indexed SKUs are unaffected.
+    /// </summary>
+    public string SearchStorefrontPath { get; set; } = "/en/gb";
+
     public int DelayBetweenCategoriesMs { get; set; } = 1200;
 
     public int MaxParallelRequests { get; set; } = 6;
@@ -35,6 +43,16 @@ public class LiquiMolyScraperSettings
     /// as a bot. Default: 1 (fully sequential, safest).
     /// </summary>
     public int MaxConcurrency { get; set; } = 1;
+
+    /// <summary>
+    /// Mine ALL variant SKUs from each product page during the index build. Category listing pages
+    /// only show SOME size-variants as tiles; the rest (e.g. Coolant KFS 18, specific Pro-Line sizes)
+    /// are dropped, so those article numbers never make it into the index. The product page exposes
+    /// every variant as a <c>variantswitch-sku-{sku}</c> element — mining them makes the index complete.
+    /// Costs one extra page fetch per discovered product (the build is cached), so the first build is
+    /// slower; warm it via POST /api/liquimoly/scrape/{sku} or raise BulkCreate:PerItemTimeoutSeconds.
+    /// </summary>
+    public bool MineAllVariants { get; set; } = true;
 
     /// <summary>
     /// Optional hard-coded OWW API prefix (e.g. "/api/v2/oww/101/TZA/ENG/1").
