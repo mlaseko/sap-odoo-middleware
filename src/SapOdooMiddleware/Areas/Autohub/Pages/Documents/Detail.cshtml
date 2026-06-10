@@ -106,7 +106,7 @@
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
                 <button id="btn-skip-pending" class="btn btn-sm" type="button">Skip All Pending (<span id="cnt-skip-pending">@(Model.Count("pending") + Model.Count("needs_manual"))</span>)</button>
                 <button id="btn-reopen-skipped" class="btn btn-sm" type="button">Reopen Skipped (<span id="cnt-reopen-skipped">@Model.Count("skip")</span>)</button>
-                <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@Model.Count("create_new")</span>)</button>
+                <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@(Model.Count("create_new") + Model.Count("create_failed"))</span>)</button>
                 <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>
             </div>
         }
@@ -266,13 +266,14 @@
             '<span class="rc">' + (b.pending || 0) + ' pending</span> · ' +
             '<span class="rc">' + (b.create_failed || 0) + ' failed</span>';
         const skipN = (b.pending || 0) + (b.needs_manual || 0);
-        const cnt = document.getElementById('cnt-createnew'); if (cnt) cnt.textContent = b.create_new || 0;
+        const createN = (b.create_new || 0) + (b.create_failed || 0);   // failed lines are retried by Bulk Create
+        const cnt = document.getElementById('cnt-createnew'); if (cnt) cnt.textContent = createN;
         const mp = document.getElementById('btn-markpending'); if (mp) mp.disabled = (b.pending || 0) === 0;
         const sp = document.getElementById('cnt-skip-pending'); if (sp) sp.textContent = skipN;
         const spb = document.getElementById('btn-skip-pending'); if (spb) spb.disabled = skipN === 0;
         const rs = document.getElementById('cnt-reopen-skipped'); if (rs) rs.textContent = b.skip || 0;
         const rsb = document.getElementById('btn-reopen-skipped'); if (rsb) rsb.disabled = (b.skip || 0) === 0;
-        const bc = document.getElementById('btn-bulkcreate'); if (bc) bc.disabled = (b.create_new || 0) === 0;
+        const bc = document.getElementById('btn-bulkcreate'); if (bc) bc.disabled = createN === 0;
         const cp = document.getElementById('btn-complete'); if (cp) cp.disabled = !s.can_complete;
     }
 
@@ -572,7 +573,7 @@
     document.getElementById('btn-bulkcreate').addEventListener('click', () => {
         const n = document.getElementById('cnt-createnew').textContent;
         openModal(
-            '<h3>Bulk create items</h3><p>You are about to create <strong>' + n + '</strong> item(s) in SAP. This is irreversible. Borrowed-enrichment lines that were not confirmed will be flagged for confirmation rather than created. Continue?</p>',
+            '<h3>Bulk create items</h3><p>You are about to create <strong>' + n + '</strong> item(s) in SAP (including any previously failed lines, which will be retried). This is irreversible. Borrowed-enrichment lines that were not confirmed will be flagged for confirmation rather than created. Continue?</p>',
             [
                 { label: 'Cancel', onClick: closeModal },
                 { label: 'Create ' + n + ' item(s)', primary: true, onClick: runBulkCreate }

@@ -30,7 +30,10 @@ public class InvoiceItemCreationService
     public async Task<BulkCreateResult> BulkCreateAsync(Guid documentId, CancellationToken ct)
     {
         var all = await _lines.ListByDocumentAsync(documentId, ct);
-        var toCreate = all.Where(l => l.ReviewStatus == "create_new").ToList();
+        // Include 'create_failed' so re-running Bulk Create retries lines that failed earlier (e.g. SAP
+        // was offline). Safe: provisioning checks SAP for an existing item first (the "recovered" path),
+        // so retrying never double-creates.
+        var toCreate = all.Where(l => l.ReviewStatus is "create_new" or "create_failed").ToList();
 
         int created = 0;
         var failures = new List<BulkCreateFailure>();
