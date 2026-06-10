@@ -55,6 +55,19 @@ public class LiquiMolyScraperSettings
     public bool MineAllVariants { get; set; } = true;
 
     /// <summary>
+    /// Build the product index in the background on startup so the first /scrape or bulk-create call hits
+    /// a warm cache instead of triggering the cold crawl + variant mining (which exceeds the CDN's ~100s
+    /// request timeout and returns 524). Set false to revert to lazy build-on-first-request.
+    /// </summary>
+    public bool WarmupOnStartup { get; set; } = true;
+
+    /// <summary>
+    /// How often the background warmup rebuilds the index. Should be slightly below the 23h cache lifetime
+    /// so the cache is refreshed before it expires and no request ever pays the cold-build cost.
+    /// </summary>
+    public int WarmupIntervalHours { get; set; } = 22;
+
+    /// <summary>
     /// Optional hard-coded OWW API prefix (e.g. "/api/v2/oww/101/TZA/ENG/1").
     /// When empty the prefix is auto-detected from the fragment of the first
     /// oil-guide redirect (e.g. "#oww:/api/v2/oww/101/TZA/ENG/1/...")

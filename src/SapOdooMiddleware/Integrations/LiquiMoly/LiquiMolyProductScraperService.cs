@@ -26,6 +26,9 @@ public class LiquiMolyProductScraperService
 
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromHours(23);
 
+    // Serialises index builds across all callers so the expensive cold build runs once, not N times.
+    private static readonly SemaphoreSlim _buildLock = new(1, 1);
+
     // Exposed for subclasses to give each brand its own cache slot and log prefix.
     protected virtual string BrandKey   => "LiquiMoly";
     // Includes a trailing space so log messages read naturally when concatenated.
@@ -170,8 +173,45 @@ public class LiquiMolyProductScraperService
             return (cached.Index, cached.SkuSizes, cached.AllSizes);
         }
 
-        _logger.LogInformation(_logPrefix + "Building product index from category pages...");
-        return await BuildProductIndexAsync(ct);
+        // Stampede guard: the cold build (category crawl + variant mining) takes well over a minute,
+        // so serialise concurrent callers — the first builds, the rest reuse the freshly cached result
+        // instead of each kicking off their own crawl.
+        await _buildLock.WaitAsync(ct);
+        try
+        {
+            if (_brandCache.TryGetValue(BrandKey, out var fresh)
+                && fresh.Index.Count > 0
+                && DateTimeOffset.UtcNow - fresh.BuiltAt < CacheLifetime)
+            {
+                _logger.LogInformation(_logPrefix + "Using cached index (built while waiting) | {Count} SKUs", fresh.Index.Count);
+                return (fresh.Index, fresh.SkuSizes, fresh.AllSizes);
+            }
+
+            _logger.LogInformation(_logPrefix + "Building product index from category pages...");
+            return await BuildProductIndexAsync(ct);
+        }
+        finally
+        {
+            _buildLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Builds (or rebuilds) the product index off the request path. The background warmup service calls
+    /// this on startup and on a timer so HTTP (/scrape) and bulk-create callers always hit a warm cache
+    /// instead of paying the cold crawl + variant-mining cost (which exceeds the CDN's request timeout).
+    /// </summary>
+    public async Task WarmIndexAsync(CancellationToken ct)
+    {
+        await _buildLock.WaitAsync(ct);
+        try
+        {
+            await BuildProductIndexAsync(ct);
+        }
+        finally
+        {
+            _buildLock.Release();
+        }
     }
 
     /// <summary>
