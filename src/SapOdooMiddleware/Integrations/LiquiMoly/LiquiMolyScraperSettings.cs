@@ -15,6 +15,14 @@ public class LiquiMolyScraperSettings
     public int HttpTimeoutSeconds { get; set; } = 30;
 
     /// <summary>
+    /// Browser-like User-Agent sent with every request. Liqui Moly's CDN/bot-protection rejects
+    /// requests with no (or a non-browser) User-Agent with HTTP 403, which the scraper sees as
+    /// "no data". Override if the site starts blocking this UA.
+    /// </summary>
+    public string UserAgent { get; set; } =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+    /// <summary>
     /// Number of article numbers to scrape per batch.
     /// Smaller batches reduce peak memory usage and allow incremental saves.
     /// Default: 50.
