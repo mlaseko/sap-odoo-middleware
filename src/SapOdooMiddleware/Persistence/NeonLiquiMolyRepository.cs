@@ -49,7 +49,7 @@ public class NeonLiquiMolyRepository : INeonLiquiMolyRepository
                 "PrimaryBarcodeUomEntry","PrimaryBarcodeBaseQtyInGroup","HasUnitBarcode",
                 "Approvals","SpecificationItems","OverviewProperties",
                 "Application","LiquiMolyRecommendations",
-                "ProductInfoPdfUrl","SafetyDataSheetPdfUrl","IsActive"
+                "ProductInfoPdfUrl","SafetyDataSheetPdfUrl","IsActive","ScrapedAt"
             ) VALUES (
                 @ArticleNumber,@Name,@ProductUrl,
                 @Category,@SubCategory,@Description,
@@ -59,7 +59,7 @@ public class NeonLiquiMolyRepository : INeonLiquiMolyRepository
                 @PrimaryBarcodeUomEntry,@PrimaryBarcodeBaseQtyInGroup,@HasUnitBarcode,
                 @Approvals,@SpecificationItems,@OverviewProperties,
                 @Application,@LiquiMolyRecommendations,
-                @ProductInfoPdfUrl,@SafetyDataSheetPdfUrl,TRUE
+                @ProductInfoPdfUrl,@SafetyDataSheetPdfUrl,TRUE,NOW()
             )
             ON CONFLICT ("ArticleNumber") DO UPDATE SET
                 "Name"                        = EXCLUDED."Name",
@@ -85,7 +85,8 @@ public class NeonLiquiMolyRepository : INeonLiquiMolyRepository
                 "Application"                 = EXCLUDED."Application",
                 "LiquiMolyRecommendations"    = EXCLUDED."LiquiMolyRecommendations",
                 "ProductInfoPdfUrl"           = EXCLUDED."ProductInfoPdfUrl",
-                "SafetyDataSheetPdfUrl"       = EXCLUDED."SafetyDataSheetPdfUrl";
+                "SafetyDataSheetPdfUrl"       = EXCLUDED."SafetyDataSheetPdfUrl",
+                "ScrapedAt"                   = NOW();
             """;
 
         await using var conn = await OpenAsync(ct);
