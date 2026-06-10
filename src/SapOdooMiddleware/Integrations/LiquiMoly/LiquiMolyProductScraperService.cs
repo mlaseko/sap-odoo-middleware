@@ -215,6 +215,16 @@ public class LiquiMolyProductScraperService
     }
 
     /// <summary>
+    /// True when a freshly-built index is cached, so a scrape resolves from memory instead of triggering
+    /// the long cold build. The /scrape HTTP endpoint uses this to fail fast (503) while the background
+    /// warmup is still running, rather than blocking past the CDN's ~100s request timeout (524).
+    /// </summary>
+    public bool IsIndexWarm() =>
+        _brandCache.TryGetValue(BrandKey, out var c)
+        && c.Index.Count > 0
+        && DateTimeOffset.UtcNow - c.BuiltAt < CacheLifetime;
+
+    /// <summary>
     /// Builds the SKU → product URL index.
     ///
     /// The Liqui-Moly site now embeds SKUs directly in the URL fragment of every
