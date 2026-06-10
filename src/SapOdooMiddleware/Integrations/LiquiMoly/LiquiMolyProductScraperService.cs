@@ -525,15 +525,17 @@ public class LiquiMolyProductScraperService
 
     private static int ExtractTotalPages(HtmlDocument doc)
     {
-        // Magento 2 pagination: <a href="...?p=N">N</a>
-        var pageLinks = doc.DocumentNode.SelectNodes("//a[contains(@href,'?p=')]");
+        // Pagination links look like "...?p=N" (slug categories, e.g. /en/engine-oils.html?p=2)
+        // or "...?cat=5016&p=N" (query-param categories, where the page param is "&p=", encoded
+        // in the markup as "&amp;p="). Match the number after either '?p=' or '&p='.
+        var pageLinks = doc.DocumentNode.SelectNodes("//a[contains(@href,'p=')]");
         if (pageLinks == null) return 1;
 
         int max = 1;
         foreach (var link in pageLinks)
         {
-            var href = link.GetAttributeValue("href", "");
-            var m = Regex.Match(href, @"\?p=(\d+)");
+            var href = HtmlEntity.DeEntitize(link.GetAttributeValue("href", "")) ?? "";
+            var m = Regex.Match(href, @"[?&]p=(\d+)");
             if (m.Success && int.TryParse(m.Groups[1].Value, out var p) && p > max)
                 max = p;
         }
