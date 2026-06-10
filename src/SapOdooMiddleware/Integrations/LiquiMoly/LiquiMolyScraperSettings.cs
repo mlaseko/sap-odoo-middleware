@@ -82,5 +82,9 @@ public class LiquiMolyScraperSettings
         { "/en/additives.html",          "Additives"       },
         { "/en/vehicle-care.html",       "Vehicle Care"    },
         { "/en/service-products.html",   "Service Products"},
+        // Query-param categories whose products aren't surfaced under the slug categories above
+        // (e.g. Coolant KFS 18 = 23152, Workshop Pro-Line items). These paginate with "&p=N".
+        { "/en/products.html?cat=5016",  "Coolants"        },
+        { "/en/products.html?cat=4770",  "Workshop Pro-Line"},
     };
 }

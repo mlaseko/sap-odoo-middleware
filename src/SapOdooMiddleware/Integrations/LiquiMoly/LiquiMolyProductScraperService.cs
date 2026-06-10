@@ -412,7 +412,13 @@ public class LiquiMolyProductScraperService
                 {
                     await Task.Delay(_settings.DelayBetweenRequestsMs, ct);
 
-                    var html = await FetchHtmlAsync($"{categoryUrl}?p={page}", ct);
+                    // Append the page param correctly whether the category URL is a clean slug
+                    // ("/en/engine-oils.html") or already carries a query string
+                    // ("/en/products.html?cat=5016", which paginates as "...&p=2").
+                    var pageUrl = categoryUrl.Contains('?')
+                        ? $"{categoryUrl}&p={page}"
+                        : $"{categoryUrl}?p={page}";
+                    var html = await FetchHtmlAsync(pageUrl, ct);
                     if (string.IsNullOrWhiteSpace(html)) return;
 
                     var doc = new HtmlDocument();
