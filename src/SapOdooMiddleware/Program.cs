@@ -64,6 +64,7 @@ builder.Services.AddHostedService<WebhookQueueProcessor>();
 // --- Item Provisioning settings ---
 builder.Services.Configure<ClassifierSettings>(builder.Configuration.GetSection(ClassifierSettings.SectionName));
 builder.Services.Configure<PricingSettings>(builder.Configuration.GetSection(PricingSettings.SectionName));
+builder.Services.Configure<BulkCreateSettings>(builder.Configuration.GetSection(BulkCreateSettings.SectionName));
 builder.Services.Configure<OdooBackrefWorkerSettings>(builder.Configuration.GetSection(OdooBackrefWorkerSettings.SectionName));
 builder.Services.Configure<NeonSettings>(builder.Configuration.GetSection(NeonSettings.SectionName));
 builder.Services.Configure<LiquiMolyScraperSettings>(builder.Configuration.GetSection("LiquiMoly"));

@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Options;
+using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.ItemProvisioning;
 using SapOdooMiddleware.Persistence;
 
@@ -11,7 +13,7 @@ namespace SapOdooMiddleware.Ingestion;
 /// </summary>
 public class InvoiceItemCreationService
 {
-    private static readonly TimeSpan PerItemTimeout = TimeSpan.FromSeconds(30);
+    private readonly TimeSpan _perItemTimeout;
 
     private readonly ILubesItemProvisioningService _provisioning;
     private readonly IStagingDocumentLineRepository _lines;
@@ -20,10 +22,14 @@ public class InvoiceItemCreationService
     public InvoiceItemCreationService(
         ILubesItemProvisioningService provisioning,
         IStagingDocumentLineRepository lines,
+        IOptions<BulkCreateSettings> bulkCreate,
         ILogger<InvoiceItemCreationService> logger)
     {
         _provisioning = provisioning;
         _lines = lines;
+        // Per-line cap covers scrape + DGX classifier (/classify + /classify_family, up to 180s) + SAP.
+        // Configurable so a cold/slow DGX doesn't force premature 'create_failed' on every line.
+        _perItemTimeout = TimeSpan.FromSeconds(Math.Max(1, bulkCreate.Value.PerItemTimeoutSeconds));
         _logger = logger;
     }
 
@@ -57,7 +63,7 @@ public class InvoiceItemCreationService
             try
             {
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeoutCts.CancelAfter(PerItemTimeout);
+                timeoutCts.CancelAfter(_perItemTimeout);
 
                 var req = new LubesProvisioningRequest(article, line.UnitPrice.Value);
                 var result = await _provisioning.ProvisionAsync(req, timeoutCts.Token);
@@ -79,7 +85,7 @@ public class InvoiceItemCreationService
             }
             catch (OperationCanceledException)
             {
-                await Fail(line, $"Timed out after {PerItemTimeout.TotalSeconds:N0}s.", failures, ct);
+                await Fail(line, $"Timed out after {_perItemTimeout.TotalSeconds:N0}s.", failures, ct);
             }
             catch (Exception ex)
             {
