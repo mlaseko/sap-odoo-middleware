@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Options;
 
-namespace SapOdooMiddleware.Integrations.LiquiMoly;
+namespace MolasLubes.Infrastructure.Integrations.LiquiMoly;
 
 /// <summary>
 /// Builds the Liqui Moly product index off the request path: once shortly after startup and then on a
