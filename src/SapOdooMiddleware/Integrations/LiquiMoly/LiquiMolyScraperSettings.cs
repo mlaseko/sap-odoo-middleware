@@ -68,14 +68,22 @@ public class LiquiMolyScraperSettings
     public int WarmupIntervalHours { get; set; } = 22;
 
     /// <summary>
-    /// Explicit product-page URLs for "orphan" items that Liqui Moly does NOT list in any crawlable
-    /// category and that its (currently broken, HTTP 500) on-site search can't resolve — e.g. Coolant
-    /// KFS 18 (23152). Each page is fetched directly during the index build and ALL of its variant SKUs
-    /// are mined in (so one URL covers the product and every pack size). Values may be relative
-    /// ("/en/coolant-antifreeze-kfs-18-p005722.html") or absolute. Add a line and restart to onboard a
-    /// straggler — no code change or rebuild required.
+    /// Seed product discovery from LiquiMoly's sitemap — its canonical, complete product list. This finds
+    /// products that aren't surfaced in any crawlable category (e.g. Coolant KFS 18 = 23152) and that the
+    /// broken (HTTP 500) on-site search can't resolve, so the index is genuinely complete with no manual
+    /// per-product URLs. Every sitemap product page is variant-mined alongside the category crawl.
     /// </summary>
-    public List<string> ExtraProductUrls { get; set; } = new();
+    public bool UseSitemap { get; set; } = true;
+
+    /// <summary>
+    /// Sitemap(s) to pull product URLs from. Default is the "/en" store sitemap that matches
+    /// <see cref="BaseUrl"/>'s /en/ category paths. Product URLs (".../&lt;slug&gt;-pNNNNNN.html") are
+    /// extracted and variant-mined; non-product (CMS/news) entries are ignored.
+    /// </summary>
+    public List<string> SitemapUrls { get; set; } = new()
+    {
+        "https://www.liqui-moly.com/sitemap/www.liqui-moly.com/sitemap_en.xml",
+    };
 
     /// <summary>
     /// Optional hard-coded OWW API prefix (e.g. "/api/v2/oww/101/TZA/ENG/1").

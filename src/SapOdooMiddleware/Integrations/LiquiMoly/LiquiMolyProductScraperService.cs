@@ -303,15 +303,32 @@ public class LiquiMolyProductScraperService
             }, ct);
         }
 
-        // Phase 2b — mine EVERY variant SKU from each discovered product page. Category listing tiles
-        // only surface some size-variants; the rest (e.g. Coolant KFS 18, certain Pro-Line sizes) are
-        // dropped, so their article numbers never reach the index even though the product IS crawled.
-        // The product page lists every variant as `variantswitch-sku-{sku}` — add any we missed.
-        if (_settings.MineAllVariants)
+        // Phase 2b — mine EVERY variant SKU from each product page. Two URL sources, unioned so each page
+        // is fetched once:
+        //   (a) products found via the category crawl — recovers size-variants the listing tiles drop.
+        //   (b) the sitemap (LiquiMoly:SitemapUrls) — recovers "orphan" products LiquiMoly doesn't list in
+        //       ANY crawlable category (e.g. Coolant KFS 18 = 23152) and that its broken (HTTP 500) on-site
+        //       search can't resolve either. This is what makes the index genuinely complete.
+        // The product page lists every variant as `variantswitch-sku-{sku}`.
+        if (_settings.MineAllVariants || _settings.UseSitemap)
         {
-            var productBaseUrls = new HashSet<string>(allSizesByBase.Keys, StringComparer.OrdinalIgnoreCase);
-            foreach (var url in map.Values)
-                productBaseUrls.Add(url.Contains('#') ? url[..url.IndexOf('#')] : url);
+            var productBaseUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // (a) category-discovered product pages
+            if (_settings.MineAllVariants)
+            {
+                foreach (var key in allSizesByBase.Keys) productBaseUrls.Add(key);
+                foreach (var url in map.Values)
+                    productBaseUrls.Add(url.Contains('#') ? url[..url.IndexOf('#')] : url);
+            }
+
+            // (b) every product URL published in the sitemap
+            var fromCategories = productBaseUrls.Count;
+            if (_settings.UseSitemap)
+            {
+                foreach (var url in await FetchSitemapProductUrlsAsync(ct))
+                    productBaseUrls.Add(url);
+            }
 
             var before = map.Count;
             await ForEachBoundedAsync(productBaseUrls, _settings.MaxParallelRequests, async baseUrl =>
@@ -335,53 +352,10 @@ public class LiquiMolyProductScraperService
             }, ct);
 
             _logger.LogInformation(
-                _logPrefix + "Variant mining: +{New} SKU(s) from {Products} product page(s) (index {Before} -> {After})",
-                map.Count - before, productBaseUrls.Count, before, map.Count);
-        }
-
-        // Phase 2c — "orphan" products that LiquiMoly doesn't list in ANY crawlable category and that its
-        // (HTTP 500) on-site search can't resolve. Fetch each configured product URL directly and mine all
-        // of its variant SKUs. Config-driven (LiquiMoly:ExtraProductUrls) so onboarding a straggler is a
-        // settings line + restart, not a code change.
-        if (_settings.ExtraProductUrls is { Count: > 0 })
-        {
-            var urls = _settings.ExtraProductUrls
-                .Where(u => !string.IsNullOrWhiteSpace(u))
-                .Select(u => u.StartsWith("http", StringComparison.OrdinalIgnoreCase)
-                    ? u
-                    : _settings.BaseUrl.TrimEnd('/') + "/" + u.TrimStart('/'))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            var before = map.Count;
-            await ForEachBoundedAsync(urls, _settings.MaxParallelRequests, async url =>
-            {
-                try
-                {
-                    var html = await FetchHtmlAsync(url, ct);
-                    if (string.IsNullOrWhiteSpace(html))
-                    {
-                        _logger.LogWarning(_logPrefix + "Extra product URL returned empty: {Url}", url);
-                        return;
-                    }
-
-                    var doc = new HtmlDocument();
-                    doc.LoadHtml(html);
-                    var added = 0;
-                    foreach (var sku in ExtractVariantSkusFromPage(doc))
-                        if (map.TryAdd(sku, url + "#" + sku)) added++;
-
-                    _logger.LogInformation(_logPrefix + "Extra product URL {Url} -> {Added} SKU(s)", url, added);
-                    await Task.Delay(_settings.DelayBetweenRequestsMs, ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, _logPrefix + "Extra product URL failed: {Url}", url);
-                }
-            }, ct);
-
-            _logger.LogInformation(
-                _logPrefix + "Extra product URLs: +{New} SKU(s) from {Count} URL(s)", map.Count - before, urls.Count);
+                _logPrefix + "Variant mining: +{New} SKU(s) from {Products} product page(s) " +
+                "({Cat} via categories, {Sitemap} added via sitemap) (index {Before} -> {After})",
+                map.Count - before, productBaseUrls.Count, fromCategories,
+                productBaseUrls.Count - fromCategories, before, map.Count);
         }
 
         var result   = new Dictionary<string, string>(map, StringComparer.OrdinalIgnoreCase);
@@ -566,6 +540,47 @@ public class LiquiMolyProductScraperService
                 if (seen.Add(sku)) yield return sku;
             }
         }
+    }
+
+    // Product page URLs in the sitemap look like ".../en/<slug>-pNNNNNN.html". News/CMS pages don't
+    // match this, so it cleanly isolates the ~966 product pages from the ~1800 total sitemap entries.
+    private static readonly Regex SitemapProductUrlPattern =
+        new(@"https?://[^\s<>""]+?-p\d+\.html", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Pulls every product-page URL out of the configured sitemap(s). The sitemap is LiquiMoly's canonical,
+    /// complete product list, so it surfaces items missing from the category tree. Failures are logged and
+    /// skipped — the category crawl still provides a working index if the sitemap is unreachable.
+    /// </summary>
+    private async Task<List<string>> FetchSitemapProductUrlsAsync(CancellationToken ct)
+    {
+        var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var sitemapUrl in _settings.SitemapUrls)
+        {
+            if (string.IsNullOrWhiteSpace(sitemapUrl)) continue;
+            try
+            {
+                var xml = await FetchHtmlAsync(sitemapUrl, ct);
+                if (string.IsNullOrWhiteSpace(xml))
+                {
+                    _logger.LogWarning(_logPrefix + "Sitemap returned empty: {Url}", sitemapUrl);
+                    continue;
+                }
+
+                var added = 0;
+                foreach (Match m in SitemapProductUrlPattern.Matches(xml))
+                    if (urls.Add(HtmlEntity.DeEntitize(m.Value))) added++;
+
+                _logger.LogInformation(_logPrefix + "Sitemap {Url}: {Count} product URL(s)", sitemapUrl, added);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, _logPrefix + "Sitemap fetch failed: {Url}", sitemapUrl);
+            }
+        }
+
+        return urls.ToList();
     }
 
     private static int ExtractTotalPages(HtmlDocument doc)
