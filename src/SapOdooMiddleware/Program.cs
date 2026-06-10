@@ -94,6 +94,10 @@ builder.Services.AddHttpClient<LiquiMolyProductScraperService>((sp, http) =>
     http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
 });
 
+// Build the Liqui Moly product index in the background (startup + timer) so /scrape and bulk-create hit a
+// warm cache instead of triggering the cold crawl + variant mining, which exceeds the ~100s proxy timeout.
+builder.Services.AddHostedService<LiquiMolyIndexWarmupHostedService>();
+
 // --- Item Provisioning components ---
 builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
 builder.Services.AddScoped<INeonLiquiMolyRepository, NeonLiquiMolyRepository>();
