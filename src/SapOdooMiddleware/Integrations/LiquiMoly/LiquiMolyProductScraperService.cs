@@ -253,6 +253,42 @@ public class LiquiMolyProductScraperService
             }, ct);
         }
 
+        // Phase 2b — mine EVERY variant SKU from each discovered product page. Category listing tiles
+        // only surface some size-variants; the rest (e.g. Coolant KFS 18, certain Pro-Line sizes) are
+        // dropped, so their article numbers never reach the index even though the product IS crawled.
+        // The product page lists every variant as `variantswitch-sku-{sku}` — add any we missed.
+        if (_settings.MineAllVariants)
+        {
+            var productBaseUrls = new HashSet<string>(allSizesByBase.Keys, StringComparer.OrdinalIgnoreCase);
+            foreach (var url in map.Values)
+                productBaseUrls.Add(url.Contains('#') ? url[..url.IndexOf('#')] : url);
+
+            var before = map.Count;
+            await ForEachBoundedAsync(productBaseUrls, _settings.MaxParallelRequests, async baseUrl =>
+            {
+                try
+                {
+                    var html = await FetchHtmlAsync(baseUrl, ct);
+                    if (string.IsNullOrWhiteSpace(html)) return;
+
+                    var doc = new HtmlDocument();
+                    doc.LoadHtml(html);
+                    foreach (var sku in ExtractVariantSkusFromPage(doc))
+                        map.TryAdd(sku, baseUrl + "#" + sku);
+
+                    await Task.Delay(_settings.DelayBetweenRequestsMs, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, _logPrefix + "Variant mining failed for {Url}", baseUrl);
+                }
+            }, ct);
+
+            _logger.LogInformation(
+                _logPrefix + "Variant mining: +{New} SKU(s) from {Products} product page(s) (index {Before} -> {After})",
+                map.Count - before, productBaseUrls.Count, before, map.Count);
+        }
+
         var result   = new Dictionary<string, string>(map, StringComparer.OrdinalIgnoreCase);
         var sizesMap = new Dictionary<string, string>(skuSizes, StringComparer.OrdinalIgnoreCase);
         var allSizes = allSizesByBase.ToDictionary(
@@ -402,6 +438,32 @@ public class LiquiMolyProductScraperService
             var baseUrl = hashIdx > 0 ? href[..hashIdx] : href;
             if (baseUrl.Contains(".html") && seenBaseUrls.Add(baseUrl))
                 needsProductFetch.Add(baseUrl);
+        }
+    }
+
+    /// <summary>
+    /// Extracts every variant article number from a product page. Each size-variant is rendered in an
+    /// element whose class contains <c>variantswitch-sku-{sku}</c> (the same marker the image/size/download
+    /// extractors key off), so we pull the numeric SKU out of every such class. This recovers variants
+    /// that the category listing never showed as their own tile.
+    /// </summary>
+    private static readonly Regex VariantSwitchSkuPattern =
+        new(@"variantswitch-sku-(\d{3,6})\b", RegexOptions.Compiled);
+
+    private static IEnumerable<string> ExtractVariantSkusFromPage(HtmlDocument doc)
+    {
+        var nodes = doc.DocumentNode.SelectNodes("//*[contains(@class,'variantswitch-sku-')]");
+        if (nodes == null) yield break;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var node in nodes)
+        {
+            var cls = node.GetAttributeValue("class", "");
+            foreach (Match m in VariantSwitchSkuPattern.Matches(cls))
+            {
+                var sku = m.Groups[1].Value;
+                if (seen.Add(sku)) yield return sku;
+            }
         }
     }
 

@@ -45,6 +45,16 @@ public class LiquiMolyScraperSettings
     public int MaxConcurrency { get; set; } = 1;
 
     /// <summary>
+    /// Mine ALL variant SKUs from each product page during the index build. Category listing pages
+    /// only show SOME size-variants as tiles; the rest (e.g. Coolant KFS 18, specific Pro-Line sizes)
+    /// are dropped, so those article numbers never make it into the index. The product page exposes
+    /// every variant as a <c>variantswitch-sku-{sku}</c> element — mining them makes the index complete.
+    /// Costs one extra page fetch per discovered product (the build is cached), so the first build is
+    /// slower; warm it via POST /api/liquimoly/scrape/{sku} or raise BulkCreate:PerItemTimeoutSeconds.
+    /// </summary>
+    public bool MineAllVariants { get; set; } = true;
+
+    /// <summary>
     /// Optional hard-coded OWW API prefix (e.g. "/api/v2/oww/101/TZA/ENG/1").
     /// When empty the prefix is auto-detected from the fragment of the first
     /// oil-guide redirect (e.g. "#oww:/api/v2/oww/101/TZA/ENG/1/...")
