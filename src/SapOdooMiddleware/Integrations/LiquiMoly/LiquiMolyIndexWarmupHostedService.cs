@@ -35,8 +35,19 @@ public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
         try { await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken); }
         catch (OperationCanceledException) { return; }
 
-        // Startup: reuse a persisted index if it's still fresh (instant) instead of cold-crawling.
-        await WarmSafelyAsync(forceRebuild: false, stoppingToken);
+        // Startup: reuse a persisted index if it's still fresh (instant) instead of cold-crawling. Retry on
+        // a short interval until the index is actually warm — a throttled first build can come back partial
+        // and is intentionally not cached, so one attempt isn't always enough.
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            if (await WarmSafelyAsync(forceRebuild: false, stoppingToken))
+                break;
+
+            var retry = TimeSpan.FromMinutes(Math.Max(1, _settings.WarmupRetryMinutes));
+            _logger.LogWarning("[LiquiMoly] Index not warm yet; retrying in {Min} min.", retry.TotalMinutes);
+            try { await Task.Delay(retry, stoppingToken); }
+            catch (OperationCanceledException) { return; }
+        }
 
         var interval = TimeSpan.FromHours(Math.Max(1, _settings.WarmupIntervalHours));
         using var timer = new PeriodicTimer(interval);
@@ -45,7 +56,8 @@ public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
             await WarmSafelyAsync(forceRebuild: true, stoppingToken);
     }
 
-    private async Task WarmSafelyAsync(bool forceRebuild, CancellationToken ct)
+    /// <summary>Runs one warm/rebuild pass. Returns true if the index is warm afterwards.</summary>
+    private async Task<bool> WarmSafelyAsync(bool forceRebuild, CancellationToken ct)
     {
         try
         {
@@ -54,14 +66,16 @@ public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
             using var scope = _scopeFactory.CreateScope();
             var scraper = scope.ServiceProvider.GetRequiredService<LiquiMolyProductScraperService>();
             await scraper.WarmIndexAsync(forceRebuild, ct);
+            return scraper.IsIndexWarm();
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // shutting down
+            return false; // shutting down
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[LiquiMoly] Index warmup failed; will retry on the next tick.");
+            _logger.LogError(ex, "[LiquiMoly] Index warmup failed; will retry.");
+            return false;
         }
     }
 }

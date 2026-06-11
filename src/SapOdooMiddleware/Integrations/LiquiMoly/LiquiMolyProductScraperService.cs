@@ -432,25 +432,51 @@ public class LiquiMolyProductScraperService
             }
 
             var before = map.Count;
-            await ForEachBoundedAsync(productBaseUrls, _settings.MaxParallelRequests, async baseUrl =>
+
+            // Bound this phase: under CDN throttling it can balloon to hours. When the budget is hit we
+            // stop gracefully and finalise the index with whatever was mined (the category crawl already
+            // gave a near-complete index). Linked to the app token so shutdown still cancels promptly.
+            using var mineCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (_settings.MineMaxMinutes > 0)
+                mineCts.CancelAfter(TimeSpan.FromMinutes(_settings.MineMaxMinutes));
+            var mineCt = mineCts.Token;
+
+            var total = productBaseUrls.Count;
+            int done  = 0;
+            try
             {
-                try
+                await ForEachBoundedAsync(productBaseUrls, _settings.MaxParallelRequests, async baseUrl =>
                 {
-                    var html = await FetchHtmlAsync(baseUrl, ct);
-                    if (string.IsNullOrWhiteSpace(html)) return;
+                    try
+                    {
+                        var html = await FetchHtmlAsync(baseUrl, mineCt);
+                        if (!string.IsNullOrWhiteSpace(html))
+                        {
+                            var doc = new HtmlDocument();
+                            doc.LoadHtml(html);
+                            foreach (var sku in ExtractVariantSkusFromPage(doc))
+                                map.TryAdd(sku, baseUrl + "#" + sku);
+                        }
 
-                    var doc = new HtmlDocument();
-                    doc.LoadHtml(html);
-                    foreach (var sku in ExtractVariantSkusFromPage(doc))
-                        map.TryAdd(sku, baseUrl + "#" + sku);
+                        var n = Interlocked.Increment(ref done);
+                        if (n % 250 == 0)
+                            _logger.LogInformation(_logPrefix + "Variant mining progress: {Done}/{Total} pages | {Skus} SKUs",
+                                n, total, map.Count);
 
-                    await Task.Delay(_settings.DelayBetweenRequestsMs, ct);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogDebug(ex, _logPrefix + "Variant mining failed for {Url}", baseUrl);
-                }
-            }, ct);
+                        await Task.Delay(_settings.DelayBetweenRequestsMs, mineCt);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogDebug(ex, _logPrefix + "Variant mining failed for {Url}", baseUrl);
+                    }
+                }, mineCt);
+            }
+            catch (OperationCanceledException) when (mineCt.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(
+                    _logPrefix + "Variant-mining budget ({Min} min) reached at {Done}/{Total} pages; " +
+                    "finalising index with {Skus} SKUs.", _settings.MineMaxMinutes, done, total, map.Count);
+            }
 
             _logger.LogInformation(
                 _logPrefix + "Variant mining: +{New} SKU(s) from {Products} product page(s) " +
@@ -468,7 +494,10 @@ public class LiquiMolyProductScraperService
 
         _logger.LogInformation(_logPrefix + "Index complete | SKUs={Count} | WithSize={Sized}", result.Count, sizesMap.Count);
 
-        if (result.Count > 0)
+        // Only promote a healthy build to the shared/disk cache. A build below the floor (e.g. the category
+        // crawl itself got throttled/blocked) is returned to the immediate caller but NOT cached or
+        // persisted, so a broken/partial index can't poison the 23h cache; the warmup retries soon instead.
+        if (result.Count >= Math.Max(1, _settings.MinIndexSkuCount))
         {
             _logger.LogInformation(_logPrefix + "Sample SKUs: {Skus}",
                 string.Join(", ", result.Keys.Take(10)));
@@ -480,7 +509,9 @@ public class LiquiMolyProductScraperService
         else
         {
             _logger.LogError(
-                _logPrefix + "Product index EMPTY — check category page structure or HTML class names");
+                _logPrefix + "Product index too small ({Count} < {Min}) — likely throttled/blocked; " +
+                "NOT caching or persisting. Will rebuild on the next warmup tick.",
+                result.Count, Math.Max(1, _settings.MinIndexSkuCount));
         }
 
         return (result, sizesMap, allSizes);
