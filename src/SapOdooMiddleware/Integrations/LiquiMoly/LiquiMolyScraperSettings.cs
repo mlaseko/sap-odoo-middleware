@@ -68,6 +68,35 @@ public class LiquiMolyScraperSettings
     public int WarmupIntervalHours { get; set; } = 22;
 
     /// <summary>
+    /// File path for the persisted product index. The built index is written here and reloaded on
+    /// startup, so a restart skips the multi-minute cold crawl (and the "warming" 503s) as long as the
+    /// cached file is within the 23h cache lifetime. Empty → defaults to "Cache/liqui-moly-index-{Brand}.json"
+    /// under the app base directory.
+    /// </summary>
+    public string IndexCachePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Time budget (minutes) for the Phase 2b variant-mining crawl. The category crawl alone already yields
+    /// a near-complete index in ~90s; variant mining only adds orphan size-variants and can balloon to hours
+    /// when the CDN throttles under concurrent load. When the budget is hit, mining stops gracefully and the
+    /// index is finalised with whatever was gathered. 0 disables the budget (mine to completion).
+    /// </summary>
+    public int MineMaxMinutes { get; set; } = 12;
+
+    /// <summary>
+    /// Minimum SKU count for a build to be considered healthy. A build below this (e.g. the category crawl
+    /// itself got throttled) is NOT cached or persisted, so a broken/partial index can't poison the cache
+    /// for the whole 23h lifetime; the warmup retries instead.
+    /// </summary>
+    public int MinIndexSkuCount { get; set; } = 500;
+
+    /// <summary>
+    /// How soon (minutes) the background warmup retries after a build that left the index not warm
+    /// (failed or below <see cref="MinIndexSkuCount"/>), instead of waiting the full WarmupIntervalHours.
+    /// </summary>
+    public int WarmupRetryMinutes { get; set; } = 10;
+
+    /// <summary>
     /// Seed product discovery from LiquiMoly's sitemap — its canonical, complete product list. This finds
     /// products that aren't surfaced in any crawlable category (e.g. Coolant KFS 18 = 23152) and that the
     /// broken (HTTP 500) on-site search can't resolve, so the index is genuinely complete with no manual
