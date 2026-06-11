@@ -136,6 +136,10 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         //    Layer 2: DGX /classify_family for everything else; accept confidence >= MinFamilyConfidence,
         //             overriding DGX's needs_review (with a WARN) rather than failing borderline items.
         FamilyClassification famResult;
+        // Layer 3 audit values — persisted on NeonProducts so "what bypassed the gate" is a SQL query.
+        double  familyConfidence;
+        bool    familyNeedsReview;
+        string? familyOverrideReason;
         var famOverride = MatchFamilyOverride(lm.Name);
         if (famOverride is { } ov)
         {
@@ -143,6 +147,9 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             {
                 GroupCode = ov.Code, GroupName = ov.Name, Confidence = 1.0, NeedsReview = false,
             };
+            familyConfidence     = 1.0;
+            familyNeedsReview    = false;
+            familyOverrideReason = $"layer1: {ov.Rule}";
             _logger.LogInformation(
                 "SAP family override for {Code} '{Name}': {Group} {GroupName} [{Rule}] (DGX skipped)",
                 code, lm.Name, ov.Code, ov.Name, ov.Rule);
@@ -161,6 +168,10 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 return new LubesProvisioningResult("needs_review", code,
                     ReviewReason: $"No SAP family returned (confidence {famResult.Confidence:F2}).");
 
+            familyConfidence     = famResult.Confidence;
+            familyNeedsReview    = famResult.NeedsReview;
+            familyOverrideReason = null;
+
             if (famResult.NeedsReview)
             {
                 if (famResult.Confidence < MinFamilyConfidence)
@@ -168,6 +179,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                         ReviewReason: $"Low confidence on SAP family ({famResult.Confidence:F2}).");
 
                 // DGX flagged needs_review but confidence clears the bar — accept, and leave a trail.
+                familyOverrideReason = $"layer2: dgx needs_review accepted at confidence {famResult.Confidence:F2}";
                 _logger.LogWarning(
                     "SAP family needs_review OVERRIDDEN for {Code} '{Name}': accepted group {Group} {GroupName} " +
                     "at confidence {Conf:F2} (>= {Min:F2}). Spot-check this classification.",
@@ -288,7 +300,10 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 OdooCategoryExternalId: catResult.ExternalId!,
                 OdooCategoryName: catResult.Name!,
                 ListPrice: prices.Retail,
-                SapStatus: "created"
+                SapStatus: "created",
+                FamilyConfidence: (decimal)familyConfidence,
+                FamilyNeedsReview: familyNeedsReview,
+                FamilyOverrideReason: familyOverrideReason
             ), ct);
 
             await _productRepo.UpsertPricesAsync(

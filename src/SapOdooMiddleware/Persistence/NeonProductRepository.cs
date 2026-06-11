@@ -12,7 +12,11 @@ public record NeonProductWrite(
     string OdooCategoryName,
     decimal ListPrice,
     string SapStatus = "created",
-    string? SapErrorMsg = null);
+    string? SapErrorMsg = null,
+    // Layer 3 SAP-family classification audit trail.
+    decimal? FamilyConfidence = null,
+    bool?    FamilyNeedsReview = null,
+    string?  FamilyOverrideReason = null);
 
 public record NeonProductForBackref(string ItemCode, string OdooProductId);
 
@@ -62,7 +66,8 @@ public class NeonProductRepository : INeonProductRepository
                 "SapVatGroupSales","SapVatGroupPurchase","SapUomGroupEntry",
                 "SapStatus","SapErrorMsg",
                 "IsInventoryItem","IsActive",
-                "OnHandSap","AvailableCache","SyncedAt"
+                "OnHandSap","AvailableCache","SyncedAt",
+                "FamilyConfidence","FamilyNeedsReview","FamilyOverrideReason"
             ) VALUES (
                 @ItemCode,@ItemName,@ItemsGroupCode,
                 @OdooCategoryExternalId,@OdooCategoryName,
@@ -72,7 +77,8 @@ public class NeonProductRepository : INeonProductRepository
                 'O1','I1',1,
                 @SapStatus,@SapErrorMsg,
                 true,true,
-                0,0,now()
+                0,0,now(),
+                @FamilyConfidence,@FamilyNeedsReview,@FamilyOverrideReason
             )
             ON CONFLICT ("ItemCode") DO UPDATE SET
                 "ItemName"               = EXCLUDED."ItemName",
@@ -82,6 +88,9 @@ public class NeonProductRepository : INeonProductRepository
                 "ListPrice"              = EXCLUDED."ListPrice",
                 "SapStatus"              = EXCLUDED."SapStatus",
                 "SapErrorMsg"            = EXCLUDED."SapErrorMsg",
+                "FamilyConfidence"       = EXCLUDED."FamilyConfidence",
+                "FamilyNeedsReview"      = EXCLUDED."FamilyNeedsReview",
+                "FamilyOverrideReason"   = EXCLUDED."FamilyOverrideReason",
                 "SyncedAt"               = now();
             """;
 
@@ -95,6 +104,9 @@ public class NeonProductRepository : INeonProductRepository
         cmd.Parameters.AddWithValue("ListPrice", write.ListPrice);
         cmd.Parameters.AddWithValue("SapStatus", write.SapStatus);
         cmd.Parameters.AddWithValue("SapErrorMsg", (object?)write.SapErrorMsg ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("FamilyConfidence", (object?)write.FamilyConfidence ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("FamilyNeedsReview", (object?)write.FamilyNeedsReview ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("FamilyOverrideReason", (object?)write.FamilyOverrideReason ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
