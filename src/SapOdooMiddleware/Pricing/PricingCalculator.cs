@@ -10,6 +10,13 @@ public interface IPricingCalculator
 
     /// <summary>Resolve a scraped/LM category string to a canonical pricing-category key.</summary>
     string ResolvePricingCategory(string? scrapedCategory);
+
+    /// <summary>
+    /// Pricing band for a SAP/OITB item-group code, or null if that group has no dedicated band
+    /// (caller should then fall back to <see cref="ResolvePricingCategory"/>). Pricing is keyed off the
+    /// authoritative SAP group rather than the noisy Odoo category so siblings price identically.
+    /// </summary>
+    string? TryPricingBandForSapGroup(int sapGroupCode);
 }
 
 /// <summary>
@@ -219,9 +226,45 @@ public class PricingCalculator : IPricingCalculator
         var key = scrapedCategory.Trim();
         if (CategoryAliases.TryGetValue(key, out var mapped)) return mapped;
         if (BandRatios.ContainsKey(key)) return key; // exact match
+
+        // DGX returns hierarchical Odoo categories like "Service Products / Coolant / antifreeze" or
+        // "Workshop Pro-Line / Petrol injector / system cleaners". The TOP-LEVEL segment is the pricing
+        // band (Greases/Pastes/etc. are themselves top-level, so granularity is preserved). Walk the
+        // segments parent-first and use the first that resolves to a band; an exact alias above can still
+        // override any specific path.
+        if (key.Contains('/'))
+        {
+            foreach (var segment in key.Split('/'))
+            {
+                var c = segment.Trim();
+                if (CategoryAliases.TryGetValue(c, out mapped)) return mapped;
+                if (BandRatios.ContainsKey(c)) return c;
+            }
+        }
+
         throw new InvalidOperationException(
             $"No pricing category alias for '{scrapedCategory}'. Add it to CategoryAliases.");
     }
+
+    // SAP/OITB item-group code -> pricing band. Pricing is keyed off the authoritative SAP group rather
+    // than the (noisy, non-deterministic) Odoo category, so two products in the same group always price
+    // the same. Codes verified against the live OITB. NOTE: 104 and 107 are COARSER than the pricing
+    // bands (104 also covers "Repair Aids"; 107 also covers "Greases"/"Pastes") — the chosen band below
+    // is the default for that group; confirm it matches intent.
+    private static readonly IReadOnlyDictionary<int, string> SapGroupBand = new Dictionary<int, string>
+    {
+        [104] = "Service",                         // Repair aids/service products
+        [105] = "Engine Oils",                     // Engine Oils
+        [107] = "Gear Oils & Transmission Fluids", // Gear Oils/ATF/Greases
+        [109] = "Additives",                       // Additives
+        [111] = "Vehicle Care",                    // Vehicle Care
+        [112] = "Workshop Pro-Line",               // Workshop Pro-Line
+        // 106 Commercial vehicles, 108 Branding Materials, 110 Motor Bike: no dedicated pricing band yet
+        // -> caller falls back to category-based resolution. Add here when their bands are decided.
+    };
+
+    public string? TryPricingBandForSapGroup(int sapGroupCode)
+        => SapGroupBand.TryGetValue(sapGroupCode, out var band) ? band : null;
 
     public PriceTiers ComputeNetPrices(decimal cifCostTzs, string pricingCategory)
     {

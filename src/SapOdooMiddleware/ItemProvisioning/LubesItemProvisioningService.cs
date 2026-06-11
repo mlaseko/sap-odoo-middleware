@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 using MolasLubes.Infrastructure.Integrations.LiquiMoly;
 using SapOdooMiddleware.Configuration;
@@ -56,6 +57,34 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         _logger          = logger;
     }
 
+    // Layer 2: accept a DGX SAP-family classification flagged needs_review when its confidence clears
+    // this bar (DGX is non-deterministic and flags borderline-but-usable calls). Below it, the item is
+    // sent to manual review instead of guessing a group.
+    private const double MinFamilyConfidence = 0.70;
+
+    // Layer 1: deterministic SAP-family overrides for product patterns we know with certainty and where
+    // DGX has shown blind spots (e.g. it confidently calls coolant "Additives"). Matched against the LM
+    // product name BEFORE calling DGX; first match wins, DGX is skipped.
+    // NOTE: the group codes below must match the live SAP OITB item-group codes — verify before deploy.
+    private static readonly (Regex Pattern, int Code, string Name, string Rule)[] FamilyOverrides =
+    {
+        (new Regex(@"\b(coolant|antifreeze|kfs)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+            104, "Repair aids/service products", "name matches coolant/antifreeze"),
+        (new Regex(@"^\s*pro-?line\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+            112, "Workshop Pro-Line", "name starts with Pro-Line"),
+        (new Regex(@"\b(motorbike|motorcycle|4t bike)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+            110, "Motor Bike", "name matches motorbike/motorcycle"),
+    };
+
+    private static (int Code, string Name, string Rule)? MatchFamilyOverride(string? productName)
+    {
+        if (string.IsNullOrWhiteSpace(productName)) return null;
+        foreach (var o in FamilyOverrides)
+            if (o.Pattern.IsMatch(productName))
+                return (o.Code, o.Name, o.Rule);
+        return null;
+    }
+
     public async Task<LubesProvisioningResult> ProvisionAsync(LubesProvisioningRequest req, CancellationToken ct)
     {
         var code = req.ArticleNumber?.Trim() ?? "";
@@ -101,22 +130,72 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
                 Candidates: catResult.Candidates);
 
-        // 4) SAP family
+        // 4) SAP family — three layers:
+        //    Layer 1: deterministic business-rule overrides for known DGX blind spots (run BEFORE DGX,
+        //             skipping the call entirely). These are high-certainty product-name rules.
+        //    Layer 2: DGX /classify_family for everything else; accept confidence >= MinFamilyConfidence,
+        //             overriding DGX's needs_review (with a WARN) rather than failing borderline items.
         FamilyClassification famResult;
-        try { famResult = await _classifier.ClassifyFamilyAsync(description, hint, ct); }
-        catch (Exception ex)
+        var famOverride = MatchFamilyOverride(lm.Name);
+        if (famOverride is { } ov)
         {
-            _logger.LogError(ex, "Classifier (/classify_family) failed for {Code}", code);
-            return new LubesProvisioningResult("needs_review", code,
-                ReviewReason: "Classifier service unavailable.");
+            famResult = new FamilyClassification
+            {
+                GroupCode = ov.Code, GroupName = ov.Name, Confidence = 1.0, NeedsReview = false,
+            };
+            _logger.LogInformation(
+                "SAP family override for {Code} '{Name}': {Group} {GroupName} [{Rule}] (DGX skipped)",
+                code, lm.Name, ov.Code, ov.Name, ov.Rule);
         }
-        if (famResult.NeedsReview || famResult.GroupCode is null)
-            return new LubesProvisioningResult("needs_review", code,
-                ReviewReason: $"Low confidence on SAP family ({famResult.Confidence:F2}).");
+        else
+        {
+            try { famResult = await _classifier.ClassifyFamilyAsync(description, hint, ct); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Classifier (/classify_family) failed for {Code}", code);
+                return new LubesProvisioningResult("needs_review", code,
+                    ReviewReason: "Classifier service unavailable.");
+            }
 
-        // 5) Pricing
+            if (famResult.GroupCode is null)
+                return new LubesProvisioningResult("needs_review", code,
+                    ReviewReason: $"No SAP family returned (confidence {famResult.Confidence:F2}).");
+
+            if (famResult.NeedsReview)
+            {
+                if (famResult.Confidence < MinFamilyConfidence)
+                    return new LubesProvisioningResult("needs_review", code,
+                        ReviewReason: $"Low confidence on SAP family ({famResult.Confidence:F2}).");
+
+                // DGX flagged needs_review but confidence clears the bar — accept, and leave a trail.
+                _logger.LogWarning(
+                    "SAP family needs_review OVERRIDDEN for {Code} '{Name}': accepted group {Group} {GroupName} " +
+                    "at confidence {Conf:F2} (>= {Min:F2}). Spot-check this classification.",
+                    code, lm.Name, famResult.GroupCode, famResult.GroupName, famResult.Confidence, MinFamilyConfidence);
+            }
+        }
+
+        // 5) Pricing — keyed off the AUTHORITATIVE SAP/OITB group (famResult.GroupCode), not the noisy
+        //    Odoo category, so two products in the same group always price identically (e.g. Pro-Line
+        //    5151/5155 both → 112 → Workshop Pro-Line band, regardless of how DGX named their Odoo cat).
+        //    Only if the SAP group has no dedicated band do we fall back to the scraped/DGX category.
         string pricingCat;
-        try { pricingCat = _pricing.ResolvePricingCategory(hint); }
+        try
+        {
+            var bandFromGroup = _pricing.TryPricingBandForSapGroup(famResult.GroupCode!.Value);
+            if (bandFromGroup is not null)
+            {
+                pricingCat = _pricing.ResolvePricingCategory(bandFromGroup);
+            }
+            else
+            {
+                var pricingInput = !string.IsNullOrWhiteSpace(hint) ? hint : catResult.Name;
+                pricingCat = _pricing.ResolvePricingCategory(pricingInput);
+                _logger.LogInformation(
+                    "Pricing for {Code}: SAP group {Group} has no band; fell back to category '{Cat}' → {Band}",
+                    code, famResult.GroupCode, pricingInput, pricingCat);
+            }
+        }
         catch (InvalidOperationException ex)
         {
             return new LubesProvisioningResult("needs_review", code, ReviewReason: ex.Message);
