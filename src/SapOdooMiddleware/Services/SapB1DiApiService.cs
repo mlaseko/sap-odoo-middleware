@@ -3891,12 +3891,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 // no UoM group (UgpEntry = -1), "Unit" for inventory/purchase/sales and 1:1 buy/sell
                 // ratios. The previous UoMGroupEntry = 1 ("Packing Units" group) left BuyUnitMsr /
                 // SalUnitMsr / InvntryUom NULL on newly-created items, diverging from the catalog.
-                items.UoMGroupEntry = -1;
-                items.InventoryUOM  = "Unit";
-                items.BuyUnitMsr    = "Unit";
-                items.SalUnitMsr    = "Unit";
-                items.NumInBuy      = 1;
-                items.NumInSale     = 1;
+                items.UoMGroupEntry        = -1;
+                items.InventoryUOM         = "Unit";   // OITM.InvntryUom
+                items.PurchaseUnit         = "Unit";   // OITM.BuyUnitMsr
+                items.SalesUnit            = "Unit";   // OITM.SalUnitMsr
+                items.PurchaseItemsPerUnit = 1;        // OITM.NumInBuy
+                items.SalesItemsPerUnit    = 1;        // OITM.NumInSale
 
                 items.SalesVATGroup    = "O1";
                 items.PurchaseVATGroup = "I1";
