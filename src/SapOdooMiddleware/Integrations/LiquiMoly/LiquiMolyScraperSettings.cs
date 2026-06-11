@@ -76,12 +76,15 @@ public class LiquiMolyScraperSettings
     public string IndexCachePath { get; set; } = string.Empty;
 
     /// <summary>
-    /// Time budget (minutes) for the Phase 2b variant-mining crawl. The category crawl alone already yields
-    /// a near-complete index in ~90s; variant mining only adds orphan size-variants and can balloon to hours
-    /// when the CDN throttles under concurrent load. When the budget is hit, mining stops gracefully and the
-    /// index is finalised with whatever was gathered. 0 disables the budget (mine to completion).
+    /// Safety-net time budget (minutes) for the Phase 2b variant-mining crawl. Mining the sitemap's ~966
+    /// product pages is REQUIRED to discover orphan variant SKUs that no category lists (e.g. coolants
+    /// 23139/23152, some Pro-Line sizes), and legitimately takes ~25 min — so this is a cap against a
+    /// pathological CDN hang, NOT a normal-case cutoff. Set it comfortably above the real build time; too
+    /// low and orphan SKUs silently drop out of the index. When hit, mining stops gracefully and the index
+    /// is finalised with whatever was gathered. 0 disables the cap (mine to completion). Persistence makes
+    /// the full mine a one-time cost, so a generous budget is fine.
     /// </summary>
-    public int MineMaxMinutes { get; set; } = 12;
+    public int MineMaxMinutes { get; set; } = 45;
 
     /// <summary>
     /// Minimum SKU count for a build to be considered healthy. A build below this (e.g. the category crawl
