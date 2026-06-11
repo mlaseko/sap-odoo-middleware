@@ -132,7 +132,7 @@ public class NeonLiquiMolyRepository : INeonLiquiMolyRepository
                    "PrimaryBarcodeUomEntry","PrimaryBarcodeBaseQtyInGroup","HasUnitBarcode",
                    "Approvals","SpecificationItems","OverviewProperties",
                    "Application","LiquiMolyRecommendations",
-                   "ProductInfoPdfUrl","SafetyDataSheetPdfUrl"
+                   "ProductInfoPdfUrl","SafetyDataSheetPdfUrl","ScrapedAt"
             FROM public."NeonLiquiMolyProducts"
             WHERE "ArticleNumber" = @ArticleNumber
             LIMIT 1;
@@ -173,6 +173,7 @@ public class NeonLiquiMolyRepository : INeonLiquiMolyRepository
             LiquiMolyRecommendations     = JsonList(r, 22),
             ProductInfoPdfUrl            = Str(r, 23),
             SafetyDataSheetPdfUrl        = Str(r, 24),
+            ScrapedAt                    = r.IsDBNull(25) ? null : r.GetDateTime(25),
         };
     }
 

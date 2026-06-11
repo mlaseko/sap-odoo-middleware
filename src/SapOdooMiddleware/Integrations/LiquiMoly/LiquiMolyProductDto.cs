@@ -110,6 +110,9 @@ public class LiquiMolyProductDto
     // Optional if you want:
     public string? SpecificationsText { get; set; }
 
+    /// <summary>When this row was last scraped/refreshed (NeonLiquiMolyProducts.ScrapedAt).</summary>
+    public DateTime? ScrapedAt { get; set; }
+
 
 }
 

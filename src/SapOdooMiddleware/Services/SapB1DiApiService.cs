@@ -3887,8 +3887,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 items.PurchaseItem   = BoYesNoEnum.tYES;
                 items.ItemsGroupCode = request.ItemsGroupCode;
 
-                // UoM group "Packing Units" (entry 1).
-                items.UoMGroupEntry  = 1;
+                // UoM — match the existing catalog convention (e.g. reference item 21380): manual UoM with
+                // no UoM group (UgpEntry = -1), "Unit" for inventory/purchase/sales and 1:1 buy/sell
+                // ratios. The previous UoMGroupEntry = 1 ("Packing Units" group) left BuyUnitMsr /
+                // SalUnitMsr / InvntryUom NULL on newly-created items, diverging from the catalog.
+                items.UoMGroupEntry = -1;
+                items.InventoryUOM  = "Unit";
+                items.BuyUnitMsr    = "Unit";
+                items.SalUnitMsr    = "Unit";
+                items.NumInBuy      = 1;
+                items.NumInSale     = 1;
 
                 items.SalesVATGroup    = "O1";
                 items.PurchaseVATGroup = "I1";
