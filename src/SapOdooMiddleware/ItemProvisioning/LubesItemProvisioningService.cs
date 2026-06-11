@@ -297,6 +297,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 ItemCode: code,
                 ItemName: itemName,
                 ItemsGroupCode: famResult.GroupCode.Value,
+                ItemGroupName: famResult.GroupName,
                 OdooCategoryExternalId: catResult.ExternalId!,
                 OdooCategoryName: catResult.Name!,
                 ListPrice: prices.Retail,

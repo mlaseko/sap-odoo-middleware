@@ -8,6 +8,7 @@ public record NeonProductWrite(
     string ItemCode,
     string ItemName,
     int    ItemsGroupCode,
+    string? ItemGroupName,
     string OdooCategoryExternalId,
     string OdooCategoryName,
     decimal ListPrice,
@@ -58,7 +59,7 @@ public class NeonProductRepository : INeonProductRepository
     {
         const string sql = """
             INSERT INTO public."NeonProducts" (
-                "ItemCode","ItemName","ItemGroupCode",
+                "ItemCode","ItemName","ItemGroupCode","ItemGroupName",
                 "OdooCategoryExternalId","OdooCategoryName",
                 "ProductType","IsStorable","OdooUomId",
                 "SalesTaxId","PurchaseTaxId","IncomeAccountId","ExpenseAccountId",
@@ -69,7 +70,7 @@ public class NeonProductRepository : INeonProductRepository
                 "OnHandSap","AvailableCache","SyncedAt",
                 "FamilyConfidence","FamilyNeedsReview","FamilyOverrideReason"
             ) VALUES (
-                @ItemCode,@ItemName,@ItemsGroupCode,
+                @ItemCode,@ItemName,@ItemsGroupCode,@ItemGroupName,
                 @OdooCategoryExternalId,@OdooCategoryName,
                 'consu',true,1,
                 5,2,26,31,
@@ -83,6 +84,7 @@ public class NeonProductRepository : INeonProductRepository
             ON CONFLICT ("ItemCode") DO UPDATE SET
                 "ItemName"               = EXCLUDED."ItemName",
                 "ItemGroupCode"          = EXCLUDED."ItemGroupCode",
+                "ItemGroupName"          = EXCLUDED."ItemGroupName",
                 "OdooCategoryExternalId" = EXCLUDED."OdooCategoryExternalId",
                 "OdooCategoryName"       = EXCLUDED."OdooCategoryName",
                 "ListPrice"              = EXCLUDED."ListPrice",
@@ -99,6 +101,7 @@ public class NeonProductRepository : INeonProductRepository
         cmd.Parameters.AddWithValue("ItemCode", write.ItemCode);
         cmd.Parameters.AddWithValue("ItemName", write.ItemName);
         cmd.Parameters.AddWithValue("ItemsGroupCode", write.ItemsGroupCode);
+        cmd.Parameters.AddWithValue("ItemGroupName", (object?)write.ItemGroupName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("OdooCategoryExternalId", (object?)write.OdooCategoryExternalId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("OdooCategoryName", (object?)write.OdooCategoryName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("ListPrice", write.ListPrice);
