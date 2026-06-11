@@ -35,22 +35,25 @@ public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
         try { await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken); }
         catch (OperationCanceledException) { return; }
 
-        await WarmSafelyAsync(stoppingToken);
+        // Startup: reuse a persisted index if it's still fresh (instant) instead of cold-crawling.
+        await WarmSafelyAsync(forceRebuild: false, stoppingToken);
 
         var interval = TimeSpan.FromHours(Math.Max(1, _settings.WarmupIntervalHours));
         using var timer = new PeriodicTimer(interval);
+        // Timer: refresh from the live site and re-persist so the cache never goes stale.
         while (await timer.WaitForNextTickAsync(stoppingToken))
-            await WarmSafelyAsync(stoppingToken);
+            await WarmSafelyAsync(forceRebuild: true, stoppingToken);
     }
 
-    private async Task WarmSafelyAsync(CancellationToken ct)
+    private async Task WarmSafelyAsync(bool forceRebuild, CancellationToken ct)
     {
         try
         {
-            _logger.LogInformation("[LiquiMoly] Warming product index in the background...");
+            _logger.LogInformation("[LiquiMoly] {Mode} product index in the background...",
+                forceRebuild ? "Rebuilding" : "Warming");
             using var scope = _scopeFactory.CreateScope();
             var scraper = scope.ServiceProvider.GetRequiredService<LiquiMolyProductScraperService>();
-            await scraper.WarmIndexAsync(ct);
+            await scraper.WarmIndexAsync(forceRebuild, ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

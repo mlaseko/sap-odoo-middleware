@@ -68,6 +68,14 @@ public class LiquiMolyScraperSettings
     public int WarmupIntervalHours { get; set; } = 22;
 
     /// <summary>
+    /// File path for the persisted product index. The built index is written here and reloaded on
+    /// startup, so a restart skips the multi-minute cold crawl (and the "warming" 503s) as long as the
+    /// cached file is within the 23h cache lifetime. Empty → defaults to "Cache/liqui-moly-index-{Brand}.json"
+    /// under the app base directory.
+    /// </summary>
+    public string IndexCachePath { get; set; } = string.Empty;
+
+    /// <summary>
     /// Seed product discovery from LiquiMoly's sitemap — its canonical, complete product list. This finds
     /// products that aren't surfaced in any crawlable category (e.g. Coolant KFS 18 = 23152) and that the
     /// broken (HTTP 500) on-site search can't resolve, so the index is genuinely complete with no manual

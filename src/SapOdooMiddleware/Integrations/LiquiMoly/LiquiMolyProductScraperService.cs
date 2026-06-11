@@ -29,6 +29,82 @@ public class LiquiMolyProductScraperService
     // Serialises index builds across all callers so the expensive cold build runs once, not N times.
     private static readonly SemaphoreSlim _buildLock = new(1, 1);
 
+    // On-disk shape of the index, so a restart can skip the cold crawl.
+    private sealed record PersistedIndex(
+        DateTimeOffset BuiltAt,
+        Dictionary<string, string> Index,
+        Dictionary<string, string> SkuSizes,
+        Dictionary<string, List<string>> AllSizes);
+
+    private static readonly JsonSerializerOptions _indexJson =
+        new() { PropertyNameCaseInsensitive = true };
+
+    private string IndexCacheFilePath =>
+        string.IsNullOrWhiteSpace(_settings.IndexCachePath)
+            ? Path.Combine(AppContext.BaseDirectory, "Cache", $"liqui-moly-index-{BrandKey}.json")
+            : _settings.IndexCachePath;
+
+    /// <summary>
+    /// Loads the persisted index from disk and populates the in-memory cache, but only if the file exists
+    /// and is within <see cref="CacheLifetime"/>. Returns the index tuple on success, null otherwise.
+    /// </summary>
+    private (Dictionary<string, string>, Dictionary<string, string>, Dictionary<string, List<string>>)?
+        TryLoadIndexFromDisk()
+    {
+        try
+        {
+            var file = IndexCacheFilePath;
+            if (!File.Exists(file)) return null;
+
+            var p = JsonSerializer.Deserialize<PersistedIndex>(File.ReadAllText(file), _indexJson);
+            if (p?.Index is null || p.Index.Count == 0) return null;
+
+            var age = DateTimeOffset.UtcNow - p.BuiltAt;
+            if (age >= CacheLifetime)
+            {
+                _logger.LogInformation(_logPrefix + "Persisted index is stale ({Age:F1}h old); will rebuild.", age.TotalHours);
+                return null;
+            }
+
+            var index    = new Dictionary<string, string>(p.Index, StringComparer.OrdinalIgnoreCase);
+            var skuSizes = new Dictionary<string, string>(p.SkuSizes ?? new(), StringComparer.OrdinalIgnoreCase);
+            var allSizes = new Dictionary<string, List<string>>(p.AllSizes ?? new(), StringComparer.OrdinalIgnoreCase);
+            _brandCache[BrandKey] = (index, skuSizes, allSizes, p.BuiltAt);
+
+            _logger.LogInformation(_logPrefix + "Loaded product index from disk | {Count} SKUs | built {Built:u} ({Age:F1}h ago)",
+                index.Count, p.BuiltAt, age.TotalHours);
+            return (index, skuSizes, allSizes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, _logPrefix + "Failed to load persisted index from disk; will rebuild.");
+            return null;
+        }
+    }
+
+    /// <summary>Persists a freshly-built index to disk (atomic replace) for reuse across restarts.</summary>
+    private void SaveIndexToDisk(
+        Dictionary<string, string> index,
+        Dictionary<string, string> skuSizes,
+        Dictionary<string, List<string>> allSizes,
+        DateTimeOffset builtAt)
+    {
+        try
+        {
+            var file = IndexCacheFilePath;
+            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+            var json = JsonSerializer.Serialize(new PersistedIndex(builtAt, index, skuSizes, allSizes), _indexJson);
+            var tmp  = file + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, file, overwrite: true);
+            _logger.LogInformation(_logPrefix + "Persisted product index to {File} | {Count} SKUs", file, index.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, _logPrefix + "Failed to persist product index to disk.");
+        }
+    }
+
     // Exposed for subclasses to give each brand its own cache slot and log prefix.
     protected virtual string BrandKey   => "LiquiMoly";
     // Includes a trailing space so log messages read naturally when concatenated.
@@ -187,6 +263,10 @@ public class LiquiMolyProductScraperService
                 return (fresh.Index, fresh.SkuSizes, fresh.AllSizes);
             }
 
+            // Reuse a still-fresh index persisted by a previous run before paying the cold crawl.
+            if (TryLoadIndexFromDisk() is { } fromDisk)
+                return fromDisk;
+
             _logger.LogInformation(_logPrefix + "Building product index from category pages...");
             return await BuildProductIndexAsync(ct);
         }
@@ -201,11 +281,32 @@ public class LiquiMolyProductScraperService
     /// this on startup and on a timer so HTTP (/scrape) and bulk-create callers always hit a warm cache
     /// instead of paying the cold crawl + variant-mining cost (which exceeds the CDN's request timeout).
     /// </summary>
-    public async Task WarmIndexAsync(CancellationToken ct)
+    public Task WarmIndexAsync(CancellationToken ct) => WarmIndexAsync(forceRebuild: false, ct);
+
+    /// <summary>
+    /// Ensures the index is warm. With <paramref name="forceRebuild"/> false (startup), an in-memory or
+    /// on-disk index that is still fresh is reused — so a restart loads instantly instead of paying the
+    /// cold crawl. With it true (periodic refresh), the index is always rebuilt from the live site and
+    /// re-persisted.
+    /// </summary>
+    public async Task WarmIndexAsync(bool forceRebuild, CancellationToken ct)
     {
         await _buildLock.WaitAsync(ct);
         try
         {
+            if (!forceRebuild)
+            {
+                if (_brandCache.TryGetValue(BrandKey, out var c)
+                    && c.Index.Count > 0
+                    && DateTimeOffset.UtcNow - c.BuiltAt < CacheLifetime)
+                {
+                    _logger.LogInformation(_logPrefix + "Index already warm in memory | {Count} SKUs", c.Index.Count);
+                    return;
+                }
+                if (TryLoadIndexFromDisk() is not null)
+                    return;
+            }
+
             await BuildProductIndexAsync(ct);
         }
         finally
@@ -372,7 +473,9 @@ public class LiquiMolyProductScraperService
             _logger.LogInformation(_logPrefix + "Sample SKUs: {Skus}",
                 string.Join(", ", result.Keys.Take(10)));
 
-            _brandCache[BrandKey] = (result, sizesMap, allSizes, DateTimeOffset.UtcNow);
+            var builtAt = DateTimeOffset.UtcNow;
+            _brandCache[BrandKey] = (result, sizesMap, allSizes, builtAt);
+            SaveIndexToDisk(result, sizesMap, allSizes, builtAt);
         }
         else
         {
