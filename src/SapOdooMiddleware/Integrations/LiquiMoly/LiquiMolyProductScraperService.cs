@@ -772,16 +772,25 @@ public class LiquiMolyProductScraperService
         var (specificationItems, approvals, recommendations) = ExtractApprovalSpecificationData(doc);
         var overviewProperties = ExtractOverviewProperties(doc);
 
-        // Sizes come from the category listing pages (captured during index build).
-        // The product detail page loads them via JS, so HTML extraction is unreliable.
+        // Sizes: prefer the value captured from the category listing during index build. For
+        // sitemap-discovered orphans there's no cached size, so fall back to the product page's embedded
+        // Magento configurable config (jsonConfig.gebindeinhalt — authoritative per-variant size), then to
+        // name-based HTML extraction as a last resort.
         string? currentSize = cachedSize;
         List<string> allPackagingSizes = cachedAllSizes ?? new List<string>();
+        if (currentSize == null || allPackagingSizes.Count == 0)
+        {
+            var (cfgSize, cfgAll) = ExtractSizesFromJsonConfig(html, requestedSku);
+            currentSize ??= cfgSize;
+            if (allPackagingSizes.Count == 0 && cfgAll.Count > 0)
+                allPackagingSizes = cfgAll;
+        }
         if (currentSize == null)
         {
-            // Last resort: fall back to name-based extraction
+            // Last resort: name-based extraction
             var (htmlSize, htmlAll) = ExtractPackagingSizes(doc, requestedSku, name);
-            currentSize     = htmlSize;
-            allPackagingSizes = htmlAll;
+            currentSize ??= htmlSize;
+            if (allPackagingSizes.Count == 0) allPackagingSizes = htmlAll;
         }
 
         // Try PIM API first for download URLs; fall back to HTML scraping.
@@ -1355,6 +1364,89 @@ public class LiquiMolyProductScraperService
     /// 3. <c>variantswitch-sku-{sku}</c> div inner text.
     /// 4. Fallback: product name.
     /// </summary>
+    /// <summary>
+    /// Reads packaging sizes from the product page's embedded Magento configurable config. LM exposes a
+    /// <c>"jsonConfig": { … }</c> object containing two parallel maps keyed by Magento entity id:
+    /// <c>"sku"</c> (entity → article number) and <c>"gebindeinhalt"</c> (entity → size label, e.g. "1 l").
+    /// Returns the size for <paramref name="sku"/> plus every distinct size on the product. This is the
+    /// reliable source for sitemap-discovered orphans whose size isn't captured from a category listing.
+    /// </summary>
+    private static (string? size, List<string> allSizes) ExtractSizesFromJsonConfig(string? html, string sku)
+    {
+        var all = new List<string>();
+        if (string.IsNullOrEmpty(html)) return (null, all);
+        try
+        {
+            var json = ExtractBalancedJsonObject(html, "\"jsonConfig\"");
+            if (json == null) return (null, all);
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("gebindeinhalt", out var sizeMap)
+                || sizeMap.ValueKind != JsonValueKind.Object)
+                return (null, all);
+
+            foreach (var entry in sizeMap.EnumerateObject())
+            {
+                if (entry.Value.ValueKind != JsonValueKind.String) continue;
+                var s = entry.Value.GetString();
+                if (!string.IsNullOrWhiteSpace(s) && !all.Contains(s!)) all.Add(s!);
+            }
+
+            string? size = null;
+            if (root.TryGetProperty("sku", out var skuMap) && skuMap.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var entry in skuMap.EnumerateObject())
+                {
+                    if (entry.Value.ValueKind == JsonValueKind.String
+                        && string.Equals(entry.Value.GetString(), sku, StringComparison.OrdinalIgnoreCase)
+                        && sizeMap.TryGetProperty(entry.Name, out var sv)
+                        && sv.ValueKind == JsonValueKind.String)
+                    {
+                        size = sv.GetString();
+                        break;
+                    }
+                }
+            }
+            return (size, all);
+        }
+        catch
+        {
+            return (null, all);
+        }
+    }
+
+    /// <summary>
+    /// Extracts the first balanced <c>{ … }</c> JSON object that appears after <paramref name="afterToken"/>
+    /// in <paramref name="text"/>, honouring string literals/escapes. Used to pull an embedded JSON blob
+    /// (e.g. Magento's jsonConfig) out of a larger script body for parsing.
+    /// </summary>
+    private static string? ExtractBalancedJsonObject(string text, string afterToken)
+    {
+        var tokenIdx = text.IndexOf(afterToken, StringComparison.Ordinal);
+        if (tokenIdx < 0) return null;
+        var start = text.IndexOf('{', tokenIdx + afterToken.Length);
+        if (start < 0) return null;
+
+        int depth = 0;
+        bool inString = false, escaped = false;
+        for (int i = start; i < text.Length; i++)
+        {
+            char c = text[i];
+            if (inString)
+            {
+                if (escaped) escaped = false;
+                else if (c == '\\') escaped = true;
+                else if (c == '"') inString = false;
+            }
+            else if (c == '"') inString = true;
+            else if (c == '{') depth++;
+            else if (c == '}' && --depth == 0) return text.Substring(start, i - start + 1);
+        }
+        return null;
+    }
+
     private static (string? currentSize, List<string> allSizes) ExtractPackagingSizes(
         HtmlDocument doc,
         string requestedSku,
