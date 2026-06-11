@@ -175,11 +175,27 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             }
         }
 
-        // 5) Pricing — prefer the scraped LM category; fall back to the DGX Odoo category when the
-        //    scraper didn't capture one (e.g. sitemap-discovered products have a null Category).
+        // 5) Pricing — keyed off the AUTHORITATIVE SAP/OITB group (famResult.GroupCode), not the noisy
+        //    Odoo category, so two products in the same group always price identically (e.g. Pro-Line
+        //    5151/5155 both → 112 → Workshop Pro-Line band, regardless of how DGX named their Odoo cat).
+        //    Only if the SAP group has no dedicated band do we fall back to the scraped/DGX category.
         string pricingCat;
-        var pricingInput = !string.IsNullOrWhiteSpace(hint) ? hint : catResult.Name;
-        try { pricingCat = _pricing.ResolvePricingCategory(pricingInput); }
+        try
+        {
+            var bandFromGroup = _pricing.TryPricingBandForSapGroup(famResult.GroupCode!.Value);
+            if (bandFromGroup is not null)
+            {
+                pricingCat = _pricing.ResolvePricingCategory(bandFromGroup);
+            }
+            else
+            {
+                var pricingInput = !string.IsNullOrWhiteSpace(hint) ? hint : catResult.Name;
+                pricingCat = _pricing.ResolvePricingCategory(pricingInput);
+                _logger.LogInformation(
+                    "Pricing for {Code}: SAP group {Group} has no band; fell back to category '{Cat}' → {Band}",
+                    code, famResult.GroupCode, pricingInput, pricingCat);
+            }
+        }
         catch (InvalidOperationException ex)
         {
             return new LubesProvisioningResult("needs_review", code, ReviewReason: ex.Message);
