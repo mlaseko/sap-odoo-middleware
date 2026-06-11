@@ -62,6 +62,10 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
     // sent to manual review instead of guessing a group.
     private const double MinFamilyConfidence = 0.70;
 
+    // FIX 5: warn (don't block) when provisioning off a cached Liqui Moly scrape older than this, so a
+    // stale-data run is visible ahead of the eventual scraper-refresh workflow.
+    private const int StaleScrapeWarningDays = 30;
+
     // Layer 1: deterministic SAP-family overrides for product patterns we know with certainty and where
     // DGX has shown blind spots (e.g. it confidently calls coolant "Additives"). Matched against the LM
     // product name BEFORE calling DGX; first match wins, DGX is skipped.
@@ -108,6 +112,14 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                     ReviewReason: "Liqui Moly returned no data for this article.");
             lm = scraped[0];
             await _lmRepo.UpsertAsync(lm, ct);
+        }
+        else if (lm.ScrapedAt is { } scrapedAt
+                 && DateTime.UtcNow - scrapedAt > TimeSpan.FromDays(StaleScrapeWarningDays))
+        {
+            _logger.LogWarning(
+                "Provisioning {Code} from a stale Liqui Moly scrape: {Age} days old (ScrapedAt {ScrapedAt:u}). " +
+                "Data may be outdated — consider re-scraping this article.",
+                code, (int)(DateTime.UtcNow - scrapedAt).TotalDays, scrapedAt);
         }
 
         // 2) Rich description for both classifications
