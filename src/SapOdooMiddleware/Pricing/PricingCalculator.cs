@@ -219,6 +219,22 @@ public class PricingCalculator : IPricingCalculator
         var key = scrapedCategory.Trim();
         if (CategoryAliases.TryGetValue(key, out var mapped)) return mapped;
         if (BandRatios.ContainsKey(key)) return key; // exact match
+
+        // DGX returns hierarchical Odoo categories like "Service Products / Coolant / antifreeze" or
+        // "Workshop Pro-Line / Petrol injector / system cleaners". The TOP-LEVEL segment is the pricing
+        // band (Greases/Pastes/etc. are themselves top-level, so granularity is preserved). Walk the
+        // segments parent-first and use the first that resolves to a band; an exact alias above can still
+        // override any specific path.
+        if (key.Contains('/'))
+        {
+            foreach (var segment in key.Split('/'))
+            {
+                var c = segment.Trim();
+                if (CategoryAliases.TryGetValue(c, out mapped)) return mapped;
+                if (BandRatios.ContainsKey(c)) return c;
+            }
+        }
+
         throw new InvalidOperationException(
             $"No pricing category alias for '{scrapedCategory}'. Add it to CategoryAliases.");
     }
