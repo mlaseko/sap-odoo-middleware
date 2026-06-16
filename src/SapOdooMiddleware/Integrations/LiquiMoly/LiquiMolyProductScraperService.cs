@@ -24,6 +24,11 @@ public class LiquiMolyProductScraperService
         DateTimeOffset BuiltAt)>
         _brandCache = new(StringComparer.OrdinalIgnoreCase);
 
+    // Per-brand SKU → category-name (the DGX hint), captured during the category crawl. Parallel to
+    // _brandCache and persisted in the same index file; a missing/old cache simply yields no hint.
+    private static readonly ConcurrentDictionary<string, Dictionary<string, string>>
+        _brandCategories = new(StringComparer.OrdinalIgnoreCase);
+
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromHours(23);
 
     // Serialises index builds across all callers so the expensive cold build runs once, not N times.
@@ -34,7 +39,8 @@ public class LiquiMolyProductScraperService
         DateTimeOffset BuiltAt,
         Dictionary<string, string> Index,
         Dictionary<string, string> SkuSizes,
-        Dictionary<string, List<string>> AllSizes);
+        Dictionary<string, List<string>> AllSizes,
+        Dictionary<string, string>? Categories = null);   // SKU → category name (optional; absent in old caches)
 
     private static readonly JsonSerializerOptions _indexJson =
         new() { PropertyNameCaseInsensitive = true };
@@ -70,9 +76,10 @@ public class LiquiMolyProductScraperService
             var skuSizes = new Dictionary<string, string>(p.SkuSizes ?? new(), StringComparer.OrdinalIgnoreCase);
             var allSizes = new Dictionary<string, List<string>>(p.AllSizes ?? new(), StringComparer.OrdinalIgnoreCase);
             _brandCache[BrandKey] = (index, skuSizes, allSizes, p.BuiltAt);
+            _brandCategories[BrandKey] = new Dictionary<string, string>(p.Categories ?? new(), StringComparer.OrdinalIgnoreCase);
 
-            _logger.LogInformation(_logPrefix + "Loaded product index from disk | {Count} SKUs | built {Built:u} ({Age:F1}h ago)",
-                index.Count, p.BuiltAt, age.TotalHours);
+            _logger.LogInformation(_logPrefix + "Loaded product index from disk | {Count} SKUs | {Cats} categorised | built {Built:u} ({Age:F1}h ago)",
+                index.Count, _brandCategories[BrandKey].Count, p.BuiltAt, age.TotalHours);
             return (index, skuSizes, allSizes);
         }
         catch (Exception ex)
@@ -87,13 +94,14 @@ public class LiquiMolyProductScraperService
         Dictionary<string, string> index,
         Dictionary<string, string> skuSizes,
         Dictionary<string, List<string>> allSizes,
+        Dictionary<string, string> categories,
         DateTimeOffset builtAt)
     {
         try
         {
             var file = IndexCacheFilePath;
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-            var json = JsonSerializer.Serialize(new PersistedIndex(builtAt, index, skuSizes, allSizes), _indexJson);
+            var json = JsonSerializer.Serialize(new PersistedIndex(builtAt, index, skuSizes, allSizes, categories), _indexJson);
             var tmp  = file + ".tmp";
             File.WriteAllText(tmp, json);
             File.Move(tmp, file, overwrite: true);
@@ -173,6 +181,7 @@ public class LiquiMolyProductScraperService
                 string.Join(", ", targets.Take(10)));
 
         var (index, skuSizes, allSizes) = await GetOrBuildIndexAsync(ct);
+        _brandCategories.TryGetValue(BrandKey, out var skuCategories);
 
         _logger.LogInformation(_logPrefix + "Product index size: {Count}", index.Count);
 
@@ -194,8 +203,9 @@ public class LiquiMolyProductScraperService
             skuSizes.TryGetValue(sku, out var skuSize);
             var baseUrl = url.Contains('#') ? url[..url.IndexOf('#')] : url;
             allSizes.TryGetValue(baseUrl, out var productSizes);
+            string? skuCat = null; skuCategories?.TryGetValue(sku, out skuCat);
 
-            var dto = await ScrapeProductPageForSkuAsync(sku, url, skuSize, productSizes, ct);
+            var dto = await ScrapeProductPageForSkuAsync(sku, url, skuSize, productSizes, skuCat, ct);
             if (dto != null)
                 results.Add(dto);
 
@@ -219,7 +229,8 @@ public class LiquiMolyProductScraperService
                 Interlocked.Increment(ref found);
                 _logger.LogDebug(_logPrefix + "SKU {Sku} resolved via search → {Url}", sku, url);
 
-                var dto = await ScrapeProductPageForSkuAsync(sku, url, null, null, ct);
+                string? skuCatF = null; skuCategories?.TryGetValue(sku, out skuCatF);
+                var dto = await ScrapeProductPageForSkuAsync(sku, url, null, null, skuCatF, ct);
                 if (dto != null)
                     results.Add(dto);
             }, ct);
@@ -353,15 +364,16 @@ public class LiquiMolyProductScraperService
         var needsProductFetch = new ConcurrentBag<string>();
         var skuSizes        = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var allSizesByBase  = new ConcurrentDictionary<string, ConcurrentBag<string>>(StringComparer.OrdinalIgnoreCase);
+        var skuCategories   = new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // Phase 1 — crawl category pages; extract SKU→URL and SKU→size from href fragments
+        // Phase 1 — crawl category pages; extract SKU→URL, SKU→size and SKU→category from the listing.
         foreach (var (path, categoryName) in _settings.CategoryPaths)
         {
             if (ct.IsCancellationRequested) break;
 
             await CollectSkuUrlsFromCategoryAsync(
                 _settings.BaseUrl.TrimEnd('/') + path, categoryName,
-                map, needsProductFetch, skuSizes, allSizesByBase, ct);
+                map, needsProductFetch, skuSizes, allSizesByBase, skuCategories, ct);
 
             await Task.Delay(_settings.DelayBetweenCategoriesMs, ct);
         }
@@ -490,12 +502,14 @@ public class LiquiMolyProductScraperService
 
         var result   = new Dictionary<string, string>(map, StringComparer.OrdinalIgnoreCase);
         var sizesMap = new Dictionary<string, string>(skuSizes, StringComparer.OrdinalIgnoreCase);
+        var categoriesMap = new Dictionary<string, string>(skuCategories, StringComparer.OrdinalIgnoreCase);
         var allSizes = allSizesByBase.ToDictionary(
             kvp => kvp.Key,
             kvp => kvp.Value.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             StringComparer.OrdinalIgnoreCase);
 
-        _logger.LogInformation(_logPrefix + "Index complete | SKUs={Count} | WithSize={Sized}", result.Count, sizesMap.Count);
+        _logger.LogInformation(_logPrefix + "Index complete | SKUs={Count} | WithSize={Sized} | WithCategory={Cat}",
+            result.Count, sizesMap.Count, categoriesMap.Count);
 
         // Only promote a healthy build to the shared/disk cache. A build below the floor (e.g. the category
         // crawl itself got throttled/blocked) is returned to the immediate caller but NOT cached or
@@ -507,7 +521,8 @@ public class LiquiMolyProductScraperService
 
             var builtAt = DateTimeOffset.UtcNow;
             _brandCache[BrandKey] = (result, sizesMap, allSizes, builtAt);
-            SaveIndexToDisk(result, sizesMap, allSizes, builtAt);
+            _brandCategories[BrandKey] = categoriesMap;
+            SaveIndexToDisk(result, sizesMap, allSizes, categoriesMap, builtAt);
         }
         else
         {
@@ -540,6 +555,7 @@ public class LiquiMolyProductScraperService
         ConcurrentBag<string> needsProductFetch,
         ConcurrentDictionary<string, string> skuSizes,
         ConcurrentDictionary<string, ConcurrentBag<string>> allSizesByBase,
+        ConcurrentDictionary<string, string> skuCategories,
         CancellationToken ct)
     {
         var firstHtml = await FetchHtmlAsync(categoryUrl, ct);
@@ -551,7 +567,7 @@ public class LiquiMolyProductScraperService
 
         var firstDoc = new HtmlDocument();
         firstDoc.LoadHtml(firstHtml);
-        ExtractSkuMappingsFromPage(firstDoc, map, needsProductFetch, skuSizes, allSizesByBase);
+        ExtractSkuMappingsFromPage(firstDoc, map, needsProductFetch, skuSizes, allSizesByBase, categoryName, skuCategories);
 
         int totalPages = Math.Min(ExtractTotalPages(firstDoc), MaxCategoryPages);
 
@@ -579,7 +595,7 @@ public class LiquiMolyProductScraperService
 
                     var doc = new HtmlDocument();
                     doc.LoadHtml(html);
-                    ExtractSkuMappingsFromPage(doc, map, needsProductFetch, skuSizes, allSizesByBase);
+                    ExtractSkuMappingsFromPage(doc, map, needsProductFetch, skuSizes, allSizesByBase, categoryName, skuCategories);
                 }, ct);
         }
 
@@ -598,7 +614,9 @@ public class LiquiMolyProductScraperService
         ConcurrentDictionary<string, string> map,
         ConcurrentBag<string> needsProductFetch,
         ConcurrentDictionary<string, string>? skuSizes = null,
-        ConcurrentDictionary<string, ConcurrentBag<string>>? allSizesByBase = null)
+        ConcurrentDictionary<string, ConcurrentBag<string>>? allSizesByBase = null,
+        string? categoryName = null,
+        ConcurrentDictionary<string, string>? skuCategories = null)
     {
         var links = doc.DocumentNode.SelectNodes("//a[contains(@class,'product-variation')]");
         if (links == null) return;
@@ -618,6 +636,8 @@ public class LiquiMolyProductScraperService
                 {
                     // Fragment IS the SKU — map it directly
                     map.TryAdd(fragment, href);
+                    if (!string.IsNullOrWhiteSpace(categoryName))
+                        skuCategories?.TryAdd(fragment, categoryName!);
 
                     // Extract size from tag-badge > span.value
                     if (skuSizes != null || allSizesByBase != null)
@@ -749,6 +769,7 @@ public class LiquiMolyProductScraperService
         string productUrlWithHash,
         string? cachedSize,
         List<string>? cachedAllSizes,
+        string? cachedCategory,
         CancellationToken ct)
     {
         // The hash (#sku) is handled client-side by Magento's JS — strip it before fetching
@@ -827,7 +848,9 @@ public class LiquiMolyProductScraperService
             PackagingSize         = currentSize,
             AllPackagingSizes     = allPackagingSizes,
             Liter                 = ParseLiters(currentSize),
-            Category              = cat,
+            // Prefer the category captured from the crawl (the listing page we found this SKU on) — the
+            // product page's own breadcrumb is JS-rendered and usually absent from the static HTML.
+            Category              = !string.IsNullOrWhiteSpace(cachedCategory) ? cachedCategory : cat,
             SubCategory           = sub,
             Specifications        = new Dictionary<string, string>(),
             SpecificationItems    = specificationItems,

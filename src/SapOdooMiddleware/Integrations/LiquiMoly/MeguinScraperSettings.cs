@@ -14,9 +14,22 @@ public sealed class MeguinScraperSettings : LiquiMolyScraperSettings
     {
         BaseUrl = "https://www.meguin.com";
 
-        // Sitemap-driven: the sitemap is the complete product list, and variant-mining each product page
-        // yields every SKU. No category crawl needed (leave CategoryPaths empty).
-        CategoryPaths = new();
+        // Crawl Meguin's category pages (slugs from its sitemap) so each product gets a Category hint for
+        // DGX — same as Liqui Moly. The sitemap is still used (UseSitemap) to variant-mine orphans not
+        // surfaced under any category. Non-existent slugs simply log "empty" and are skipped.
+        CategoryPaths = new()
+        {
+            { "/en/engine-oils.html",                 "Engine Oils"                  },
+            { "/en/gear-oils.html",                   "Gear Oils"                    },
+            { "/en/additives.html",                   "Additives"                    },
+            { "/en/vehicle-care.html",                "Vehicle Care"                 },
+            { "/en/service-products.html",            "Service Products"             },
+            { "/en/greases.html",                     "Greases"                      },
+            { "/en/pastes.html",                      "Pastes"                       },
+            { "/en/workshop-pro-line.html",           "Workshop Pro-Line"            },
+            { "/en/repair-aids-service-products.html", "Repair aids/service products" },
+            { "/en/adhesives-sealants.html",          "Adhesives & Sealants"         },
+        };
         UseSitemap    = true;
         SitemapUrls   = new() { "https://www.meguin.com/sitemap/www.meguin.com/sitemap_en.xml" };
 
