@@ -4,12 +4,15 @@ using SapOdooMiddleware.Configuration;
 
 namespace SapOdooMiddleware.Integrations.Classifier;
 
+/// <summary>One Odoo category from the taxonomy bundle, keyed by <see cref="ExternalId"/>.</summary>
+public sealed record CategoryEntry(string ExternalId, string? Name, string? Parent, string? FullPath);
+
 public interface ICategoryTaxonomy
 {
     /// <summary>True when a taxonomy bundle is loaded (validation active). False → fail-open.</summary>
     bool IsLoaded { get; }
 
-    /// <summary>Number of external_ids currently loaded.</summary>
+    /// <summary>Number of categories currently loaded.</summary>
     int Count { get; }
 
     /// <summary>When the bundle was last (re)loaded, UTC; null if never loaded.</summary>
@@ -24,14 +27,17 @@ public interface ICategoryTaxonomy
     /// </summary>
     bool IsValidExternalId(string? externalId);
 
+    /// <summary>Human-readable full path for a known external_id (falls back to name), or null.</summary>
+    string? FullPathFor(string? externalId);
+
     /// <summary>Re-read the bundle from disk (used by the file watcher and the admin reload endpoint).</summary>
     void Reload();
 }
 
 /// <summary>
-/// Loads the authoritative Odoo category taxonomy (external_ids) and validates ids against it. Guards the
-/// "accept low confidence" path from persisting a category that DGX returned off a stale taxonomy. Reloads
-/// without a restart (file watcher + admin endpoint). Fail-open: with no bundle, every id is valid.
+/// Loads the authoritative Odoo category taxonomy and validates ids against it. Guards the
+/// "accept low confidence" path from persisting a category that DGX returned off a stale taxonomy.
+/// Reloads without a restart (file watcher + admin endpoint). Fail-open: with no bundle, every id is valid.
 /// </summary>
 public sealed class CategoryTaxonomyService : ICategoryTaxonomy, IDisposable
 {
@@ -39,13 +45,14 @@ public sealed class CategoryTaxonomyService : ICategoryTaxonomy, IDisposable
     private readonly ILogger<CategoryTaxonomyService> _logger;
     private readonly object _reloadLock = new();
 
-    private volatile HashSet<string> _ids = new(StringComparer.Ordinal);
+    // Keyed by external_id → entry (name/parent/full_path). Swapped atomically on reload.
+    private volatile Dictionary<string, CategoryEntry> _categories = new(StringComparer.Ordinal);
     private DateTimeOffset? _loadedAt;
     private FileSystemWatcher? _watcher;
     private DateTime _lastReloadUtc = DateTime.MinValue;
 
-    public bool IsLoaded => _ids.Count > 0;
-    public int Count => _ids.Count;
+    public bool IsLoaded => _categories.Count > 0;
+    public int Count => _categories.Count;
     public DateTimeOffset? LoadedAt => _loadedAt;
     public string? FilePath => _path;
 
@@ -66,7 +73,13 @@ public sealed class CategoryTaxonomyService : ICategoryTaxonomy, IDisposable
     }
 
     public bool IsValidExternalId(string? externalId) =>
-        !IsLoaded || (!string.IsNullOrWhiteSpace(externalId) && _ids.Contains(externalId!));
+        !IsLoaded || (!string.IsNullOrWhiteSpace(externalId) && _categories.ContainsKey(externalId!));
+
+    public string? FullPathFor(string? externalId)
+    {
+        if (string.IsNullOrWhiteSpace(externalId)) return null;
+        return _categories.TryGetValue(externalId!, out var e) ? (e.FullPath ?? e.Name) : null;
+    }
 
     public void Reload()
     {
@@ -79,19 +92,19 @@ public sealed class CategoryTaxonomyService : ICategoryTaxonomy, IDisposable
                 {
                     _logger.LogWarning(
                         "Odoo taxonomy validator: bundle not found at {Path} — validation disabled (fail-open).", _path);
-                    _ids = new HashSet<string>(StringComparer.Ordinal);
+                    _categories = new Dictionary<string, CategoryEntry>(StringComparer.Ordinal);
                     _loadedAt = null;
                     return;
                 }
 
-                var set = new HashSet<string>(StringComparer.Ordinal);
+                var map = new Dictionary<string, CategoryEntry>(StringComparer.Ordinal);
                 using var doc = JsonDocument.Parse(File.ReadAllText(_path));
-                LoadFrom(doc.RootElement, set);
+                LoadFrom(doc.RootElement, map);
 
-                _ids = set;                       // atomic swap; readers see old or new, both valid
+                _categories = map;                // atomic swap; readers see old or new, both valid
                 _loadedAt = DateTimeOffset.UtcNow;
                 _logger.LogInformation(
-                    "Odoo taxonomy validator: loaded {Count} categories from {Path}.", set.Count, _path);
+                    "Odoo taxonomy validator: loaded {Count} categories from {Path}.", map.Count, _path);
             }
             catch (Exception ex)
             {
@@ -129,41 +142,47 @@ public sealed class CategoryTaxonomyService : ICategoryTaxonomy, IDisposable
 
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
-        // Editors/copies fire several events; debounce and let the writer finish before re-reading.
         if ((DateTime.UtcNow - _lastReloadUtc).TotalSeconds < 2) return;
         _lastReloadUtc = DateTime.UtcNow;
         Task.Delay(500).ContinueWith(_ => Reload());
     }
 
-    private static void LoadFrom(JsonElement root, HashSet<string> set)
+    private static void LoadFrom(JsonElement root, Dictionary<string, CategoryEntry> map)
     {
         if (root.ValueKind == JsonValueKind.Array)
         {
-            // [ { "external_id": "...", "name": "..." }, ... ]
+            // [ { "external_id": "...", "name": "...", "parent": "...", "full_path": "..." }, ... ]
             foreach (var el in root.EnumerateArray())
             {
                 if (el.ValueKind != JsonValueKind.Object) continue;
-                foreach (var key in new[] { "external_id", "externalId", "id" })
-                {
-                    if (el.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String)
-                    {
-                        var s = v.GetString();
-                        if (!string.IsNullOrWhiteSpace(s)) set.Add(s!);
-                        break;
-                    }
-                }
+                var id = Str(el, "external_id", "externalId", "id");
+                if (string.IsNullOrWhiteSpace(id)) continue;
+                map[id!] = new CategoryEntry(
+                    id!,
+                    Str(el, "name"),
+                    Str(el, "parent", "parent_id"),
+                    Str(el, "full_path", "fullPath", "path"));
             }
         }
         else if (root.ValueKind == JsonValueKind.Object)
         {
-            // { "<name>": "<external_id>", ... } — take the values.
+            // { "<name>": "<external_id>", ... } — value is the id, key is the (display) name.
             foreach (var prop in root.EnumerateObject())
-                if (prop.Value.ValueKind == JsonValueKind.String)
-                {
-                    var s = prop.Value.GetString();
-                    if (!string.IsNullOrWhiteSpace(s)) set.Add(s!);
-                }
+            {
+                if (prop.Value.ValueKind != JsonValueKind.String) continue;
+                var id = prop.Value.GetString();
+                if (string.IsNullOrWhiteSpace(id)) continue;
+                map[id!] = new CategoryEntry(id!, prop.Name, null, prop.Name);
+            }
         }
+    }
+
+    private static string? Str(JsonElement el, params string[] keys)
+    {
+        foreach (var k in keys)
+            if (el.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String)
+                return v.GetString();
+        return null;
     }
 
     public void Dispose()
