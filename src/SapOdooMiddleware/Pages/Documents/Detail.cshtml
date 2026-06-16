@@ -206,7 +206,7 @@
         catch (e) { alert('Could not load categories: ' + e.message); return; }
         const cats = (tax && tax.categories) || [];
         if (!cats.length) { alert('No Odoo taxonomy is loaded (set CategoryTaxonomy:FilePath and reload). Use "Match…" or "Accept DGX category" instead.'); return; }
-        const options = cats.map(c => '<option value="' + c.externalId + '">' + c.label + '</option>').join('');
+        const options = cats.map(c => '<option value="' + c.external_id + '">' + c.label + '</option>').join('');
         openModal(
             '<h3>Pick Odoo category</h3><p>Assign a category and create this item in SAP + Odoo.</p>' +
             '<select id="cat-select" class="cell-input" style="width:100%">' + options + '</select>',
@@ -221,7 +221,7 @@
                         mBody.innerHTML = '<h3>Creating…</h3><div class="spinner"></div>';
                         try {
                             const r = await api('POST', '/lines/' + lineId + '/create-with-category',
-                                { odooCategoryExternalId: externalId, odooCategoryName: name });
+                                { odoo_category_external_id: externalId, odoo_category_name: name });
                             closeModal();
                             if (r && r.created) applyLine(row, r.line);
                             else { if (r && r.line) applyLine(row, r.line); alert('Create failed: ' + ((r && r.error) || 'unknown')); }
