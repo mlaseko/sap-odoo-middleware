@@ -34,6 +34,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
     private readonly INeonLiquiMolyRepository       _lmRepo;
     private readonly INeonProductRepository         _productRepo;
     private readonly LiquiMolyProductScraperService _scraper;
+    private readonly MeguinProductScraperService    _meguinScraper;
     private readonly PricingSettings                _pricingSettings;
     private readonly ILogger<LubesItemProvisioningService> _logger;
 
@@ -44,6 +45,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         INeonLiquiMolyRepository lmRepo,
         INeonProductRepository productRepo,
         LiquiMolyProductScraperService scraper,
+        MeguinProductScraperService meguinScraper,
         IOptions<PricingSettings> pricingSettings,
         ILogger<LubesItemProvisioningService> logger)
     {
@@ -53,6 +55,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         _lmRepo          = lmRepo;
         _productRepo     = productRepo;
         _scraper         = scraper;
+        _meguinScraper   = meguinScraper;
         _pricingSettings = pricingSettings.Value;
         _logger          = logger;
     }
@@ -102,14 +105,21 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         // (The Liqui Moly cache upsert is idempotent and is not an item-creation side effect.)
         // ============================================================
 
+        // Brand routing: Meguin (an LM subsidiary) is invoiced under LM with "Meguin" in the line name and
+        // lives on meguin.com. Route those to the Meguin scraper; everything else to Liqui Moly. The name
+        // is the safe disambiguator (LM/Meguin article numbers can collide).
+        var isMeguin = (req.SupplierName ?? "").TrimStart().StartsWith("Meguin", StringComparison.OrdinalIgnoreCase);
+        var scraper  = isMeguin ? (LiquiMolyProductScraperService)_meguinScraper : _scraper;
+        var brand    = isMeguin ? "Meguin" : "Liqui Moly";
+
         // 1) Ensure LM row (scrape on demand)
         var lm = await _lmRepo.GetByArticleNumberAsync(code, ct);
         if (lm is null)
         {
-            var scraped = await _scraper.ScrapeByArticleNumbersAsync(new[] { code }, ct);
+            var scraped = await scraper.ScrapeByArticleNumbersAsync(new[] { code }, ct);
             if (scraped is null || scraped.Count == 0)
                 return new LubesProvisioningResult("needs_review", code,
-                    ReviewReason: "Liqui Moly returned no data for this article.");
+                    ReviewReason: $"{brand} returned no data for this article.");
             lm = scraped[0];
             await _lmRepo.UpsertAsync(lm, ct);
         }
@@ -128,19 +138,36 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             : $"{code}-{lm.Name}. {lm.Description}";
         var hint = lm.Category;
 
-        // 3) Odoo category
+        // 3) Odoo category — a reviewer-assigned manual override (both id + name) bypasses the classifier;
+        //    this is how a low-confidence-category failure gets resolved from the review UI.
         CategoryClassification catResult;
-        try { catResult = await _classifier.ClassifyCategoryAsync(description, hint, ct); }
-        catch (Exception ex)
+        if (!string.IsNullOrWhiteSpace(req.OdooCategoryOverrideExternalId)
+            && !string.IsNullOrWhiteSpace(req.OdooCategoryOverrideName))
         {
-            _logger.LogError(ex, "Classifier (/classify) failed for {Code}", code);
-            return new LubesProvisioningResult("needs_review", code,
-                ReviewReason: "Classifier service unavailable.");
+            catResult = new CategoryClassification
+            {
+                ExternalId  = req.OdooCategoryOverrideExternalId,
+                Name        = req.OdooCategoryOverrideName,
+                Confidence  = 1.0,
+                NeedsReview = false,
+            };
+            _logger.LogInformation("Odoo category manually overridden for {Code}: '{Name}' ({Id})",
+                code, req.OdooCategoryOverrideName, req.OdooCategoryOverrideExternalId);
         }
-        if (catResult.NeedsReview || string.IsNullOrEmpty(catResult.ExternalId))
-            return new LubesProvisioningResult("needs_review", code,
-                ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
-                Candidates: catResult.Candidates);
+        else
+        {
+            try { catResult = await _classifier.ClassifyCategoryAsync(description, hint, ct); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Classifier (/classify) failed for {Code}", code);
+                return new LubesProvisioningResult("needs_review", code,
+                    ReviewReason: "Classifier service unavailable.");
+            }
+            if (catResult.NeedsReview || string.IsNullOrEmpty(catResult.ExternalId))
+                return new LubesProvisioningResult("needs_review", code,
+                    ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
+                    Candidates: catResult.Candidates);
+        }
 
         // 4) SAP family — three layers:
         //    Layer 1: deterministic business-rule overrides for known DGX blind spots (run BEFORE DGX,
