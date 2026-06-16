@@ -129,6 +129,8 @@
                         <div class="menu">
                             <button type="button" data-action="match">Match…</button>
                             <button type="button" data-action="create_new">Create New</button>
+                            <button type="button" data-action="accept_category">Accept DGX category &amp; create</button>
+                            <button type="button" data-action="pick_category">Pick category &amp; create…</button>
                             <button type="button" data-action="skip">Skip</button>
                         </div>
                     </details>
@@ -183,6 +185,51 @@
         const json = text ? JSON.parse(text) : null;
         if (!r.ok) throw new Error((json && json.error) || ('HTTP ' + r.status));
         return json;
+    }
+
+    // Like api() but for an absolute path (e.g. /api/admin/taxonomy), not under the document base.
+    async function apiAbs(method, path, body) {
+        const opts = { method, headers: {} };
+        if (API_KEY) opts.headers['X-Api-Key'] = API_KEY;
+        if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+        const r = await fetch(path, opts);
+        const text = await r.text();
+        const json = text ? JSON.parse(text) : null;
+        if (!r.ok) throw new Error((json && json.error) || ('HTTP ' + r.status));
+        return json;
+    }
+
+    // Resolve a low-confidence line by picking an Odoo category from the loaded taxonomy and creating it.
+    async function pickCategoryAndCreate(row, lineId) {
+        let tax;
+        try { tax = await apiAbs('GET', '/api/admin/taxonomy'); }
+        catch (e) { alert('Could not load categories: ' + e.message); return; }
+        const cats = (tax && tax.categories) || [];
+        if (!cats.length) { alert('No Odoo taxonomy is loaded (set CategoryTaxonomy:FilePath and reload). Use "Match…" or "Accept DGX category" instead.'); return; }
+        const options = cats.map(c => '<option value="' + c.externalId + '">' + c.label + '</option>').join('');
+        openModal(
+            '<h3>Pick Odoo category</h3><p>Assign a category and create this item in SAP + Odoo.</p>' +
+            '<select id="cat-select" class="cell-input" style="width:100%">' + options + '</select>',
+            [
+                { label: 'Cancel', onClick: closeModal },
+                {
+                    label: 'Create with category', primary: true, onClick: async () => {
+                        const sel = document.getElementById('cat-select');
+                        const externalId = sel.value;
+                        const name = sel.options[sel.selectedIndex].text;
+                        mActions.innerHTML = '';
+                        mBody.innerHTML = '<h3>Creating…</h3><div class="spinner"></div>';
+                        try {
+                            const r = await api('POST', '/lines/' + lineId + '/create-with-category',
+                                { odooCategoryExternalId: externalId, odooCategoryName: name });
+                            closeModal();
+                            if (r && r.created) applyLine(row, r.line);
+                            else { if (r && r.line) applyLine(row, r.line); alert('Create failed: ' + ((r && r.error) || 'unknown')); }
+                            await refreshSummary();
+                        } catch (e) { closeModal(); alert('Create failed: ' + e.message); }
+                    }
+                }
+            ]);
     }
 
     // ---- formatting helpers ----
@@ -292,6 +339,18 @@
             const action = btn.dataset.action;
             const details = btn.closest('details'); if (details) details.open = false;
             try {
+                // Manual-review resolutions for low-confidence-category failures (return {created, line, error}).
+                if (action === 'accept_category') {
+                    const r = await api('POST', '/lines/' + lineId + '/create-accept-category');
+                    if (r && r.created) applyLine(row, r.line);
+                    else { if (r && r.line) applyLine(row, r.line); alert('Create failed: ' + ((r && r.error) || 'unknown')); }
+                    await refreshSummary();
+                    return;
+                }
+                if (action === 'pick_category') {
+                    await pickCategoryAndCreate(row, lineId);
+                    return;
+                }
                 let updated;
                 if (action === 'match') {
                     const current = (row.querySelector('[data-field="article_number"]').textContent || '').trim();
