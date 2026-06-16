@@ -114,6 +114,8 @@ builder.Services.AddHostedService<IndexWarmupHostedService<MeguinProductScraperS
 // --- Item Provisioning components ---
 builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
 builder.Services.AddScoped<INeonLiquiMolyRepository, NeonLiquiMolyRepository>();
+builder.Services.Configure<CategoryTaxonomySettings>(builder.Configuration.GetSection(CategoryTaxonomySettings.SectionName));
+builder.Services.AddSingleton<ICategoryTaxonomy, CategoryTaxonomyService>();
 builder.Services.AddScoped<INeonProductRepository, NeonProductRepository>();
 builder.Services.AddScoped<ILubesItemProvisioningService, LubesItemProvisioningService>();
 
