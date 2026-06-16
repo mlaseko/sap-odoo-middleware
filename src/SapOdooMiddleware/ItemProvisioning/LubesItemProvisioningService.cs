@@ -227,7 +227,8 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                     return new LubesProvisioningResult("needs_review", code,
                         ReviewReason:
                             $"DGX returned external_id '{catResult.ExternalId}' which is no longer in the Odoo taxonomy bundle "
-                            + $"(loaded {_taxonomy.LoadedAt:u}). Use 'pick category' to assign a current category.",
+                            + $"(loaded {_taxonomy.LoadedAt:u}, {_taxonomy.Count} categories). "
+                            + $"Use 'pick category' to assign a current category.",
                         Candidates: catResult.Candidates);
 
                 // Audit: this WARN on every accept enables the feedback loop — querying how often operators
@@ -235,7 +236,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 // needs prompt/threshold tuning.
                 _logger.LogWarning(
                     "Odoo category low-confidence ACCEPTED for {Code} '{Name}': '{Cat}' ({Id}) @ {Conf:F2}. Spot-check this.",
-                    code, lm.Name, catResult.Name, catResult.ExternalId, catResult.Confidence);
+                    code, lm.Name, _taxonomy.FullPathFor(catResult.ExternalId) ?? catResult.Name, catResult.ExternalId, catResult.Confidence);
             }
         }
 
