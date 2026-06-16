@@ -5,8 +5,9 @@ namespace SapOdooMiddleware.Ingestion;
 
 /// <summary>
 /// After extraction, pre-populates per-line review state by checking each line's article number
-/// against SAP B1. Pending lines with no article stay pending; promotional lines become 'skip';
-/// lines whose article exists in SAP become 'matched'. Only touches 'pending' lines, so it is
+/// against SAP B1. Pending lines with no article stay pending; genuine zero-value free goods become
+/// 'skip' (priced 100%-discount bonus lines are left for review); lines whose article exists in SAP
+/// become 'matched'. Only touches 'pending' lines, so it is
 /// safe to re-run. On SAP outage it stops querying, leaves lines pending, and stamps the doc so
 /// the operator can retry from the UI.
 /// </summary>
@@ -53,7 +54,11 @@ public class InvoiceAutoMatchJob
 
         foreach (var line in pending)
         {
-            if (line.IsPromotional)
+            // Auto-skip only genuine zero-value free goods (no unit price AND no line total). A line that
+            // is merely flagged promotional — e.g. a 100%-discount bonus product that still has a unit
+            // price — is left for the reviewer: it may be real Liqui Moly stock to create, and only the
+            // description distinguishes it from throw-away merchandise (banners, caps, racks).
+            if (InvoicePromotionRules.IsFreeGoods(line.UnitPrice, line.LineTotal, line.Quantity))
             {
                 await _lines.SetReviewStatusAsync(line.Id, "skip", null, ct);
                 continue;
