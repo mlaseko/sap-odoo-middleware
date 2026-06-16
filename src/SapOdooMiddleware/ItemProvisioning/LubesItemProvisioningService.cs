@@ -174,11 +174,8 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         if (!string.IsNullOrWhiteSpace(req.OdooCategoryOverrideExternalId)
             && !string.IsNullOrWhiteSpace(req.OdooCategoryOverrideName))
         {
-            // Defensive: a reviewer-supplied id from a stale UI bundle must still exist in the taxonomy.
-            if (!_taxonomy.IsValidExternalId(req.OdooCategoryOverrideExternalId))
-                return new LubesProvisioningResult("needs_review", code,
-                    ReviewReason: $"Odoo category external_id '{req.OdooCategoryOverrideExternalId}' is not in the current taxonomy; pick a valid category.");
-
+            // Manual override is NOT taxonomy-validated by design: the operator picked it from the live UI
+            // dropdown, so re-validating would only add friction. Validation runs on accept-category only.
             catResult = new CategoryClassification
             {
                 ExternalId  = req.OdooCategoryOverrideExternalId,
@@ -228,7 +225,9 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 // Defensive: DGX may be on a slightly stale taxonomy — don't persist a removed external_id.
                 if (!_taxonomy.IsValidExternalId(catResult.ExternalId))
                     return new LubesProvisioningResult("needs_review", code,
-                        ReviewReason: $"DGX returned an external_id ('{catResult.ExternalId}') not in the current taxonomy; use pick-category instead.",
+                        ReviewReason:
+                            $"DGX returned external_id '{catResult.ExternalId}' which is no longer in the Odoo taxonomy bundle "
+                            + $"(loaded {_taxonomy.LoadedAt:u}). Use 'pick category' to assign a current category.",
                         Candidates: catResult.Candidates);
 
                 // Audit: this WARN on every accept enables the feedback loop — querying how often operators
