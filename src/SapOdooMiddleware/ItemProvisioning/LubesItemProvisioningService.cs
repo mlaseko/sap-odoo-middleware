@@ -35,6 +35,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
     private readonly INeonProductRepository         _productRepo;
     private readonly LiquiMolyProductScraperService _scraper;
     private readonly MeguinProductScraperService    _meguinScraper;
+    private readonly ICategoryTaxonomy              _taxonomy;
     private readonly PricingSettings                _pricingSettings;
     private readonly ILogger<LubesItemProvisioningService> _logger;
 
@@ -46,6 +47,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         INeonProductRepository productRepo,
         LiquiMolyProductScraperService scraper,
         MeguinProductScraperService meguinScraper,
+        ICategoryTaxonomy taxonomy,
         IOptions<PricingSettings> pricingSettings,
         ILogger<LubesItemProvisioningService> logger)
     {
@@ -56,6 +58,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         _productRepo     = productRepo;
         _scraper         = scraper;
         _meguinScraper   = meguinScraper;
+        _taxonomy        = taxonomy;
         _pricingSettings = pricingSettings.Value;
         _logger          = logger;
     }
@@ -171,6 +174,8 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         if (!string.IsNullOrWhiteSpace(req.OdooCategoryOverrideExternalId)
             && !string.IsNullOrWhiteSpace(req.OdooCategoryOverrideName))
         {
+            // Manual override is NOT taxonomy-validated by design: the operator picked it from the live UI
+            // dropdown, so re-validating would only add friction. Validation runs on accept-category only.
             catResult = new CategoryClassification
             {
                 ExternalId  = req.OdooCategoryOverrideExternalId,
@@ -217,6 +222,17 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                         ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
                         Candidates: catResult.Candidates);
 
+                // Defensive: DGX may be on a slightly stale taxonomy — don't persist a removed external_id.
+                if (!_taxonomy.IsValidExternalId(catResult.ExternalId))
+                    return new LubesProvisioningResult("needs_review", code,
+                        ReviewReason:
+                            $"DGX returned external_id '{catResult.ExternalId}' which is no longer in the Odoo taxonomy bundle "
+                            + $"(loaded {_taxonomy.LoadedAt:u}). Use 'pick category' to assign a current category.",
+                        Candidates: catResult.Candidates);
+
+                // Audit: this WARN on every accept enables the feedback loop — querying how often operators
+                // accept low-confidence calls (and whether they later proved correct) tells us whether DGX
+                // needs prompt/threshold tuning.
                 _logger.LogWarning(
                     "Odoo category low-confidence ACCEPTED for {Code} '{Name}': '{Cat}' ({Id}) @ {Conf:F2}. Spot-check this.",
                     code, lm.Name, catResult.Name, catResult.ExternalId, catResult.Confidence);
