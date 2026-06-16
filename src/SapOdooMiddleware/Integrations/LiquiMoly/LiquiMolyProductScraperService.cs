@@ -370,7 +370,10 @@ public class LiquiMolyProductScraperService
             _logPrefix + "Category crawl complete | Direct SKU mappings={Direct} | Need product page fetch={Fetch}",
             map.Count, needsProductFetch.Count);
 
-        if (map.Count == 0 && needsProductFetch.IsEmpty)
+        // Abort only when there's nothing left to try. With UseSitemap, an empty category crawl is normal
+        // (e.g. Meguin runs sitemap-only with no CategoryPaths) — Phase 2b below discovers products from the
+        // sitemap, so don't bail here.
+        if (map.Count == 0 && needsProductFetch.IsEmpty && !_settings.UseSitemap)
         {
             _logger.LogError(
                 _logPrefix + "No product URLs found — category pages may be blocked or have changed structure");

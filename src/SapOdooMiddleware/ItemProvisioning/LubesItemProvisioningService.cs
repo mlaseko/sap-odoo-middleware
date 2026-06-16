@@ -94,6 +94,30 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         return null;
     }
 
+    // Layer 1 (Odoo category): deterministic Odoo-category overrides for patterns that map 1:1 to a single
+    // Odoo leaf category regardless of the DGX hint. Per DGX guidance, ONLY patterns with no subcategory
+    // variance qualify — coolant and brake fluid. Pro-Line and Motorbike are deliberately NOT here: their
+    // Odoo leaf legitimately varies (petrol vs diesel; engine-oil vs additive vs care), so DGX classifies
+    // them. Matched against the LM product name BEFORE calling /classify; a manual override still wins.
+    private static readonly (Regex Pattern, string ExternalId, string Name, string Rule)[] OdooCategoryOverrides =
+    {
+        (new Regex(@"\b(coolant|antifreeze|kfs)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+            "__import__.lm_cat_service_products__coolant_antifreeze",
+            "Service Products / Coolant / antifreeze", "name matches coolant/antifreeze"),
+        (new Regex(@"\bbrake fluid\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+            "__import__.lm_cat_service_products__brake_fluid",
+            "Service Products / Brake fluid", "name matches brake fluid"),
+    };
+
+    private static (string ExternalId, string Name, string Rule)? MatchOdooCategoryOverride(string? productName)
+    {
+        if (string.IsNullOrWhiteSpace(productName)) return null;
+        foreach (var o in OdooCategoryOverrides)
+            if (o.Pattern.IsMatch(productName))
+                return (o.ExternalId, o.Name, o.Rule);
+        return null;
+    }
+
     public async Task<LubesProvisioningResult> ProvisionAsync(LubesProvisioningRequest req, CancellationToken ct)
     {
         var code = req.ArticleNumber?.Trim() ?? "";
@@ -140,9 +164,10 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             : $"{code}-{lm.Name}. {lm.Description}";
         var hint = lm.Category;
 
-        // 3) Odoo category — a reviewer-assigned manual override (both id + name) bypasses the classifier;
-        //    this is how a low-confidence-category failure gets resolved from the review UI.
+        // 3) Odoo category — precedence: (a) reviewer manual override always wins; (b) Layer 1 deterministic
+        //    overrides for 1:1 patterns (coolant, brake fluid) skip DGX; (c) otherwise DGX /classify.
         CategoryClassification catResult;
+        var catOverride = MatchOdooCategoryOverride(lm.Name);
         if (!string.IsNullOrWhiteSpace(req.OdooCategoryOverrideExternalId)
             && !string.IsNullOrWhiteSpace(req.OdooCategoryOverrideName))
         {
@@ -155,6 +180,18 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             };
             _logger.LogInformation("Odoo category manually overridden for {Code}: '{Name}' ({Id})",
                 code, req.OdooCategoryOverrideName, req.OdooCategoryOverrideExternalId);
+        }
+        else if (catOverride is { } co)
+        {
+            catResult = new CategoryClassification
+            {
+                ExternalId  = co.ExternalId,
+                Name        = co.Name,
+                Confidence  = 1.0,
+                NeedsReview = false,
+            };
+            _logger.LogInformation("Odoo category override for {Code} '{Name}': {Cat} [{Rule}] (DGX /classify skipped)",
+                code, lm.Name, co.Name, co.Rule);
         }
         else
         {
