@@ -13,17 +13,6 @@
 
     Reusable across tenants via StatusUrl. (Lubes Detail still inlines its own copy today.)
 *@
-<style>
-    .progress-bar-fill.indeterminate {
-        width: 35% !important;
-        animation: pp-indet 1.25s ease-in-out infinite;
-    }
-    @@keyframes pp-indet {
-        0%   { margin-left: -35%; }
-        100% { margin-left: 100%; }
-    }
-</style>
-
 <div id="progress-card" class="progress-card" style="display:none">
     <div class="progress-header">
         <span class="progress-label" id="pp-phase">Starting…</span>

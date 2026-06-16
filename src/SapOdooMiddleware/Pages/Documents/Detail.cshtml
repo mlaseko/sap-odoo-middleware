@@ -8,9 +8,12 @@
     string Inv(decimal? d) => d?.ToString(CultureInfo.InvariantCulture) ?? "";
 }
 
-<div style="display:flex; justify-content:space-between; align-items:center;">
-    <h2 style="margin:0;">@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
-    <a href="/documents">← Back to list</a>
+<div class="page-head">
+    <div>
+        <h2>@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
+        <div class="sub">@Model.Doc.Supplier</div>
+    </div>
+    <a class="btn" href="/documents">← Back to list</a>
 </div>
 
 @{
@@ -29,11 +32,11 @@
     </div>
     @if (!string.IsNullOrWhiteSpace(Model.Doc.ValidationNotes))
     {
-        <p style="margin:8px 0 0; color:#854d0e;">@Model.Doc.ValidationNotes</p>
+        <div class="note-warn">@Model.Doc.ValidationNotes</div>
     }
     @if (!string.IsNullOrWhiteSpace(Model.Doc.ErrorMessage))
     {
-        <p style="margin:8px 0 0; color:#991b1b;">@Model.Doc.ErrorMessage</p>
+        <div class="note-error">@Model.Doc.ErrorMessage</div>
     }
 </div>
 
