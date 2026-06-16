@@ -30,6 +30,9 @@ public interface ICategoryTaxonomy
     /// <summary>Human-readable full path for a known external_id (falls back to name), or null.</summary>
     string? FullPathFor(string? externalId);
 
+    /// <summary>All loaded categories (for the review-UI picker). Empty when no bundle is loaded.</summary>
+    IReadOnlyList<CategoryEntry> All();
+
     /// <summary>Re-read the bundle from disk (used by the file watcher and the admin reload endpoint).</summary>
     void Reload();
 }
@@ -80,6 +83,9 @@ public sealed class CategoryTaxonomyService : ICategoryTaxonomy, IDisposable
         if (string.IsNullOrWhiteSpace(externalId)) return null;
         return _categories.TryGetValue(externalId!, out var e) ? (e.FullPath ?? e.Name) : null;
     }
+
+    public IReadOnlyList<CategoryEntry> All() =>
+        _categories.Values.OrderBy(e => e.FullPath ?? e.Name ?? e.ExternalId, StringComparer.OrdinalIgnoreCase).ToList();
 
     public void Reload()
     {
