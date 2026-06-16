@@ -188,6 +188,23 @@ public class DocumentsController : ControllerBase
             : Ok(new { created = false, error = failure.Error, line });
     }
 
+    /// <summary>
+    /// Resolve a low-confidence-category line by accepting DGX's classification as-is (the operator trusts
+    /// the classifier rather than picking a category) and creating the item now.
+    /// </summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/create-accept-category")]
+    public async Task<IActionResult> CreateAcceptCategory(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+
+        var failure = await _itemCreation.CreateLineAcceptingClassificationAsync(documentId, lineId, ct);
+
+        var line = await _lines.GetByIdAsync(lineId, ct);
+        return failure is null
+            ? Ok(new { created = true, line })
+            : Ok(new { created = false, error = failure.Error, line });
+    }
+
     /// <summary>Re-run the SAP lookup for all pending lines.</summary>
     [HttpPost("{documentId:guid}/auto-match")]
     public async Task<IActionResult> AutoMatch(Guid documentId, CancellationToken ct)

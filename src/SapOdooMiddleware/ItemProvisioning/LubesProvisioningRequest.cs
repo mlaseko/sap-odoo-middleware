@@ -15,4 +15,8 @@ public record LubesProvisioningRequest(
     // Manual Odoo-category override (reviewer-assigned). When both are set, provisioning uses this category
     // instead of calling the DGX classifier — the resolution path for low-confidence category failures.
     string? OdooCategoryOverrideExternalId = null,
-    string? OdooCategoryOverrideName = null);
+    string? OdooCategoryOverrideName = null,
+    // Reviewer chose to accept DGX's low-confidence Odoo category as-is (instead of failing to manual
+    // review). Used by the "accept low confidence" review action; only takes effect when DGX returns a
+    // category (non-empty ExternalId).
+    bool AcceptLowConfidenceCategory = false);

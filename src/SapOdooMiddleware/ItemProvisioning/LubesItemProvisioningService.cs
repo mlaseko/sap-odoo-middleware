@@ -202,10 +202,25 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 return new LubesProvisioningResult("needs_review", code,
                     ReviewReason: "Classifier service unavailable.");
             }
-            if (catResult.NeedsReview || string.IsNullOrEmpty(catResult.ExternalId))
+            // No category at all → can't proceed regardless.
+            if (string.IsNullOrEmpty(catResult.ExternalId))
                 return new LubesProvisioningResult("needs_review", code,
                     ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
                     Candidates: catResult.Candidates);
+
+            // Low confidence: by default route to manual review; but if the reviewer explicitly chose to
+            // accept DGX's call ("accept low confidence" action), take it as-is with a WARN.
+            if (catResult.NeedsReview)
+            {
+                if (!req.AcceptLowConfidenceCategory)
+                    return new LubesProvisioningResult("needs_review", code,
+                        ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
+                        Candidates: catResult.Candidates);
+
+                _logger.LogWarning(
+                    "Odoo category low-confidence ACCEPTED for {Code} '{Name}': '{Cat}' ({Id}) @ {Conf:F2}. Spot-check this.",
+                    code, lm.Name, catResult.Name, catResult.ExternalId, catResult.Confidence);
+            }
         }
 
         // 4) SAP family — three layers:
