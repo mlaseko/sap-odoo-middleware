@@ -74,6 +74,17 @@
         .modal h3 { margin-top: 0; }
         .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
         .failure-list { max-height: 240px; overflow:auto; background:#fef2f2; border:1px solid #fecaca; border-radius:6px; padding:8px 8px 8px 24px; }
+        .modal.modal-wide { max-width: 820px; }
+        .po-meta { width:100%; margin-bottom:12px; }
+        .po-meta th { text-align:left; width:170px; color:#475569; font-weight:600; padding:2px 8px 2px 0; vertical-align:top; }
+        .po-meta td { padding:2px 0; }
+        .po-lines { width:100%; border-collapse:collapse; }
+        .po-lines th, .po-lines td { padding:4px 6px; border-bottom:1px solid #eef2f7; vertical-align:middle; }
+        .po-lines thead th { text-align:left; color:#475569; font-size:12px; }
+        .po-lines .po-qty, .po-lines .po-price { width:90px; text-align:right; }
+        .po-lines .po-item { width:140px; }
+        .po-lines .po-desc { color:#475569; font-size:13px; max-width:280px; }
+        .po-lines .po-del { padding:0 8px; }
         .spinner { width: 28px; height: 28px; border: 3px solid #e5e7eb; border-top-color: #2563eb; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 12px auto; }
         @@keyframes spin { to { transform: rotate(360deg); } }
     </style>

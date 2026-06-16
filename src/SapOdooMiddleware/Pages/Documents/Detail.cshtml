@@ -78,6 +78,7 @@
                 <button id="btn-automatch" class="btn btn-sm" type="button">Auto-match again</button>
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
                 <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@(C("create_new") + C("create_failed"))</span>)</button>
+                <button id="btn-createpo" class="btn btn-sm" type="button">Create PO</button>
                 <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>
             </div>
         }
@@ -393,7 +394,9 @@
     const overlay = document.getElementById('modal-overlay');
     const mBody = document.getElementById('modal-body');
     const mActions = document.getElementById('modal-actions');
+    const mDialog = overlay ? overlay.querySelector('.modal') : null;
     function openModal(html, actions) {
+        if (mDialog) mDialog.classList.remove('modal-wide');
         mBody.innerHTML = html;
         mActions.innerHTML = '';
         actions.forEach(a => {
@@ -457,6 +460,96 @@
             mBody.innerHTML = '<h3>Cannot complete review</h3><p>' + e.message + '</p>';
             const b = document.createElement('button'); b.className = 'btn'; b.textContent = 'Close'; b.onclick = closeModal;
             mActions.innerHTML = ''; mActions.appendChild(b);
+        }
+    }
+
+    // ---- Purchase Order (vendor PO in SAP B1 from the reviewed invoice) ----
+    // HTML/attribute escaping — descriptions and server messages are interpolated into modal markup.
+    const escH = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const escA = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+    function closeButton(label) {
+        mActions.innerHTML = '';
+        const b = document.createElement('button'); b.className = 'btn'; b.textContent = label || 'Close'; b.onclick = closeModal;
+        mActions.appendChild(b);
+    }
+
+    document.getElementById('btn-createpo').addEventListener('click', createPurchaseOrder);
+
+    async function createPurchaseOrder() {
+        openModal('<h3>Create Purchase Order</h3><p>Building preview…</p><div class="spinner"></div>',
+            [{ label: 'Cancel', onClick: closeModal }]);
+        let p;
+        try { p = await api('GET', '/purchase-order/preview'); }
+        catch (e) { mBody.innerHTML = '<h3>Could not build PO preview</h3><p>' + escH(e.message) + '</p>'; closeButton(); return; }
+
+        if (!p.ready) {
+            let html = '<h3>Cannot create Purchase Order</h3><p>Resolve the following first:</p><ul class="failure-list">';
+            (p.blocking || []).forEach(x => { html += '<li>' + escH(x) + '</li>'; });
+            html += '</ul>';
+            mBody.innerHTML = html; closeButton(); return;
+        }
+        renderPoForm(p);
+    }
+
+    function poRowHtml(line) {
+        return '<tr>' +
+            '<td><input class="cell-input po-item" value="' + escA(line.item_code) + '"></td>' +
+            '<td class="po-desc">' + escH(line.description) + '</td>' +
+            '<td><input class="cell-input num po-qty" type="number" step="any" min="0" value="' + escA(line.quantity ?? 0) + '"></td>' +
+            '<td><input class="cell-input num po-price" type="number" step="any" min="0" value="' + escA(line.unit_price ?? 0) + '"></td>' +
+            '<td><button type="button" class="btn btn-sm po-del" title="Remove line">✕</button></td>' +
+            '</tr>';
+    }
+
+    function renderPoForm(p) {
+        let html = '<h3>Create Purchase Order</h3>' +
+            '<table class="po-meta"><tbody>' +
+            '<tr><th>Vendor</th><td>' + escH(p.card_code) + ' — ' + escH(p.card_name) + '</td></tr>' +
+            '<tr><th>Currency</th><td>' + escH(p.currency) + '</td></tr>' +
+            '<tr><th>Vendor ref (invoice no.)</th><td>' + escH(p.num_at_card) + '</td></tr>' +
+            '<tr><th>Comments</th><td>' + escH(p.comments) + '</td></tr>' +
+            '<tr><th>Warehouse</th><td>' + escH(p.warehouse) + '</td></tr>' +
+            '</tbody></table>' +
+            '<table class="po-lines"><thead><tr>' +
+            '<th>Item code</th><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th></th>' +
+            '</tr></thead><tbody id="po-rows">' + (p.lines || []).map(poRowHtml).join('') + '</tbody></table>' +
+            '<button type="button" class="btn btn-sm" id="po-add">+ Add line</button>';
+        openModal(html, [
+            { label: 'Cancel', onClick: closeModal },
+            { label: 'Post PO', primary: true, onClick: postPurchaseOrder }
+        ]);
+        if (mDialog) mDialog.classList.add('modal-wide');
+
+        document.getElementById('po-add').onclick = () => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = poRowHtml({ item_code: '', description: '', quantity: 0, unit_price: 0 });
+            document.getElementById('po-rows').appendChild(tr);
+        };
+        document.getElementById('po-rows').addEventListener('click', e => {
+            if (e.target.classList.contains('po-del')) e.target.closest('tr').remove();
+        });
+    }
+
+    async function postPurchaseOrder() {
+        const lines = Array.from(document.querySelectorAll('#po-rows tr')).map(tr => ({
+            item_code: (tr.querySelector('.po-item')?.value || '').trim(),
+            quantity: Number(tr.querySelector('.po-qty')?.value || 0),
+            unit_price: Number(tr.querySelector('.po-price')?.value || 0)
+        })).filter(l => l.item_code && l.quantity > 0);
+        if (!lines.length) { alert('Add at least one line with an item code and quantity > 0.'); return; }
+
+        mBody.innerHTML = '<h3>Posting Purchase Order…</h3><p>Contacting SAP B1. Please keep this page open.</p><div class="spinner"></div>';
+        mActions.innerHTML = '';
+        try {
+            const r = await api('POST', '/purchase-order', { lines });
+            mBody.innerHTML = '<h3>Purchase Order created</h3><p>DocNum <strong>' + escH(r.doc_num) +
+                '</strong> (entry ' + escH(r.doc_entry) + ') for invoice ' + escH(r.num_at_card) + '.</p>';
+            closeButton();
+        } catch (e) {
+            // 409 (already exists) and other failures both surface their server message here.
+            mBody.innerHTML = '<h3>Could not create Purchase Order</h3><p>' + escH(e.message) + '</p>';
+            closeButton();
         }
     }
 
