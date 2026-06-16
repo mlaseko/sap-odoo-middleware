@@ -61,7 +61,12 @@ else
                 <td>@d.Supplier</td>
                 <td class="num">@d.PageCount</td>
                 <td><span class="pill @StatusPill(d.Status)">@d.Status</span></td>
-                <td>@if (!string.IsNullOrWhiteSpace(d.ValidationStatus)) { <span class="pill @ValPill(d.ValidationStatus)">@d.ValidationStatus</span> }</td>
+                <td>
+                    @if (!string.IsNullOrWhiteSpace(d.ValidationStatus))
+                    {
+                        <span class="pill @ValPill(d.ValidationStatus)">@d.ValidationStatus</span>
+                    }
+                </td>
                 <td class="num"><a class="btn btn-sm" href="/documents/@d.Id">View →</a></td>
             </tr>
         }
