@@ -77,6 +77,8 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
     {
         (new Regex(@"\b(coolant|antifreeze|kfs)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
             104, "Repair aids/service products", "name matches coolant/antifreeze"),
+        (new Regex(@"\bbrake fluid\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+            104, "Repair aids/service products", "name matches brake fluid"),
         (new Regex(@"^\s*pro-?line\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
             112, "Workshop Pro-Line", "name starts with Pro-Line"),
         (new Regex(@"\b(motorbike|motorcycle|4t bike)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
