@@ -1,7 +1,13 @@
 @page "/documents/upload"
 @model SapOdooMiddleware.Pages.Documents.UploadModel
 
-<h2>Upload invoice</h2>
+<div class="page-head">
+    <div>
+        <h2>Upload invoice</h2>
+        <div class="sub">Liqui Moly / Meguin PDF — extraction starts automatically</div>
+    </div>
+    <a class="btn" href="/documents">← Back to list</a>
+</div>
 
 @if (Model.Error is not null)
 {
@@ -10,11 +16,11 @@
 
 <div class="card" style="max-width:560px;">
     <form method="post" enctype="multipart/form-data">
-        <p>Select a Liqui Moly invoice PDF to upload. Extraction starts automatically.</p>
+        <p class="card-title">Choose a PDF</p>
         <p><input type="file" name="Pdf" accept=".pdf" required /></p>
-        <p>
-            <button class="btn" type="submit">Upload &amp; extract</button>
-            <a href="/documents" style="margin-left:12px;">Cancel</a>
-        </p>
+        <div class="card-actions">
+            <button class="btn btn-primary" type="submit">Upload &amp; extract</button>
+            <a class="btn" href="/documents">Cancel</a>
+        </div>
     </form>
 </div>

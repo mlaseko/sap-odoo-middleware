@@ -13,70 +13,7 @@
         <meta http-equiv="refresh" content="3" />
     }
     <title>@ViewData["Title"] — Invoice Ingestion</title>
-    <style>
-        body { font-family: system-ui, Segoe UI, Arial, sans-serif; margin: 0; color: #1b1b1f; background: #f6f7f9; }
-        header { background: #1f2937; color: #fff; padding: 12px 24px; }
-        header a { color: #c7d2fe; text-decoration: none; margin-right: 16px; }
-        .tenant-switch { font-size: 13px; color: #94a3b8; }
-        .tenant-switch a { margin-right: 0; margin-left: 10px; }
-        .tenant-active { color: #fff; font-weight: 700; text-decoration: underline; }
-        main { padding: 24px; max-width: 1200px; margin: 0 auto; }
-        table { border-collapse: collapse; width: 100%; background: #fff; }
-        th, td { border: 1px solid #e5e7eb; padding: 6px 10px; text-align: left; font-size: 14px; }
-        th { background: #f3f4f6; }
-        .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-        .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
-        .badge-green { background: #dcfce7; color: #166534; }
-        .badge-yellow { background: #fef9c3; color: #854d0e; }
-        .badge-grey { background: #e5e7eb; color: #374151; }
-        .badge-red { background: #fee2e2; color: #991b1b; }
-        .promo { color: #9ca3af; font-style: italic; }
-        .btn { display: inline-block; background: #2563eb; color: #fff; padding: 8px 14px; border-radius: 6px; text-decoration: none; border: 0; cursor: pointer; font-size: 14px; }
-        .num { text-align: right; font-variant-numeric: tabular-nums; }
-        .notice { background: #eff6ff; border: 1px solid #bfdbfe; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
-        .error { background: #fee2e2; border: 1px solid #fecaca; padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
-        .progress-card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px 18px; margin: 16px 0; }
-        .progress-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
-        .progress-label { font-weight: 600; color: #1e293b; }
-        .progress-page-text { font-size: 0.92em; color: #64748b; }
-        .progress-bar-track { height: 8px; background: #e2e8f0; border-radius: 4px; overflow: hidden; }
-        .progress-bar-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #2563eb); transition: width 0.4s ease; }
-        .progress-meta { display: flex; justify-content: space-between; margin-top: 8px; font-size: 0.85em; color: #64748b; font-variant-numeric: tabular-nums; }
-        /* Phase B review */
-        .review-banner { position: sticky; top: 0; z-index: 5; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 16px; margin: 16px 0; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-        .review-counts { font-size: 14px; }
-        .review-counts .rc { color: #374151; }
-        .review-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-        .review-done { color: #166534; font-weight: 600; }
-        .btn-sm { padding: 6px 10px; font-size: 13px; }
-        .btn-primary { background: #16a34a; }
-        .btn:disabled { background: #cbd5e1; cursor: not-allowed; }
-        .pill { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 12px; font-weight: 600; white-space: nowrap; }
-        .pill-green { background: #dcfce7; color: #166534; }
-        .pill-blue { background: #dbeafe; color: #1e40af; }
-        .pill-grey { background: #e5e7eb; color: #374151; }
-        .pill-yellow { background: #fef9c3; color: #854d0e; }
-        .pill-red { background: #fee2e2; color: #991b1b; }
-        .pill-orange { background: #ffedd5; color: #9a3412; }
-        .pill-purple { background: #ede9fe; color: #5b21b6; }
-        td.editable { cursor: text; }
-        td.editable:hover { background: #f1f5f9; outline: 1px dashed #cbd5e1; }
-        .cell-input { width: 100%; box-sizing: border-box; font: inherit; padding: 2px 4px; border: 1px solid #2563eb; border-radius: 3px; }
-        .cell-spin { color: #94a3b8; }
-        .actions-menu { position: relative; }
-        .actions-menu > summary { list-style: none; cursor: pointer; padding: 0 6px; user-select: none; }
-        .actions-menu > summary::-webkit-details-marker { display: none; }
-        .actions-menu .menu { position: absolute; right: 0; z-index: 10; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.12); min-width: 130px; display: flex; flex-direction: column; }
-        .actions-menu .menu button { background: none; border: 0; text-align: left; padding: 8px 12px; cursor: pointer; font-size: 13px; }
-        .actions-menu .menu button:hover { background: #f1f5f9; }
-        .modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
-        .modal { background: #fff; border-radius: 10px; padding: 20px 22px; max-width: 560px; width: 90%; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
-        .modal h3 { margin-top: 0; }
-        .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
-        .failure-list { max-height: 240px; overflow:auto; background:#fef2f2; border:1px solid #fecaca; border-radius:6px; padding:8px 8px 8px 24px; }
-        .spinner { width: 28px; height: 28px; border: 3px solid #e5e7eb; border-top-color: #2563eb; border-radius: 50%; animation: spin 0.8s linear infinite; margin: 12px auto; }
-        @@keyframes spin { to { transform: rotate(360deg); } }
-    </style>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
 </head>
 <body>
     @{
@@ -84,18 +21,24 @@
         var isAutohub = reqPath.StartsWith("/autohub", StringComparison.OrdinalIgnoreCase)
                      || reqPath.StartsWith("/api/autohub", StringComparison.OrdinalIgnoreCase);
         var docsBase = isAutohub ? "/autohub/documents" : "/documents";
+        var navDocs   = (reqPath.StartsWith(docsBase, StringComparison.OrdinalIgnoreCase) && !reqPath.EndsWith("/upload")) ? "nav-active" : "";
+        var navUpload = reqPath.EndsWith("/upload", StringComparison.OrdinalIgnoreCase) ? "nav-active" : "";
+        var navAdmin  = reqPath.StartsWith("/admin", StringComparison.OrdinalIgnoreCase) ? "nav-active" : "";
     }
-    <header style="display:flex; justify-content:space-between; align-items:center;">
-        <span>
-            <a href="@docsBase"><strong>Invoice Ingestion</strong></a>
-            <a href="@docsBase">Documents</a>
-            <a href="@docsBase/upload">Upload</a>
-        </span>
-        <span class="tenant-switch">
-            Tenant:
-            <a href="/documents" class="@(isAutohub ? "" : "tenant-active")">Lubes</a>
-            <a href="/autohub/documents" class="@(isAutohub ? "tenant-active" : "")">Autohub</a>
-        </span>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <a class="brand" href="@docsBase"><span class="dot"></span> Invoice Ingestion</a>
+            <nav class="topnav">
+                <a href="@docsBase" class="@navDocs">Documents</a>
+                <a href="@docsBase/upload" class="@navUpload">Upload</a>
+                <a href="/admin" class="@navAdmin">Admin</a>
+            </nav>
+            <div class="tenant-switch">
+                <span class="ts-label">Tenant</span>
+                <a href="/documents" class="@(isAutohub ? "" : "tenant-active")">Lubes</a>
+                <a href="/autohub/documents" class="@(isAutohub ? "tenant-active" : "")">Autohub</a>
+            </div>
+        </div>
     </header>
     <main>
         @RenderBody()
