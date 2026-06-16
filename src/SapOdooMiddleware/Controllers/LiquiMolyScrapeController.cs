@@ -34,7 +34,7 @@ public class LiquiMolyScrapeController : ControllerBase
     {
         _logger.LogInformation("Liqui Moly scrape requested for article {ArticleNumber}", articleNumber);
 
-        // The product index is built in the background on startup (LiquiMolyIndexWarmupHostedService).
+        // The product index is built in the background on startup (IndexWarmupHostedService).
         // Fail fast while it's still warming instead of blocking on the multi-minute cold build, which
         // would exceed the CDN's ~100s request timeout and return 524. Retry once it's warm.
         if (!_scraper.IsIndexWarm())

@@ -8,4 +8,7 @@ public record LubesProvisioningRequest(
     string ArticleNumber,
     decimal EurCost,
     decimal? EurTzsRateOverride = null,
-    bool DryRun = false);
+    bool DryRun = false,
+    // Supplier line description from the invoice. Used only for brand routing: a name starting with
+    // "Meguin" (an LM subsidiary, invoiced under LM) is scraped from meguin.com instead of liqui-moly.com.
+    string? SupplierName = null);

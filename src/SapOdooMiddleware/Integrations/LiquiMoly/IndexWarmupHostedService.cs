@@ -3,20 +3,27 @@ using Microsoft.Extensions.Options;
 namespace MolasLubes.Infrastructure.Integrations.LiquiMoly;
 
 /// <summary>
-/// Builds the Liqui Moly product index off the request path: once shortly after startup and then on a
-/// timer (just under the cache lifetime). Without this, the first /scrape or bulk-create call pays the
-/// full cold crawl + variant-mining cost, which exceeds the CDN's ~100s request timeout and returns 524.
+/// Builds a brand's product index off the request path: once shortly after startup (reusing a fresh
+/// persisted index if present) and then on a timer just under the cache lifetime. Without this the first
+/// /scrape or bulk-create pays the full cold crawl + variant mining, which exceeds the CDN's ~100s request
+/// timeout. Generic over the brand scraper and its settings so Liqui Moly and Meguin share identical
+/// warm-up / retry / persist behaviour.
 /// </summary>
-public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
+public sealed class IndexWarmupHostedService<TScraper, TSettings> : BackgroundService
+    where TScraper : LiquiMolyProductScraperService
+    where TSettings : LiquiMolyScraperSettings
 {
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly LiquiMolyScraperSettings _settings;
-    private readonly ILogger<LiquiMolyIndexWarmupHostedService> _logger;
+    private readonly TSettings _settings;
+    private readonly ILogger<IndexWarmupHostedService<TScraper, TSettings>> _logger;
 
-    public LiquiMolyIndexWarmupHostedService(
+    // "LiquiMolyProductScraperService" -> "LiquiMoly", "MeguinProductScraperService" -> "Meguin".
+    private static readonly string Brand = typeof(TScraper).Name.Replace("ProductScraperService", "");
+
+    public IndexWarmupHostedService(
         IServiceScopeFactory scopeFactory,
-        IOptions<LiquiMolyScraperSettings> settings,
-        ILogger<LiquiMolyIndexWarmupHostedService> logger)
+        IOptions<TSettings> settings,
+        ILogger<IndexWarmupHostedService<TScraper, TSettings>> logger)
     {
         _scopeFactory = scopeFactory;
         _settings = settings.Value;
@@ -27,11 +34,11 @@ public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
     {
         if (!_settings.WarmupOnStartup)
         {
-            _logger.LogInformation("[LiquiMoly] Index warmup disabled (LiquiMoly:WarmupOnStartup=false).");
+            _logger.LogInformation("[{Brand}] Index warmup disabled (WarmupOnStartup=false).", Brand);
             return;
         }
 
-        // Let the rest of the app finish starting before kicking off a heavy crawl.
+        // Let the rest of the app finish starting before kicking off a crawl.
         try { await Task.Delay(TimeSpan.FromSeconds(15), stoppingToken); }
         catch (OperationCanceledException) { return; }
 
@@ -44,7 +51,7 @@ public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
                 break;
 
             var retry = TimeSpan.FromMinutes(Math.Max(1, _settings.WarmupRetryMinutes));
-            _logger.LogWarning("[LiquiMoly] Index not warm yet; retrying in {Min} min.", retry.TotalMinutes);
+            _logger.LogWarning("[{Brand}] Index not warm yet; retrying in {Min} min.", Brand, retry.TotalMinutes);
             try { await Task.Delay(retry, stoppingToken); }
             catch (OperationCanceledException) { return; }
         }
@@ -61,10 +68,10 @@ public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
     {
         try
         {
-            _logger.LogInformation("[LiquiMoly] {Mode} product index in the background...",
-                forceRebuild ? "Rebuilding" : "Warming");
+            _logger.LogInformation("[{Brand}] {Mode} product index in the background...",
+                Brand, forceRebuild ? "Rebuilding" : "Warming");
             using var scope = _scopeFactory.CreateScope();
-            var scraper = scope.ServiceProvider.GetRequiredService<LiquiMolyProductScraperService>();
+            var scraper = scope.ServiceProvider.GetRequiredService<TScraper>();
             await scraper.WarmIndexAsync(forceRebuild, ct);
             return scraper.IsIndexWarm();
         }
@@ -74,7 +81,7 @@ public sealed class LiquiMolyIndexWarmupHostedService : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[LiquiMoly] Index warmup failed; will retry.");
+            _logger.LogError(ex, "[{Brand}] Index warmup failed; will retry.", Brand);
             return false;
         }
     }

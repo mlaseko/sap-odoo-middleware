@@ -65,7 +65,9 @@ public class InvoiceItemCreationService
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeoutCts.CancelAfter(_perItemTimeout);
 
-                var req = new LubesProvisioningRequest(article, line.UnitPrice.Value);
+                // Pass the invoice line description so provisioning can route Meguin products
+                // (LM subsidiary, names start with "Meguin") to the meguin.com scraper.
+                var req = new LubesProvisioningRequest(article, line.UnitPrice.Value, SupplierName: line.Description);
                 var result = await _provisioning.ProvisionAsync(req, timeoutCts.Token);
 
                 if (result.Status is "created" or "recovered")

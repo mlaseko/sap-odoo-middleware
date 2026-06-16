@@ -68,6 +68,7 @@ builder.Services.Configure<BulkCreateSettings>(builder.Configuration.GetSection(
 builder.Services.Configure<OdooBackrefWorkerSettings>(builder.Configuration.GetSection(OdooBackrefWorkerSettings.SectionName));
 builder.Services.Configure<NeonSettings>(builder.Configuration.GetSection(NeonSettings.SectionName));
 builder.Services.Configure<LiquiMolyScraperSettings>(builder.Configuration.GetSection("LiquiMoly"));
+builder.Services.Configure<MeguinScraperSettings>(builder.Configuration.GetSection("Meguin"));
 
 // --- Multi-tenancy (Companies:* + per-request CompanyContext) ---
 builder.Services.Configure<CompaniesOptions>(builder.Configuration);   // binds the "Companies" section
@@ -94,9 +95,21 @@ builder.Services.AddHttpClient<LiquiMolyProductScraperService>((sp, http) =>
     http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
 });
 
-// Build the Liqui Moly product index in the background (startup + timer) so /scrape and bulk-create hit a
-// warm cache instead of triggering the cold crawl + variant mining, which exceeds the ~100s proxy timeout.
-builder.Services.AddHostedService<LiquiMolyIndexWarmupHostedService>();
+// --- Meguin scraper (LM subsidiary, same platform) — its own typed HttpClient + settings ---
+builder.Services.AddHttpClient<MeguinProductScraperService>((sp, http) =>
+{
+    var s = sp.GetRequiredService<IOptions<MeguinScraperSettings>>().Value;
+    http.Timeout = TimeSpan.FromSeconds(s.HttpTimeoutSeconds > 0 ? s.HttpTimeoutSeconds : 30);
+    http.DefaultRequestHeaders.UserAgent.ParseAdd(s.UserAgent);
+    http.DefaultRequestHeaders.Accept.ParseAdd("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+    http.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+});
+
+// Build each brand's product index in the background (startup + timer) so /scrape and bulk-create hit a
+// warm, persisted cache instead of triggering the cold crawl + variant mining (exceeds the ~100s proxy
+// timeout). Meguin's catalogue is small, so its one-time crawl is short.
+builder.Services.AddHostedService<IndexWarmupHostedService<LiquiMolyProductScraperService, LiquiMolyScraperSettings>>();
+builder.Services.AddHostedService<IndexWarmupHostedService<MeguinProductScraperService, MeguinScraperSettings>>();
 
 // --- Item Provisioning components ---
 builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
