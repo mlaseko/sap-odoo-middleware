@@ -108,6 +108,69 @@ public class InvoiceItemCreationService
         await _lines.RecordCreateFailedAsync(line.Id, error, ct);
         failures.Add(new BulkCreateFailure(line.Id, line.ArticleNumber, error));
     }
+
+    /// <summary>
+    /// Provisions a single line with a reviewer-assigned Odoo category override — the resolution path for a
+    /// line that failed on low category confidence. Records the per-line outcome. Returns null on success,
+    /// or a <see cref="BulkCreateFailure"/> describing why it failed.
+    /// </summary>
+    public async Task<BulkCreateFailure?> CreateLineWithCategoryAsync(
+        Guid documentId, Guid lineId, string odooCategoryExternalId, string odooCategoryName, CancellationToken ct)
+    {
+        var line = await _lines.GetByIdAsync(lineId, ct);
+        if (line is null || line.DocumentId != documentId)
+            return new BulkCreateFailure(lineId, null, "Line not found.");
+
+        var article = line.ArticleNumber?.Trim();
+        if (string.IsNullOrWhiteSpace(article))
+        {
+            await _lines.RecordCreateFailedAsync(lineId, "Line has no article number.", ct);
+            return new BulkCreateFailure(lineId, null, "Line has no article number.");
+        }
+        if (line.UnitPrice is not > 0m)
+        {
+            await _lines.RecordCreateFailedAsync(lineId, "Line has no positive EUR unit cost.", ct);
+            return new BulkCreateFailure(lineId, article, "Line has no positive EUR unit cost.");
+        }
+
+        try
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(_perItemTimeout);
+
+            var req = new LubesProvisioningRequest(article, line.UnitPrice.Value,
+                SupplierName: line.Description,
+                OdooCategoryOverrideExternalId: odooCategoryExternalId,
+                OdooCategoryOverrideName: odooCategoryName);
+            var result = await _provisioning.ProvisionAsync(req, timeoutCts.Token);
+
+            if (result.Status is "created" or "recovered")
+            {
+                await _lines.RecordCreatedAsync(lineId, result.ItemCode, ct);
+                return null;
+            }
+
+            var reason = result.ErrorMessage ?? result.ReviewReason ?? $"Provisioning returned '{result.Status}'.";
+            await _lines.RecordCreateFailedAsync(lineId, reason, ct);
+            return new BulkCreateFailure(lineId, article, reason);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // host shutdown
+        }
+        catch (OperationCanceledException)
+        {
+            var msg = $"Timed out after {_perItemTimeout.TotalSeconds:N0}s.";
+            await _lines.RecordCreateFailedAsync(lineId, msg, ct);
+            return new BulkCreateFailure(lineId, article, msg);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Create-with-category failed for line {LineId} (article {Article}).", lineId, article);
+            await _lines.RecordCreateFailedAsync(lineId, ex.Message, ct);
+            return new BulkCreateFailure(lineId, article, ex.Message);
+        }
+    }
 }
 
 public record BulkCreateResult(int Attempted, int Created, int Failed, List<BulkCreateFailure> Failures);

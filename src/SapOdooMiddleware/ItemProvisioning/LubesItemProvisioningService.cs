@@ -138,19 +138,36 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             : $"{code}-{lm.Name}. {lm.Description}";
         var hint = lm.Category;
 
-        // 3) Odoo category
+        // 3) Odoo category — a reviewer-assigned manual override (both id + name) bypasses the classifier;
+        //    this is how a low-confidence-category failure gets resolved from the review UI.
         CategoryClassification catResult;
-        try { catResult = await _classifier.ClassifyCategoryAsync(description, hint, ct); }
-        catch (Exception ex)
+        if (!string.IsNullOrWhiteSpace(req.OdooCategoryOverrideExternalId)
+            && !string.IsNullOrWhiteSpace(req.OdooCategoryOverrideName))
         {
-            _logger.LogError(ex, "Classifier (/classify) failed for {Code}", code);
-            return new LubesProvisioningResult("needs_review", code,
-                ReviewReason: "Classifier service unavailable.");
+            catResult = new CategoryClassification
+            {
+                ExternalId  = req.OdooCategoryOverrideExternalId,
+                Name        = req.OdooCategoryOverrideName,
+                Confidence  = 1.0,
+                NeedsReview = false,
+            };
+            _logger.LogInformation("Odoo category manually overridden for {Code}: '{Name}' ({Id})",
+                code, req.OdooCategoryOverrideName, req.OdooCategoryOverrideExternalId);
         }
-        if (catResult.NeedsReview || string.IsNullOrEmpty(catResult.ExternalId))
-            return new LubesProvisioningResult("needs_review", code,
-                ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
-                Candidates: catResult.Candidates);
+        else
+        {
+            try { catResult = await _classifier.ClassifyCategoryAsync(description, hint, ct); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Classifier (/classify) failed for {Code}", code);
+                return new LubesProvisioningResult("needs_review", code,
+                    ReviewReason: "Classifier service unavailable.");
+            }
+            if (catResult.NeedsReview || string.IsNullOrEmpty(catResult.ExternalId))
+                return new LubesProvisioningResult("needs_review", code,
+                    ReviewReason: $"Low confidence on Odoo category ({catResult.Confidence:F2}).",
+                    Candidates: catResult.Candidates);
+        }
 
         // 4) SAP family — three layers:
         //    Layer 1: deterministic business-rule overrides for known DGX blind spots (run BEFORE DGX,

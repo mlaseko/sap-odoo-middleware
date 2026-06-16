@@ -167,6 +167,27 @@ public class DocumentsController : ControllerBase
         return Ok(await _lines.GetByIdAsync(lineId, ct));
     }
 
+    /// <summary>
+    /// Resolve a low-confidence-category line by assigning an Odoo category manually and creating the item
+    /// now (bypasses the DGX classifier for the category only; SAP group + pricing are unchanged).
+    /// </summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/create-with-category")]
+    public async Task<IActionResult> CreateWithCategory(
+        Guid documentId, Guid lineId, [FromBody] CreateWithCategoryRequest body, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        if (string.IsNullOrWhiteSpace(body.OdooCategoryExternalId) || string.IsNullOrWhiteSpace(body.OdooCategoryName))
+            return BadRequest(new { error = "odooCategoryExternalId and odooCategoryName are required." });
+
+        var failure = await _itemCreation.CreateLineWithCategoryAsync(
+            documentId, lineId, body.OdooCategoryExternalId.Trim(), body.OdooCategoryName.Trim(), ct);
+
+        var line = await _lines.GetByIdAsync(lineId, ct);
+        return failure is null
+            ? Ok(new { created = true, line })
+            : Ok(new { created = false, error = failure.Error, line });
+    }
+
     /// <summary>Re-run the SAP lookup for all pending lines.</summary>
     [HttpPost("{documentId:guid}/auto-match")]
     public async Task<IActionResult> AutoMatch(Guid documentId, CancellationToken ct)
@@ -288,6 +309,8 @@ public record LinePatchRequest
 }
 
 public record MatchRequest(string? Sku);
+
+public record CreateWithCategoryRequest(string? OdooCategoryExternalId, string? OdooCategoryName);
 
 public record DocumentStatusResponse(
     Guid Id,
