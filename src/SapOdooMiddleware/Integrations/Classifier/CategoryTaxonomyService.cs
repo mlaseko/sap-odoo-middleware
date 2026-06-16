@@ -99,12 +99,32 @@ public sealed class CategoryTaxonomyService : ICategoryTaxonomy, IDisposable
 
                 var map = new Dictionary<string, CategoryEntry>(StringComparer.Ordinal);
                 using var doc = JsonDocument.Parse(File.ReadAllText(_path));
-                LoadFrom(doc.RootElement, map);
+
+                // Standard wrapped form: { "metadata": {...}, "categories": [...] }. Unwrap to the array
+                // (and surface the generator metadata in the log); fall back to the raw root otherwise.
+                var root = doc.RootElement;
+                var categoriesEl = root;
+                string meta = "";
+                if (root.ValueKind == JsonValueKind.Object
+                    && root.TryGetProperty("categories", out var cats)
+                    && cats.ValueKind == JsonValueKind.Array)
+                {
+                    categoriesEl = cats;
+                    if (root.TryGetProperty("metadata", out var m) && m.ValueKind == JsonValueKind.Object)
+                    {
+                        var gen = Str(m, "generated_at", "generatedAt");
+                        var src = Str(m, "source_mtime", "sourceMtime", "source");
+                        if (gen is not null || src is not null)
+                            meta = $" (bundle generated {gen ?? "?"}{(src is not null ? $", source {src}" : "")})";
+                    }
+                }
+
+                LoadFrom(categoriesEl, map);
 
                 _categories = map;                // atomic swap; readers see old or new, both valid
                 _loadedAt = DateTimeOffset.UtcNow;
                 _logger.LogInformation(
-                    "Odoo taxonomy validator: loaded {Count} categories from {Path}.", map.Count, _path);
+                    "Odoo taxonomy validator: loaded {Count} categories from {Path}.{Meta}", map.Count, _path, meta);
             }
             catch (Exception ex)
             {
