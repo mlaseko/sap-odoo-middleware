@@ -224,4 +224,13 @@ public interface ISapB1Service
     /// When <paramref name="asOfDate"/> is null, today's server date is used.
     /// </summary>
     Task<decimal> GetInventoryValuationTotalAsync(DateOnly? asOfDate);
+
+    /// <summary>Creates a Purchase Order in SAP B1 (oPurchaseOrders) and returns its DocEntry/DocNum.</summary>
+    Task<SapPurchaseOrderResponse> CreatePurchaseOrderAsync(SapPurchaseOrderRequest request);
+
+    /// <summary>
+    /// Returns the DocEntry/DocNum of an existing open/closed Purchase Order for the given vendor and
+    /// vendor reference (OPOR.CardCode + OPOR.NumAtCard), or null if none — used to prevent duplicate POs.
+    /// </summary>
+    Task<(int DocEntry, int DocNum)?> FindPurchaseOrderByNumAtCardAsync(string cardCode, string numAtCard);
 }
