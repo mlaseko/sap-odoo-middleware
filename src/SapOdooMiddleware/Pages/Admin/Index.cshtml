@@ -70,7 +70,7 @@
             setDot('sap-dot', !!d.connected);
             document.getElementById('sap-state').textContent = d.connected ? 'Connected' : 'Disconnected';
             return d.connected
-                ? 'SAP: ' + esc(d.company_name || d.company_db || '') + (d.version ? ' · v' + esc(d.version) : '') + ' @ ' + esc(d.server || '')
+                ? 'SAP: ' + esc(d.company_name || d.company_db || '') + (d.version ? ' · v' + esc(d.version) : '') + ' at ' + esc(d.server || '')
                 : 'SAP: not connected';
         } catch (e) { setDot('sap-dot', false); document.getElementById('sap-state').textContent = 'Error'; return 'SAP: ' + esc(e.message); }
     }
