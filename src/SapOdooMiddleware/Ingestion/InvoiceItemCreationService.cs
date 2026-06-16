@@ -110,12 +110,33 @@ public class InvoiceItemCreationService
     }
 
     /// <summary>
-    /// Provisions a single line with a reviewer-assigned Odoo category override — the resolution path for a
-    /// line that failed on low category confidence. Records the per-line outcome. Returns null on success,
-    /// or a <see cref="BulkCreateFailure"/> describing why it failed.
+    /// Provisions a single line with a reviewer-assigned Odoo category override (operator picks the
+    /// category) — a resolution path for a line that failed on low category confidence.
     /// </summary>
-    public async Task<BulkCreateFailure?> CreateLineWithCategoryAsync(
+    public Task<BulkCreateFailure?> CreateLineWithCategoryAsync(
         Guid documentId, Guid lineId, string odooCategoryExternalId, string odooCategoryName, CancellationToken ct)
+        => ProvisionSingleLineAsync(documentId, lineId,
+            odooCategoryExternalId, odooCategoryName, acceptLowConfidenceCategory: false,
+            "Create-with-category", ct);
+
+    /// <summary>
+    /// Provisions a single line accepting DGX's low-confidence Odoo category as-is (operator chose to
+    /// trust the classifier rather than pick a category) — the other resolution path for a failed line.
+    /// </summary>
+    public Task<BulkCreateFailure?> CreateLineAcceptingClassificationAsync(
+        Guid documentId, Guid lineId, CancellationToken ct)
+        => ProvisionSingleLineAsync(documentId, lineId,
+            odooCategoryExternalId: null, odooCategoryName: null, acceptLowConfidenceCategory: true,
+            "Create-accept-category", ct);
+
+    /// <summary>
+    /// Shared single-line provisioning for the manual-review actions. Records the per-line outcome;
+    /// returns null on success, or a <see cref="BulkCreateFailure"/> describing why it failed.
+    /// </summary>
+    private async Task<BulkCreateFailure?> ProvisionSingleLineAsync(
+        Guid documentId, Guid lineId,
+        string? odooCategoryExternalId, string? odooCategoryName, bool acceptLowConfidenceCategory,
+        string context, CancellationToken ct)
     {
         var line = await _lines.GetByIdAsync(lineId, ct);
         if (line is null || line.DocumentId != documentId)
@@ -141,7 +162,8 @@ public class InvoiceItemCreationService
             var req = new LubesProvisioningRequest(article, line.UnitPrice.Value,
                 SupplierName: line.Description,
                 OdooCategoryOverrideExternalId: odooCategoryExternalId,
-                OdooCategoryOverrideName: odooCategoryName);
+                OdooCategoryOverrideName: odooCategoryName,
+                AcceptLowConfidenceCategory: acceptLowConfidenceCategory);
             var result = await _provisioning.ProvisionAsync(req, timeoutCts.Token);
 
             if (result.Status is "created" or "recovered")
@@ -166,7 +188,7 @@ public class InvoiceItemCreationService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Create-with-category failed for line {LineId} (article {Article}).", lineId, article);
+            _logger.LogError(ex, "{Context} failed for line {LineId} (article {Article}).", context, lineId, article);
             await _lines.RecordCreateFailedAsync(lineId, ex.Message, ct);
             return new BulkCreateFailure(lineId, article, ex.Message);
         }
