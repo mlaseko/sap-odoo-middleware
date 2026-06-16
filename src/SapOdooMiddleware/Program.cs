@@ -159,6 +159,8 @@ builder.Services.AddHostedService<InvoiceExtractionWorker>();
 // --- Phase B review: auto-match + bulk-create ---
 builder.Services.AddScoped<InvoiceAutoMatchJob>();
 builder.Services.AddScoped<InvoiceItemCreationService>();
+builder.Services.Configure<PurchaseOrderSettings>(builder.Configuration.GetSection(PurchaseOrderSettings.SectionName));
+builder.Services.AddScoped<PurchaseOrderService>();
 builder.Services.AddSingleton<IDocumentAutoMatchQueue, DocumentAutoMatchQueue>();
 builder.Services.AddHostedService<InvoiceAutoMatchWorker>();
 

@@ -4531,6 +4531,119 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     // ================================
+    // PURCHASE ORDERS
+    // ================================
+
+    /// <inheritdoc/>
+    public async Task<SapPurchaseOrderResponse> CreatePurchaseOrderAsync(SapPurchaseOrderRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var po = (Documents)_company!.GetBusinessObject(BoObjectTypes.oPurchaseOrders);
+            try
+            {
+                po.CardCode = request.CardCode;
+                if (!string.IsNullOrWhiteSpace(request.Currency))
+                    po.DocCurrency = request.Currency;
+                if (!string.IsNullOrWhiteSpace(request.NumAtCard))
+                    po.NumAtCard = request.NumAtCard;
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    po.Comments = request.Comments;
+                po.DocDate    = request.DocDate ?? DateTime.Today;
+                po.DocDueDate = request.DocDate ?? DateTime.Today;
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0) po.Lines.Add();
+                    var line = request.Lines[i];
+
+                    po.Lines.ItemCode  = line.ItemCode;
+                    po.Lines.Quantity  = line.Quantity;
+                    po.Lines.UnitPrice = line.UnitPrice;
+                    if (!string.IsNullOrWhiteSpace(line.WarehouseCode))
+                        po.Lines.WarehouseCode = line.WarehouseCode;
+                    // VAT is left to the vendor BP's tax group (exempt vendors → no VAT).
+                }
+
+                int result = po.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    Marshal.ReleaseComObject(po);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                po.GetByKey(docEntry);
+                int docNum = po.DocNum;
+                Marshal.ReleaseComObject(po);
+
+                _logger.LogInformation(
+                    "SAP Purchase Order created: DocEntry={DocEntry}, DocNum={DocNum}, CardCode={CardCode}, NumAtCard={NumAtCard}, Lines={Lines}",
+                    docEntry, docNum, request.CardCode, request.NumAtCard, request.Lines.Count);
+
+                return new SapPurchaseOrderResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = docNum,
+                    NumAtCard = request.NumAtCard
+                };
+            }
+            catch
+            {
+                try { Marshal.ReleaseComObject(po); } catch { /* already released */ }
+                throw;
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<(int DocEntry, int DocNum)?> FindPurchaseOrderByNumAtCardAsync(string cardCode, string numAtCard)
+    {
+        if (string.IsNullOrWhiteSpace(cardCode) || string.IsNullOrWhiteSpace(numAtCard))
+            return null;
+
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            // Recordset.DoQuery() has no parameterization; escape single quotes (defence-in-depth).
+            string cc = cardCode.Replace("'", "''");
+            string nac = numAtCard.Replace("'", "''");
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(
+                    $"SELECT TOP 1 \"DocEntry\", \"DocNum\" FROM OPOR "
+                    + $"WHERE \"CardCode\" = '{cc}' AND \"NumAtCard\" = '{nac}' "
+                    + $"ORDER BY \"DocEntry\" DESC");
+
+                if (rs.EoF) return null;
+                int docEntry = Convert.ToInt32(rs.Fields.Item("DocEntry").Value);
+                int docNum   = Convert.ToInt32(rs.Fields.Item("DocNum").Value);
+                return (docEntry, docNum);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ================================
     // INVENTORY VALUATION
     // ================================
 
