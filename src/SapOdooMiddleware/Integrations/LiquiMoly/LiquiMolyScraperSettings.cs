@@ -84,7 +84,7 @@ public class LiquiMolyScraperSettings
     /// is finalised with whatever was gathered. 0 disables the cap (mine to completion). Persistence makes
     /// the full mine a one-time cost, so a generous budget is fine.
     /// </summary>
-    public int MineMaxMinutes { get; set; } = 45;
+    public int MineMaxMinutes { get; set; } = 90;
 
     /// <summary>
     /// Minimum SKU count for a build to be considered healthy. A build below this (e.g. the category crawl
@@ -108,13 +108,17 @@ public class LiquiMolyScraperSettings
     public bool UseSitemap { get; set; } = true;
 
     /// <summary>
-    /// Sitemap(s) to pull product URLs from. Default is the "/en" store sitemap that matches
-    /// <see cref="BaseUrl"/>'s /en/ category paths. Product URLs (".../&lt;slug&gt;-pNNNNNN.html") are
-    /// extracted and variant-mined; non-product (CMS/news) entries are ignored.
+    /// Sitemap(s) to pull product URLs from. The "/en" store sitemap matches <see cref="BaseUrl"/>'s
+    /// /en/ category paths; the "/en/gb" (GB store) sitemap is included because some products are sold
+    /// ONLY in regional stores (e.g. Molygen Motor Protect 1015 lives at /en/gb/...#1015 and 404s in
+    /// "/en"). Both stores' product pages (".../&lt;slug&gt;-pNNNNNN.html") are extracted and
+    /// variant-mined; non-product (CMS/news) entries are ignored, and SKUs already mined from "/en"
+    /// are kept (first-wins), so the GB pass only adds the region-only SKUs.
     /// </summary>
     public List<string> SitemapUrls { get; set; } = new()
     {
         "https://www.liqui-moly.com/sitemap/www.liqui-moly.com/sitemap_en.xml",
+        "https://www.liqui-moly.com/sitemap/www.liqui-moly.com/sitemap_gb_en.xml",
     };
 
     /// <summary>
