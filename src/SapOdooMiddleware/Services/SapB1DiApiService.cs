@@ -3887,11 +3887,13 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 items.PurchaseItem   = BoYesNoEnum.tYES;
                 items.ItemsGroupCode = request.ItemsGroupCode;
 
-                // UoM — match the existing catalog convention (e.g. reference item 21380): manual UoM with
-                // no UoM group (UgpEntry = -1), "Unit" for inventory/purchase/sales and 1:1 buy/sell
-                // ratios. The previous UoMGroupEntry = 1 ("Packing Units" group) left BuyUnitMsr /
-                // SalUnitMsr / InvntryUom NULL on newly-created items, diverging from the catalog.
-                items.UoMGroupEntry        = -1;
+                // UoM — match the working catalogue (e.g. reference item 21380): the "Packing Units" UoM
+                // group (UgpEntry = 1) with "Unit" as inventory/purchase/sales UoM and 1:1 ratios. Setting
+                // the UoM codes to a valid member of the group ("Unit") populates OITM.IUoMEntry = 1 (Unit)
+                // instead of leaving it NULL. The old Manual UoM (UgpEntry = -1) left items with no
+                // inventory UoM entry, which SAP rejects on purchase documents (PO -5002 "specify a UoM
+                // code"). NOTE: verify a freshly-created item matches 21380 (UgpEntry 1 / IUoMEntry 1).
+                items.UoMGroupEntry        = 1;        // "Packing Units"
                 items.InventoryUOM         = "Unit";   // OITM.InvntryUom
                 items.PurchaseUnit         = "Unit";   // OITM.BuyUnitMsr
                 items.SalesUnit            = "Unit";   // OITM.SalUnitMsr
