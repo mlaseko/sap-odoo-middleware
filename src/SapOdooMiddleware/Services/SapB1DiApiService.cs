@@ -4623,13 +4623,22 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// </summary>
     private int? GetBaseUoMEntry(string itemCode)
     {
-        var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+        // Read straight from OITM rather than a COM property (the Items UoM-entry members vary by DI-API
+        // build). UgpEntry = -1 is the Manual group → no line UoM needed; IUoMEntry is the item's
+        // inventory (base) UoM entry, which keeps the PO quantity/price per-piece, matching the invoice.
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
         try
         {
-            if (!items.GetByKey(itemCode)) return null;
-            if (items.UoMGroupEntry == -1) return null;        // manual UoM → no line UoM required
-            var entry = items.InventoryUOMEntry;               // base UoM of the group (keeps qty per-piece)
-            return entry > 0 ? entry : null;
+            rs.DoQuery(
+                "SELECT T0.\"UgpEntry\", T0.\"IUoMEntry\" FROM OITM T0 " +
+                $"WHERE T0.\"ItemCode\" = '{itemCode.Replace("'", "''")}'");
+            if (rs.EoF) return null;
+
+            var ugp = Convert.ToInt32(rs.Fields.Item("UgpEntry").Value);
+            if (ugp == -1) return null;                        // manual UoM → no line UoM required
+
+            var iuom = Convert.ToInt32(rs.Fields.Item("IUoMEntry").Value);
+            return iuom > 0 ? iuom : null;
         }
         catch
         {
@@ -4637,7 +4646,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
         finally
         {
-            Marshal.ReleaseComObject(items);
+            Marshal.ReleaseComObject(rs);
         }
     }
 
