@@ -40,6 +40,9 @@ public class SapPurchaseOrderLineRequest
 
     public double UnitPrice { get; set; }
 
+    /// <summary>Line discount percentage (0–100). Maps to POR1.DiscPrcnt; 100 → free bonus line.</summary>
+    public double DiscountPercent { get; set; }
+
     /// <summary>Receiving warehouse; defaults to the configured default when null.</summary>
     public string? WarehouseCode { get; set; }
 }

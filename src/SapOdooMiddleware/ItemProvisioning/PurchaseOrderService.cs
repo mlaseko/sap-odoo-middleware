@@ -6,7 +6,7 @@ using SapOdooMiddleware.Services;
 
 namespace SapOdooMiddleware.ItemProvisioning;
 
-public record PoPreviewLine(Guid LineId, string ItemCode, string? Description, double Quantity, double UnitPrice);
+public record PoPreviewLine(Guid LineId, string ItemCode, string? Description, double Quantity, double UnitPrice, double DiscountPct);
 
 public record PoPreview(
     bool Ready,
@@ -19,7 +19,7 @@ public record PoPreview(
     List<PoPreviewLine> Lines,
     List<string> Blocking);
 
-public record PoPostLine(string ItemCode, double Quantity, double UnitPrice);
+public record PoPostLine(string ItemCode, double Quantity, double UnitPrice, double DiscountPct);
 
 public record PoPostResult(bool Ok, int? DocEntry, int? DocNum, string? Error, bool AlreadyExists = false);
 
@@ -71,7 +71,8 @@ public class PurchaseOrderService
                 (l.MatchedSku ?? l.CreatedSku ?? "").Trim(),
                 l.Description,
                 (double)(l.Quantity ?? 0m),
-                (double)(l.UnitPrice ?? 0m)))
+                (double)(l.UnitPrice ?? 0m),
+                (double)l.DiscountPct))   // carry the invoice discount (100% on free-bonus lines → £0 on the PO)
             .Where(l => !string.IsNullOrWhiteSpace(l.ItemCode))
             .ToList();
 
@@ -155,6 +156,7 @@ public class PurchaseOrderService
                 ItemCode = l.ItemCode.Trim(),
                 Quantity = l.Quantity,
                 UnitPrice = l.UnitPrice,
+                DiscountPercent = l.DiscountPct,
                 WarehouseCode = _settings.DefaultWarehouse,
             }).ToList(),
         };
