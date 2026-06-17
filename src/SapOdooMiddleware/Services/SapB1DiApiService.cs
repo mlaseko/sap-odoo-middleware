@@ -4563,12 +4563,27 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     var line = request.Lines[i];
 
                     po.Lines.ItemCode       = line.ItemCode;
+
+                    // Set the line UoM explicitly to the item's base (inventory) UoM for grouped-UoM items.
+                    // SAP doesn't reliably auto-fill it for them and otherwise rejects with -5002 "specify a
+                    // UoM code". Manual-UoM items (group -1) return null and need no line UoM. The item must
+                    // be in a UoM group with a valid base UoM (e.g. "Packing Units" + Unit); a still-Manual
+                    // item will be named in the log below and must be corrected in SAP.
+                    var uomEntry = GetBaseUoMEntry(line.ItemCode);
+                    if (uomEntry is > 0)
+                        po.Lines.UoMEntry = uomEntry.Value;
+
                     po.Lines.Quantity       = line.Quantity;
                     po.Lines.UnitPrice      = line.UnitPrice;
                     po.Lines.DiscountPercent = line.DiscountPercent;   // 100 on a free-bonus line → line total 0
                     if (!string.IsNullOrWhiteSpace(line.WarehouseCode))
                         po.Lines.WarehouseCode = line.WarehouseCode;
                     // VAT is left to the vendor BP's tax group (exempt vendors → no VAT).
+
+                    _logger.LogInformation(
+                        "PO line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={Price}, Disc={Disc}, UoMEntry={Uom}",
+                        i, line.ItemCode, line.Quantity, line.UnitPrice, line.DiscountPercent,
+                        uomEntry?.ToString() ?? "(none/manual)");
                 }
 
                 int result = po.Add();
@@ -4604,6 +4619,39 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         finally
         {
             _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// The item's base (inventory) UoM AbsEntry from OITM, or null for Manual-UoM items (UgpEntry = -1)
+    /// which have no inventory UoM entry. Read via DoQuery using the documented OITM columns (UgpEntry /
+    /// IUoMEntry) — no COM UoM-entry property (those vary by DI-API build). Used to set the PO line UoM
+    /// for grouped items; the base UoM (e.g. "Unit" = 1) keeps qty/price per-piece, matching the invoice.
+    /// Caller already holds <see cref="_lock"/>.
+    /// </summary>
+    private int? GetBaseUoMEntry(string itemCode)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery(
+                "SELECT T0.\"UgpEntry\", T0.\"IUoMEntry\" FROM OITM T0 " +
+                $"WHERE T0.\"ItemCode\" = '{itemCode.Replace("'", "''")}'");
+            if (rs.EoF) return null;
+
+            var ugp = Convert.ToInt32(rs.Fields.Item("UgpEntry").Value);
+            if (ugp == -1) return null;                        // manual UoM → no line UoM required
+
+            var iuom = Convert.ToInt32(rs.Fields.Item("IUoMEntry").Value);
+            return iuom > 0 ? iuom : null;
+        }
+        catch
+        {
+            return null;   // never block PO creation on a UoM lookup
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
         }
     }
 
