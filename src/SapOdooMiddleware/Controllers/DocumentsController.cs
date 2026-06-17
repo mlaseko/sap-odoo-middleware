@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Ingestion;
 using SapOdooMiddleware.Persistence;
+using SapOdooMiddleware.Services;
 using SapOdooMiddleware.Services.Vision;
 
 namespace SapOdooMiddleware.Controllers;
@@ -24,19 +25,22 @@ public class DocumentsController : ControllerBase
     private readonly DocumentUploadService _uploads;
     private readonly InvoiceAutoMatchJob _autoMatch;
     private readonly InvoiceItemCreationService _itemCreation;
+    private readonly ISapB1Service _sap;
 
     public DocumentsController(
         IStagingDocumentRepository docs,
         IStagingDocumentLineRepository lines,
         DocumentUploadService uploads,
         InvoiceAutoMatchJob autoMatch,
-        InvoiceItemCreationService itemCreation)
+        InvoiceItemCreationService itemCreation,
+        ISapB1Service sap)
     {
         _docs    = docs;
         _lines   = lines;
         _uploads = uploads;
         _autoMatch = autoMatch;
         _itemCreation = itemCreation;
+        _sap = sap;
     }
 
     // Audit identity: Windows auth is disabled in Development today (returns null), so fall back
@@ -147,7 +151,25 @@ public class DocumentsController : ControllerBase
     {
         if (await GuardLine(documentId, lineId, ct) is { } err) return err;
         if (string.IsNullOrWhiteSpace(body.Sku)) return BadRequest(new { error = "sku is required." });
-        await _lines.SetReviewStatusAsync(lineId, "matched", body.Sku.Trim(), ct);
+        var sku = body.Sku.Trim();
+
+        // Verify the item actually exists in SAP before marking the line matched. Without this, a typo
+        // — or using "Match" when the item hasn't been created yet — leaves the line "matched" to a code
+        // SAP doesn't have (looks done, but nothing was created, and the PO would later fail on it).
+        bool exists;
+        try
+        {
+            exists = await _sap.ItemExistsAsync(sku);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                new { error = $"Could not verify '{sku}' in SAP (service unavailable): {ex.Message}" });
+        }
+        if (!exists)
+            return BadRequest(new { error = $"Item '{sku}' does not exist in SAP. Use 'Create New' to create it instead." });
+
+        await _lines.SetReviewStatusAsync(lineId, "matched", sku, ct);
         return Ok(await _lines.GetByIdAsync(lineId, ct));
     }
 
