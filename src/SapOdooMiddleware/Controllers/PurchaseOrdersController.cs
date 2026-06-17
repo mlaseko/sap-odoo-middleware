@@ -14,11 +14,16 @@ public class PurchaseOrdersController : ControllerBase
 {
     private readonly IStagingDocumentRepository _docs;
     private readonly PurchaseOrderService _po;
+    private readonly ILogger<PurchaseOrdersController> _logger;
 
-    public PurchaseOrdersController(IStagingDocumentRepository docs, PurchaseOrderService po)
+    public PurchaseOrdersController(
+        IStagingDocumentRepository docs,
+        PurchaseOrderService po,
+        ILogger<PurchaseOrdersController> logger)
     {
         _docs = docs;
         _po = po;
+        _logger = logger;
     }
 
     /// <summary>Proposed PO for the invoice — vendor, currency, lines, and readiness/blocking reasons.</summary>
@@ -47,6 +52,20 @@ public class PurchaseOrdersController : ControllerBase
             return Conflict(new { error = result.Error, docEntry = result.DocEntry, docNum = result.DocNum });
         if (!result.Ok)
             return BadRequest(new { error = result.Error });
+
+        // Close the document so its PO can't be posted twice from the UI. SAP-side dedup (NumAtCard)
+        // remains the hard guard; this just reflects the closed state. A failure here must not fail the
+        // response — the PO is already created in SAP.
+        try
+        {
+            await _docs.UpdateStatusAsync(documentId, "completed", null, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "PO {DocNum} created for document {Id} but marking it 'completed' (closed) failed.",
+                result.DocNum, documentId);
+        }
 
         return Ok(new { docEntry = result.DocEntry, docNum = result.DocNum, numAtCard = doc.InvoiceNumber });
     }
