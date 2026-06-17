@@ -73,7 +73,10 @@
         </div>
         @if (Model.IsReviewed)
         {
-            <div class="review-done">✓ Reviewed by @Model.Doc.ReviewedBy @(Model.Doc.ReviewedAt is { } ra ? "on " + ra.ToLocalTime().ToString("yyyy-MM-dd HH:mm") : "")</div>
+            <div class="review-actions">
+                <span class="review-done">✓ Reviewed by @Model.Doc.ReviewedBy @(Model.Doc.ReviewedAt is { } ra ? "on " + ra.ToLocalTime().ToString("yyyy-MM-dd HH:mm") : "")</span>
+                <button id="btn-createpo" class="btn btn-sm btn-primary" type="button">Create PO</button>
+            </div>
         }
         else
         {
@@ -153,7 +156,7 @@
     </tfoot>
 </table>
 
-@if (Model.ShowReview && !Model.IsReviewed)
+@if (Model.ShowReview)
 {
     <div id="modal-overlay" class="modal-overlay" style="display:none">
         <div class="modal">
@@ -167,7 +170,10 @@
 // ---- Phase B: review interactions (only active for editable/extracted documents) ----
 (function () {
     const banner = document.getElementById('review-banner');
-    if (!banner || banner.dataset.editable !== 'true') return;
+    if (!banner) return;
+    // Reviewed (read-only) docs still get the Purchase Order action; the editing/match/bulk/complete
+    // handlers below are wired only when the doc is editable (their buttons don't exist otherwise).
+    const editable = banner.dataset.editable === 'true';
 
     const docId = banner.dataset.docId;
     const base = '/api/documents/' + docId;
@@ -376,7 +382,7 @@
 
     // ---- banner buttons ----
     let lastAutoMatch = 0;
-    document.getElementById('btn-automatch').addEventListener('click', async (e) => {
+    document.getElementById('btn-automatch')?.addEventListener('click', async (e) => {
         const now = Date.now();
         if (now - lastAutoMatch < 30000) { alert('Please wait a moment before auto-matching again.'); return; }
         lastAutoMatch = now;
@@ -388,7 +394,7 @@
         } catch (err) { alert('Auto-match failed: ' + err.message); e.target.disabled = false; }
     });
 
-    document.getElementById('btn-markpending').addEventListener('click', async (e) => {
+    document.getElementById('btn-markpending')?.addEventListener('click', async (e) => {
         try { await api('POST', '/bulk-mark-pending-as-create-new'); location.reload(); }
         catch (err) { alert('Failed: ' + err.message); }
     });
@@ -413,7 +419,7 @@
     }
     function closeModal() { overlay.style.display = 'none'; }
 
-    document.getElementById('btn-bulkcreate').addEventListener('click', () => {
+    document.getElementById('btn-bulkcreate')?.addEventListener('click', () => {
         const n = document.getElementById('cnt-createnew').textContent;
         openModal(
             '<h3>Bulk create items</h3><p>You are about to create <strong>' + n + '</strong> item(s) in SAP and Odoo (including any previously failed lines, which will be retried). This is irreversible. Continue?</p>',
@@ -445,7 +451,7 @@
         }
     }
 
-    document.getElementById('btn-complete').addEventListener('click', () => {
+    document.getElementById('btn-complete')?.addEventListener('click', () => {
         openModal(
             '<h3>Complete review</h3><p>Mark this invoice as reviewed? All lines must be matched, created, or skipped. You won\'t be able to edit lines afterward.</p>',
             [
@@ -477,7 +483,7 @@
         mActions.appendChild(b);
     }
 
-    document.getElementById('btn-createpo').addEventListener('click', createPurchaseOrder);
+    document.getElementById('btn-createpo')?.addEventListener('click', createPurchaseOrder);
 
     async function createPurchaseOrder() {
         openModal('<h3>Create Purchase Order</h3><p>Building preview…</p><div class="spinner"></div>',
