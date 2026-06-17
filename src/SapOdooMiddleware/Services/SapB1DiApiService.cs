@@ -4561,6 +4561,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     var line = request.Lines[i];
 
                     po.Lines.ItemCode       = line.ItemCode;
+
+                    // The DI API does not auto-fill the line UoM for items that use a UoM group, so set it
+                    // explicitly from the item's default purchasing UoM — otherwise SAP rejects the doc with
+                    // -5002 "specify a UoM code". Manual-UoM items (group -1) need nothing.
+                    var uomEntry = GetDefaultPurchasingUoMEntry(line.ItemCode);
+                    if (uomEntry is > 0)
+                        po.Lines.UoMEntry = uomEntry.Value;
+
                     po.Lines.Quantity       = line.Quantity;
                     po.Lines.UnitPrice      = line.UnitPrice;
                     po.Lines.DiscountPercent = line.DiscountPercent;   // 100 on a free-bonus line → line total 0
@@ -4602,6 +4610,31 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         finally
         {
             _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// The item's default purchasing UoM AbsEntry, or null for manual-UoM items (UoM group -1), which
+    /// need no explicit document-line UoM. Satisfies the DI API "specify a UoM code" requirement on
+    /// purchase-document lines for items that use a UoM group. The caller already holds <see cref="_lock"/>.
+    /// </summary>
+    private int? GetDefaultPurchasingUoMEntry(string itemCode)
+    {
+        var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+        try
+        {
+            if (!items.GetByKey(itemCode)) return null;
+            if (items.UoMGroupEntry == -1) return null;        // manual UoM → no line UoM required
+            var entry = items.DefaultPurchasingUoMEntry;
+            return entry > 0 ? entry : null;
+        }
+        catch
+        {
+            return null;   // never block PO creation on a UoM lookup
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(items);
         }
     }
 
