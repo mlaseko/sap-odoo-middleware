@@ -71,7 +71,13 @@
             <span class="rc rc-pending">@C("pending") pending</span> ·
             <span class="rc rc-failed">@C("create_failed") failed</span>
         </div>
-        @if (Model.IsReviewed)
+        @if (Model.IsClosed)
+        {
+            <div class="review-actions">
+                <span class="review-done">✓ Reviewed by @Model.Doc.ReviewedBy @(Model.Doc.ReviewedAt is { } ra ? "on " + ra.ToLocalTime().ToString("yyyy-MM-dd HH:mm") : "") · Purchase Order created — closed</span>
+            </div>
+        }
+        else if (Model.IsReviewed)
         {
             <div class="review-actions">
                 <span class="review-done">✓ Reviewed by @Model.Doc.ReviewedBy @(Model.Doc.ReviewedAt is { } ra ? "on " + ra.ToLocalTime().ToString("yyyy-MM-dd HH:mm") : "")</span>

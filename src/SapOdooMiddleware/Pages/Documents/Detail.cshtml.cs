@@ -21,10 +21,13 @@ public class DetailModel : PageModel
     public decimal SumLineTotals => Lines.Sum(l => l.LineTotal ?? 0m);
     public decimal ComputedTotal => SumLineTotals + (Doc.Freight ?? 0m);
 
-    /// <summary>Review section is shown for extracted (editable) and reviewed (read-only) docs.</summary>
-    public bool ShowReview => Doc.Status is "extracted" or "reviewed";
+    /// <summary>Review section is shown for extracted (editable), reviewed, and closed (PO created) docs.</summary>
+    public bool ShowReview => Doc.Status is "extracted" or "reviewed" or "completed";
     public bool IsReviewed => Doc.Status == "reviewed";
     public bool IsEditable => Doc.Status == "extracted";
+
+    /// <summary>Closed after the Purchase Order was created — no further PO can be posted.</summary>
+    public bool IsClosed => Doc.Status == "completed";
 
     /// <summary>CSS class + label for a line review-status pill.</summary>
     public static (string Css, string Text) LinePill(string status) => status switch
