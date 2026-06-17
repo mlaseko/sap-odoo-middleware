@@ -326,7 +326,11 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         var cifTzs = req.EurCost * rate;
         var prices = _pricing.ComputeNetPrices(cifTzs, pricingCat);
 
+        // ItemName = article number + name + packaging size, e.g. "4702-Truck Long-life Motor Oil 10W-40-205 l".
+        // Packaging is appended only when known (sitemap orphans without a scraped size fall back to name only).
         var itemName = $"{code}-{lm.Name}";
+        if (!string.IsNullOrWhiteSpace(lm.PackagingSize))
+            itemName += $"-{lm.PackagingSize.Trim()}";
         if (itemName.Length > 200) itemName = itemName.Substring(0, 200);
 
         // 6) PRE-FLIGHT VALIDATION — nothing has been written yet.
