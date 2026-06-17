@@ -43,7 +43,7 @@ public class PurchaseOrdersController : ControllerBase
         if (doc is null) return NotFound();
 
         var lines = (body.Lines ?? new())
-            .Select(l => new PoPostLine(l.ItemCode?.Trim() ?? "", l.Quantity, l.UnitPrice))
+            .Select(l => new PoPostLine(l.ItemCode?.Trim() ?? "", l.Quantity, l.UnitPrice, l.DiscountPct))
             .ToList();
 
         var result = await _po.PostAsync(doc, lines, ct);
@@ -72,4 +72,4 @@ public class PurchaseOrdersController : ControllerBase
 }
 
 public record CreatePoRequest(List<CreatePoLineRequest>? Lines);
-public record CreatePoLineRequest(string? ItemCode, double Quantity, double UnitPrice);
+public record CreatePoLineRequest(string? ItemCode, double Quantity, double UnitPrice, double DiscountPct);

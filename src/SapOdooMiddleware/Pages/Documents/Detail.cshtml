@@ -507,12 +507,20 @@
         renderPoForm(p);
     }
 
+    function poLineTotal(qty, price, disc) {
+        const t = (Number(qty) || 0) * (Number(price) || 0) * (1 - (Number(disc) || 0) / 100);
+        return (isFinite(t) ? t : 0).toFixed(2);
+    }
+
     function poRowHtml(line) {
+        const q = line.quantity ?? 0, u = line.unit_price ?? 0, d = line.discount_pct ?? 0;
         return '<tr>' +
             '<td><input class="cell-input po-item" value="' + escA(line.item_code) + '"></td>' +
             '<td class="po-desc">' + escH(line.description) + '</td>' +
-            '<td><input class="cell-input num po-qty" type="number" step="any" min="0" value="' + escA(line.quantity ?? 0) + '"></td>' +
-            '<td><input class="cell-input num po-price" type="number" step="any" min="0" value="' + escA(line.unit_price ?? 0) + '"></td>' +
+            '<td><input class="cell-input num po-qty" type="number" step="any" min="0" value="' + escA(q) + '"></td>' +
+            '<td><input class="cell-input num po-price" type="number" step="any" min="0" value="' + escA(u) + '"></td>' +
+            '<td><input class="cell-input num po-disc" type="number" step="any" min="0" max="100" value="' + escA(d) + '"></td>' +
+            '<td class="num po-total">' + poLineTotal(q, u, d) + '</td>' +
             '<td><button type="button" class="btn btn-sm po-del" title="Remove line">✕</button></td>' +
             '</tr>';
     }
@@ -527,7 +535,8 @@
             '<tr><th>Warehouse</th><td>' + escH(p.warehouse) + '</td></tr>' +
             '</tbody></table>' +
             '<table class="po-lines"><thead><tr>' +
-            '<th>Item code</th><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th><th></th>' +
+            '<th>Item code</th><th>Description</th><th class="num">Qty</th><th class="num">Unit price</th>' +
+            '<th class="num">Disc %</th><th class="num">Line total</th><th></th>' +
             '</tr></thead><tbody id="po-rows">' + (p.lines || []).map(poRowHtml).join('') + '</tbody></table>' +
             '<button type="button" class="btn btn-sm" id="po-add">+ Add line</button>';
         openModal(html, [
@@ -538,11 +547,20 @@
 
         document.getElementById('po-add').onclick = () => {
             const tr = document.createElement('tr');
-            tr.innerHTML = poRowHtml({ item_code: '', description: '', quantity: 0, unit_price: 0 });
+            tr.innerHTML = poRowHtml({ item_code: '', description: '', quantity: 0, unit_price: 0, discount_pct: 0 });
             document.getElementById('po-rows').appendChild(tr);
         };
         document.getElementById('po-rows').addEventListener('click', e => {
             if (e.target.classList.contains('po-del')) e.target.closest('tr').remove();
+        });
+        // Live line-total as qty / price / discount change.
+        document.getElementById('po-rows').addEventListener('input', e => {
+            const tr = e.target.closest('tr'); if (!tr) return;
+            const cell = tr.querySelector('.po-total');
+            if (cell) cell.textContent = poLineTotal(
+                tr.querySelector('.po-qty')?.value,
+                tr.querySelector('.po-price')?.value,
+                tr.querySelector('.po-disc')?.value);
         });
     }
 
@@ -550,7 +568,8 @@
         const lines = Array.from(document.querySelectorAll('#po-rows tr')).map(tr => ({
             item_code: (tr.querySelector('.po-item')?.value || '').trim(),
             quantity: Number(tr.querySelector('.po-qty')?.value || 0),
-            unit_price: Number(tr.querySelector('.po-price')?.value || 0)
+            unit_price: Number(tr.querySelector('.po-price')?.value || 0),
+            discount_pct: Number(tr.querySelector('.po-disc')?.value || 0)
         })).filter(l => l.item_code && l.quantity > 0);
         if (!lines.length) { alert('Add at least one line with an item code and quantity > 0.'); return; }
 

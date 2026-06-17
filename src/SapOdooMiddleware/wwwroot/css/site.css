@@ -298,8 +298,9 @@ select.cell-input { appearance: auto; }
 .po-lines { width: 100%; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .po-lines th, .po-lines td { padding: 6px 8px; border-bottom: 1px solid var(--border-soft); vertical-align: middle; }
 .po-lines thead th { text-align: left; color: var(--muted); font-size: 11px; background: var(--surface-2); }
-.po-lines .po-qty, .po-lines .po-price { width: 96px; text-align: right; }
-.po-lines .po-item { width: 150px; }
+.po-lines .po-qty, .po-lines .po-price, .po-lines .po-disc { width: 84px; text-align: right; }
+.po-lines .po-total { width: 96px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+.po-lines .po-item { width: 140px; }
 .po-lines .po-desc { color: var(--muted); font-size: 13px; max-width: 280px; }
 .po-lines .po-del { padding: 2px 9px; }
 

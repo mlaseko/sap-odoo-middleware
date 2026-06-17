@@ -4560,9 +4560,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     if (i > 0) po.Lines.Add();
                     var line = request.Lines[i];
 
-                    po.Lines.ItemCode  = line.ItemCode;
-                    po.Lines.Quantity  = line.Quantity;
-                    po.Lines.UnitPrice = line.UnitPrice;
+                    po.Lines.ItemCode       = line.ItemCode;
+                    po.Lines.Quantity       = line.Quantity;
+                    po.Lines.UnitPrice      = line.UnitPrice;
+                    po.Lines.DiscountPercent = line.DiscountPercent;   // 100 on a free-bonus line → line total 0
                     if (!string.IsNullOrWhiteSpace(line.WarehouseCode))
                         po.Lines.WarehouseCode = line.WarehouseCode;
                     // VAT is left to the vendor BP's tax group (exempt vendors → no VAT).
