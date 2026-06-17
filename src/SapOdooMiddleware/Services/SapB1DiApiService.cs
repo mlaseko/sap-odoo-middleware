@@ -4561,14 +4561,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     var line = request.Lines[i];
 
                     po.Lines.ItemCode       = line.ItemCode;
-
-                    // The DI API does not auto-fill the line UoM for items that use a UoM group, so set it
-                    // explicitly to the item's base (inventory) UoM — otherwise SAP rejects the doc with
-                    // -5002 "specify a UoM code". Manual-UoM items (group -1) need nothing.
-                    var uomEntry = GetBaseUoMEntry(line.ItemCode);
-                    if (uomEntry is > 0)
-                        po.Lines.UoMEntry = uomEntry.Value;
-
                     po.Lines.Quantity       = line.Quantity;
                     po.Lines.UnitPrice      = line.UnitPrice;
                     po.Lines.DiscountPercent = line.DiscountPercent;   // 100 on a free-bonus line → line total 0
@@ -4610,34 +4602,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         finally
         {
             _lock.Release();
-        }
-    }
-
-    /// <summary>
-    /// The item's base (inventory) UoM AbsEntry, or null for manual-UoM items (UoM group -1), which need
-    /// no explicit document-line UoM. Satisfies the DI API "specify a UoM code" requirement on
-    /// purchase-document lines for grouped-UoM items. We use the BASE UoM (e.g. "Unit", entry 1) rather
-    /// than the default purchasing UoM so the PO quantity/price stay per-piece, matching the invoice — a
-    /// pack purchasing-UoM would otherwise reinterpret qty (e.g. 216 as 216×6 units). The caller already
-    /// holds <see cref="_lock"/>.
-    /// </summary>
-    private int? GetBaseUoMEntry(string itemCode)
-    {
-        var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
-        try
-        {
-            if (!items.GetByKey(itemCode)) return null;
-            if (items.UoMGroupEntry == -1) return null;        // manual UoM → no line UoM required
-            var entry = items.InventoryUOMEntry;               // base UoM of the group (keeps qty per-piece)
-            return entry > 0 ? entry : null;
-        }
-        catch
-        {
-            return null;   // never block PO creation on a UoM lookup
-        }
-        finally
-        {
-            Marshal.ReleaseComObject(items);
         }
     }
 
