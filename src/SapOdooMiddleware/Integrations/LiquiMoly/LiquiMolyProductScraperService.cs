@@ -704,6 +704,11 @@ public class LiquiMolyProductScraperService
     private static readonly Regex SitemapProductUrlPattern =
         new(@"https?://[^\s<>""]+?-p\d+\.html", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // Matches a product-page href (absolute or relative), e.g. "/en/gb/molygen-motor-protect-p001522.html".
+    // Used by the search fallback to find result-tile product pages to variant-mine.
+    private static readonly Regex ProductHrefPattern =
+        new(@"-p\d+\.html", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     /// <summary>
     /// Pulls every product-page URL out of the configured sitemap(s). The sitemap is LiquiMoly's canonical,
     /// complete product list, so it surfaces items missing from the category tree. Failures are logged and
@@ -1859,6 +1864,37 @@ public class LiquiMolyProductScraperService
                     ?.GetAttributeValue("href", null);
                 if (!string.IsNullOrWhiteSpace(canonical))
                     return canonical + "#" + sku;
+            }
+
+            // Search results list products as tiles (".../<slug>-pNNNNNN.html"), NOT a.product-variation,
+            // and a region-only variant (e.g. a GB-store SKU like #1015 that the "/en" index never sees)
+            // is only exposed on its product page. Probe the result product pages and variant-mine each
+            // (same `variantswitch-sku-{sku}` marker the index build uses) until one carries this SKU.
+            var candidates = (doc.DocumentNode.SelectNodes("//a[@href]") ?? Enumerable.Empty<HtmlNode>())
+                .Select(a => a.GetAttributeValue("href", ""))
+                .Where(h => !string.IsNullOrWhiteSpace(h) && ProductHrefPattern.IsMatch(h))
+                .Select(h => h.Contains('#') ? h[..h.IndexOf('#')] : h)
+                .Select(h => h.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                    ? h
+                    : _settings.BaseUrl.TrimEnd('/') + "/" + h.TrimStart('/'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(8)
+                .ToList();
+
+            foreach (var candidate in candidates)
+            {
+                ct.ThrowIfCancellationRequested();
+                var pageHtml = await FetchHtmlAsync(candidate, ct);
+                if (string.IsNullOrWhiteSpace(pageHtml)) continue;
+
+                var pdoc = new HtmlDocument();
+                pdoc.LoadHtml(pageHtml);
+                if (ExtractVariantSkusFromPage(pdoc).Contains(sku))
+                {
+                    _logger.LogInformation(
+                        _logPrefix + "SKU {Sku} resolved via search → product-page probe → {Url}", sku, candidate);
+                    return candidate + "#" + sku;
+                }
             }
 
             return null;
