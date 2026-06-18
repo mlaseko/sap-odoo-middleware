@@ -5,37 +5,42 @@
     var sym = Model.Sym();
 }
 
-<div style="display:flex; justify-content:space-between; align-items:center;">
-    <h2 style="margin:0;">@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
+<div class="page-head">
+    <div>
+        <h2>@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
+        <div class="sub">@Model.Doc.SupplierName</div>
+    </div>
     <div style="display:flex; gap:12px; align-items:center;">
         <button id="btn-delete-doc" class="btn btn-sm btn-danger" type="button" data-doc-id="@Model.Doc.Id">Delete invoice</button>
-        <a href="/autohub/documents">← Back to list</a>
+        <a class="btn btn-sm" href="/autohub/documents">← Back to list</a>
     </div>
 </div>
 
 <style>
-    .hint { font-weight: normal; color: #6b7280; font-size: 13px; }
-    .btn-danger { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
-    .btn-danger:hover { background: #fecaca; }
-    #lines-table thead th { position: sticky; top: 0; background: #f1f5f9; z-index: 2; }
+    .hint { font-weight: normal; color: var(--muted); font-size: 13px; }
+    #lines-table thead th { position: sticky; top: 58px; background: var(--surface-2); z-index: 2; }
     #lines-table th.col-desc, #lines-table td.col-desc { min-width: 200px; }
     #lines-table th.col-oems, #lines-table td.col-oems { min-width: 170px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #lines-table th.col-art, #lines-table td.col-art { white-space: nowrap; }
-    #lines-table td .unit { color: #9ca3af; font-size: 12px; }
+    #lines-table td .unit { color: var(--muted-2); font-size: 12px; }
     #lines-table tr.line-row { cursor: pointer; }
-    #lines-table tr.line-row:hover { background: #f8fafc; }
-    #lines-table tr.line-row.expanded { background: #eff6ff; }
-    .line-detail { padding: 10px 14px; background: #f8fafc; border-left: 3px solid #93c5fd; }
-    .line-detail .ld-meta { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 8px; font-size: 13px; color: #374151; }
-    .line-detail .ld-meta label, .line-detail .ld-edit label { color: #6b7280; font-weight: 600; margin-right: 4px; font-size: 12px; }
+    #lines-table tr.line-row:hover { background: rgba(255,255,255,.04); }
+    #lines-table tr.line-row.expanded { background: var(--accent-soft); }
+    .line-detail { padding: 12px 14px; background: var(--surface-2); border-left: 3px solid var(--accent); border-radius: 0 0 8px 8px; }
+    .line-detail .ld-meta { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 8px; font-size: 13px; color: var(--text); }
+    .line-detail .ld-meta label, .line-detail .ld-edit label { color: var(--muted); font-weight: 600; margin-right: 4px; font-size: 12px; }
     .line-detail .ld-edit { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-    .line-detail .ld-edit input { padding: 4px 6px; border: 1px solid #cbd5e1; border-radius: 4px; }
+    .line-detail .ld-edit input { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev); color: var(--text); }
     .line-detail .ld-edit input.ld-qty, .line-detail .ld-edit input.ld-price { width: 90px; }
     .line-detail .ld-desc-wrap { flex: 1 1 260px; }
     .line-detail .ld-desc-wrap input { width: 100%; }
     .line-detail .ld-enrichment { font-size: 13px; }
-    .line-detail .ld-enrichment h3 { font-size: 14px; margin: 4px 0; }
-    .line-detail .kv th { text-align: left; color: #6b7280; padding-right: 10px; font-weight: 600; vertical-align: top; }
+    .line-detail .ld-enrichment h3 { font-size: 14px; margin: 4px 0; color: var(--text-strong); }
+    .line-detail .kv th { text-align: left; color: var(--muted); padding-right: 10px; font-weight: 600; vertical-align: top; }
+    .ld-saved { color: var(--success); }
+    .ld-borrowed { color: var(--warning); }
+    .ld-error { color: var(--danger); }
+    .ld-img { max-height: 120px; border: 1px solid var(--border); border-radius: 6px; margin-top: 8px; }
 </style>
 
 @* Header card *@
@@ -49,7 +54,7 @@
     </div>
     @if (!string.IsNullOrWhiteSpace(Model.Doc.ErrorMessage))
     {
-        <p style="margin:8px 0 0; color:#854d0e;">@Model.Doc.ErrorMessage</p>
+        <div class="note-error">@Model.Doc.ErrorMessage</div>
     }
 </div>
 
@@ -76,7 +81,7 @@
 
 @if (Model.Doc.Status == "extracted" && Model.Lines.Count == 0)
 {
-    <div class="notice" style="background:#fef9c3; border-color:#fde68a; color:#854d0e;">
+    <div class="note-warn">
         Extraction succeeded but no line items were found. Check the file or operator review may be required.
     </div>
 }
@@ -192,7 +197,7 @@
                             <label>Unit price <input type="number" step="any" min="0" class="ld-price" value="@(l.UnitPriceForeign?.ToString("0.####"))"></label>
                             <label class="ld-desc-wrap">Description <input type="text" class="ld-desc" value="@l.Description"></label>
                             <button type="button" class="btn btn-sm ld-save">Save changes</button>
-                            <span class="ld-saved" style="display:none; color:#166534;">✓ saved</span>
+                            <span class="ld-saved" style="display:none;">✓ saved</span>
                         </div>
                     }
                     <div class="ld-enrichment" data-loaded="false"><em>Loading enrichment…</em></div>
@@ -304,7 +309,7 @@
         if (enr.confirmation_required) html += ' <span class="pill pill-yellow">confirmation required</span>';
         html += '</p>';
         if (bf) {
-            html += '<p style="color:#92400e;">Borrowed from article <strong>' + esc(bf.article_number) + '</strong>' +
+            html += '<p class="ld-borrowed">Borrowed from article <strong>' + esc(bf.article_number) + '</strong>' +
                     (bf.supplier_name ? ' (' + esc(bf.supplier_name) + ')' : '') + '. Please verify the fit below.</p>';
         }
         html += '<table class="kv">';
@@ -314,7 +319,7 @@
         html += '<tr><th>SKU prefix</th><td>' + esc(d.suggested_sku_prefix) + '</td></tr>';
         if (d.filtered_oems && d.filtered_oems.length) html += '<tr><th>OEMs</th><td>' + esc(d.filtered_oems.join(', ')) + '</td></tr>';
         html += '</table>';
-        if (d.image_url) html += '<div style="margin-top:8px;"><img src="' + esc(d.image_url) + '" alt="" style="max-height:120px; border:1px solid #e5e7eb; border-radius:6px;"/></div>';
+        if (d.image_url) html += '<div style="margin-top:8px;"><img src="' + esc(d.image_url) + '" alt="" class="ld-img"/></div>';
         return html;
     }
 
@@ -378,7 +383,7 @@
             box.innerHTML = enrichmentHtml(await r.json());
         } catch (e) {
             box.dataset.loaded = 'false';
-            box.innerHTML = '<em style="color:#991b1b;">Could not load enrichment: ' + esc(e.message) + '</em>';
+            box.innerHTML = '<em class="ld-error">Could not load enrichment: ' + esc(e.message) + '</em>';
         }
     }
 
