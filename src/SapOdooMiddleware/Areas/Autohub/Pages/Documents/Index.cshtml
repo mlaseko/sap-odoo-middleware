@@ -1,9 +1,28 @@
 @page "/autohub/documents"
 @model SapOdooMiddleware.Areas.Autohub.Pages.Documents.IndexModel
+@functions {
+    static string StatusPill(string? s) => s switch
+    {
+        "reviewed" or "completed" or "extracted" => "pill-green",
+        "extracting" or "uploaded" => "pill-yellow",
+        "failed" or "error" => "pill-red",
+        _ => "pill-grey",
+    };
+    static string ValPill(string? s) => s switch
+    {
+        "passed" or "ok" or "valid" => "pill-green",
+        "warning" or "review" => "pill-yellow",
+        "failed" or "invalid" => "pill-red",
+        _ => "pill-grey",
+    };
+}
 
-<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
-    <h2 style="margin:0;">Autohub — recent documents</h2>
-    <a class="btn" href="/autohub/documents/upload">Upload new</a>
+<div class="page-head">
+    <div>
+        <h2>Recent documents</h2>
+        <div class="sub">Autohub spare-parts invoices — latest @Model.Docs.Count</div>
+    </div>
+    <a class="btn btn-primary" href="/autohub/documents/upload">＋ Upload new</a>
 </div>
 
 @if (TempData["Notice"] is string notice)
@@ -13,7 +32,7 @@
 
 @if (Model.Docs.Count == 0)
 {
-    <p>No invoices uploaded yet. <a href="/autohub/documents/upload">Upload your first invoice</a>.</p>
+    <div class="empty">No invoices uploaded yet. <a href="/autohub/documents/upload">Upload your first invoice</a>.</div>
 }
 else
 {
@@ -41,12 +60,16 @@ else
                 <td>@d.InvoiceNumber</td>
                 <td>@(d.InvoiceDate?.ToString("yyyy-MM-dd"))</td>
                 <td class="num">@d.PageCount</td>
-                <td>@d.Status</td>
-                <td>@d.ValidationStatus</td>
-                <td style="white-space:nowrap;">
-                    <a href="/autohub/documents/@d.Id">View</a>
-                    &nbsp;·&nbsp;
-                    <a href="#" class="del-doc" data-doc-id="@d.Id" data-name="@(d.InvoiceNumber ?? d.OriginalFilename)" style="color:#991b1b;">Delete</a>
+                <td><span class="pill @StatusPill(d.Status)">@d.Status</span></td>
+                <td>
+                    @if (!string.IsNullOrWhiteSpace(d.ValidationStatus))
+                    {
+                        <span class="pill @ValPill(d.ValidationStatus)">@d.ValidationStatus</span>
+                    }
+                </td>
+                <td class="num" style="white-space:nowrap;">
+                    <a class="btn btn-sm" href="/autohub/documents/@d.Id">View →</a>
+                    <a href="#" class="btn btn-sm btn-danger del-doc" data-doc-id="@d.Id" data-name="@(d.InvoiceNumber ?? d.OriginalFilename)">Delete</a>
                 </td>
             </tr>
         }
