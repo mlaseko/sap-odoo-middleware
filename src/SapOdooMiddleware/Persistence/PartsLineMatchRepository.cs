@@ -11,7 +11,10 @@ public sealed record PartsLineMatchCandidate(
     IReadOnlyList<string> OemNumbers,
     string? SupplierArticleNumber,
     bool IsPromotional,
-    string? Brand = null);
+    string? Brand = null,
+    // Document-level supplier (staging_document.SupplierName) — used as the effective brand when the
+    // line itself carries no brand (common for non-OE suppliers like Germax). The line Brand is kept as-is.
+    string? DocumentSupplierName = null);
 
 public interface IPartsLineMatchRepository
 {
@@ -40,7 +43,7 @@ public sealed class PartsLineMatchRepository : IPartsLineMatchRepository
     public async Task<IReadOnlyList<PartsLineMatchCandidate>> ListPendingMatchCandidatesAsync(int limit, CancellationToken ct)
     {
         const string sql = """
-            SELECT l."Id", l."DocumentId", l."OemNumbers", l."SupplierArticleNumber", l."IsPromotional", l."Brand"
+            SELECT l."Id", l."DocumentId", l."OemNumbers", l."SupplierArticleNumber", l."IsPromotional", l."Brand", d."SupplierName"
             FROM public."staging_document_line" l
             JOIN public."staging_document" d ON d."Id" = l."DocumentId"
             WHERE l."ReviewStatus" = 'pending' AND d."Status" = 'extracted'
@@ -62,7 +65,8 @@ public sealed class PartsLineMatchRepository : IPartsLineMatchRepository
                 OemNumbers:            ParseOems(r, 2),
                 SupplierArticleNumber: r.IsDBNull(3) ? null : r.GetString(3),
                 IsPromotional:         !r.IsDBNull(4) && r.GetBoolean(4),
-                Brand:                 r.IsDBNull(5) ? null : r.GetString(5)));
+                Brand:                 r.IsDBNull(5) ? null : r.GetString(5),
+                DocumentSupplierName:  r.IsDBNull(6) ? null : r.GetString(6)));
         }
         return list;
     }

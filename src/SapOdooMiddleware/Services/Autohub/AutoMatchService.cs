@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using SapOdooMiddleware.Persistence;
 
 namespace SapOdooMiddleware.Services.Autohub;
@@ -25,17 +26,29 @@ public sealed class AutoMatchService : IAutoMatchService
 {
     private readonly IOitmMatchRepository _oitm;
     private readonly IOemFilterService _filter;
+    private readonly ILogger<AutoMatchService> _logger;
 
-    public AutoMatchService(IOitmMatchRepository oitm, IOemFilterService filter)
+    public AutoMatchService(IOitmMatchRepository oitm, IOemFilterService filter, ILogger<AutoMatchService> logger)
     {
         _oitm = oitm;
         _filter = filter;
+        _logger = logger;
     }
 
     public async Task<MatchDecision> DecideAsync(PartsLineMatchCandidate line, CancellationToken ct)
     {
         if (line.IsPromotional)
             return new MatchDecision("skip", null);
+
+        // Supplier identity for the BrandClassifier: prefer the line's own brand, but many non-OE
+        // suppliers (e.g. Germax) don't print a brand per line — so fall back to the document-level
+        // supplier. Without this, every blank-brand line classifies as NoBrandOnInvoice and is sent to
+        // needs_confirmation off the first OEM donor, which blocks Tier 2 (the exact-article match).
+        var effectiveBrand = !string.IsNullOrWhiteSpace(line.Brand) ? line.Brand : line.DocumentSupplierName;
+        if (string.IsNullOrWhiteSpace(line.Brand) && !string.IsNullOrWhiteSpace(line.DocumentSupplierName))
+            _logger.LogDebug(
+                "Brand fallback applied: line.Brand empty, using document supplier '{DocumentSupplier}' as effective brand for line {LineId}.",
+                line.DocumentSupplierName, line.Id);
 
         // Tier 1 — OEM cross-reference. Only matches across the SAME supplier; a shared OEM under a
         // different supplier must NOT auto-link (that was the Slice 1.6 bug).
@@ -45,7 +58,7 @@ public sealed class AutoMatchService : IAutoMatchService
             var oem = await _oitm.FindByOemAsync(clean, ct);
             if (oem is not null)
             {
-                switch (BrandClassifier.Classify(line.Brand, oem.SupplierName))
+                switch (BrandClassifier.Classify(effectiveBrand, oem.SupplierName))
                 {
                     case BrandClassifier.MatchKind.SameSupplier:
                         return new MatchDecision("matched", oem.ItemCode, "tier1_oem");
@@ -67,7 +80,7 @@ public sealed class AutoMatchService : IAutoMatchService
                 if (string.IsNullOrEmpty(art.SupplierName))
                     return new MatchDecision("matched", art.ItemCode, "tier2_article");
 
-                switch (BrandClassifier.Classify(line.Brand, art.SupplierName))
+                switch (BrandClassifier.Classify(effectiveBrand, art.SupplierName))
                 {
                     case BrandClassifier.MatchKind.SameSupplier:
                         return new MatchDecision("matched", art.ItemCode, "tier2_article");
