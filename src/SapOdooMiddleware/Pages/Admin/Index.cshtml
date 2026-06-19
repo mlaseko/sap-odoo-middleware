@@ -42,6 +42,16 @@
         </div>
     </div>
 
+    <div class="card">
+        <p class="card-title">Autohub SAP setup (Molas Live 2021)</p>
+        <div class="kv"><span class="k"><span id="ah-dot" class="status-dot"></span>Company</span><span class="v" id="ah-company">—</span></div>
+        <div id="ah-checks"></div>
+        <div class="admin-result" id="ah-detail">Pre-flight: confirms price lists, item groups, OITM UDFs, VAT groups O1/I1 and UoM group 1 exist before bulk-create.</div>
+        <div class="card-actions">
+            <button class="btn btn-primary" id="btn-ah-verify">Verify Autohub SAP setup</button>
+        </div>
+    </div>
+
 </div>
 
 <script>
@@ -140,11 +150,39 @@
         btn.disabled = false;
     }
 
+    // ---- Autohub SAP setup pre-flight ----
+    async function ahVerify() {
+        const btn = document.getElementById('btn-ah-verify'); btn.disabled = true;
+        document.getElementById('ah-dot').className = 'status-dot wait';
+        document.getElementById('ah-detail').textContent = 'Checking the Autohub SAP company…';
+        document.getElementById('ah-checks').innerHTML = '';
+        try {
+            const r = await call('GET', '/api/autohub/verify-sap-setup');
+            document.getElementById('ah-company').textContent = r.company || '—';
+            document.getElementById('ah-dot').className = 'status-dot ' + (r.connected && r.all_ok ? 'ok' : 'bad');
+            if (!r.connected) {
+                document.getElementById('ah-detail').innerHTML = '<span class="pill pill-red">not connected</span> ' + esc(r.error || '');
+            } else {
+                document.getElementById('ah-checks').innerHTML = (r.checks || []).map(c =>
+                    '<div class="kv"><span class="k"><span class="pill ' + (c.ok ? 'pill-green' : 'pill-red') + '">' +
+                    (c.ok ? '✓' : '✗') + '</span> ' + esc(c.name) + '</span><span class="v">' + esc(c.detail) + '</span></div>').join('');
+                document.getElementById('ah-detail').innerHTML = r.all_ok
+                    ? '<span class="pill pill-green">ready</span> All checks passed — safe to bulk-create.'
+                    : '<span class="pill pill-red">issues found</span> Fix the ✗ items in SAP before bulk-create.';
+            }
+        } catch (e) {
+            document.getElementById('ah-dot').className = 'status-dot bad';
+            document.getElementById('ah-detail').textContent = 'Verify failed: ' + e.message;
+        }
+        btn.disabled = false;
+    }
+
     document.getElementById('btn-ping').addEventListener('click', pingBoth);
     document.getElementById('btn-tax-refresh').addEventListener('click', taxRefresh);
     document.getElementById('btn-tax-reload').addEventListener('click', taxReload);
     document.getElementById('btn-wq-refresh').addEventListener('click', wqRefresh);
     document.getElementById('btn-wq-retry').addEventListener('click', wqRetry);
+    document.getElementById('btn-ah-verify').addEventListener('click', ahVerify);
 
     // initial load
     pingBoth();

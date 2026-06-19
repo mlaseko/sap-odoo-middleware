@@ -237,6 +237,7 @@ builder.Services.AddScoped<IPartsReviewRepository, PartsReviewRepository>();
 builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
 builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();
 builder.Services.AddScoped<PartsItemCreationService>();
+builder.Services.AddSingleton<AutohubSapSetupVerifier>();   // read-only SAP pre-flight (MSSQL)
 
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
