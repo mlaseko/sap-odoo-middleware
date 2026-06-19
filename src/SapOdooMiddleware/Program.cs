@@ -54,8 +54,20 @@ builder.Services.Configure<WebhookQueueSettings>(builder.Configuration.GetSectio
 // --- Services ---
 #if WINDOWS_BUILD
 builder.Services.AddSingleton<ISapB1Service, SapB1DiApiService>();
+// Autohub items are created in a SEPARATE SAP company (Companies:Autohub:SapB1, e.g. "Molas Live 2021").
+// Second, independent DI-API connection (its own license seat); resolved only by Autohub provisioning.
+builder.Services.AddSingleton<IAutohubSapB1Service>(sp =>
+{
+    var companies = sp.GetRequiredService<IOptions<CompaniesOptions>>().Value;
+    var cfg = companies.Companies.TryGetValue(CompanyContext.AutohubKey, out var c) ? c.SapB1 : null;
+    if (cfg is null || string.IsNullOrWhiteSpace(cfg.CompanyDb) || string.IsNullOrWhiteSpace(cfg.Server))
+        throw new InvalidOperationException(
+            "Companies:Autohub:SapB1 (Server/CompanyDb) is not configured — required to create Autohub items in their own company.");
+    return new AutohubSapB1DiApiService(Options.Create(cfg), sp.GetRequiredService<ILogger<SapB1DiApiService>>());
+});
 #else
 builder.Services.AddSingleton<ISapB1Service, SapB1DiApiServiceStub>();
+builder.Services.AddSingleton<IAutohubSapB1Service, AutohubSapB1DiApiServiceStub>();
 #endif
 
 builder.Services.AddHttpClient<IOdooService, OdooJsonRpcService>();

@@ -4888,3 +4888,18 @@ SELECT SUM(OnHand * ValuationPriceTZS) AS TotalValue FROM Valuation";
         }
     }
 }
+
+/// <summary>
+/// SAP B1 DI-API service bound to the <b>Autohub</b> company (<c>Companies:Autohub:SapB1</c>) — a
+/// second, independent persistent connection to a separate company (e.g. "Molas Live 2021"). Behaves
+/// exactly like <see cref="SapB1DiApiService"/>; only the configured company differs. Autohub
+/// item provisioning resolves this via <see cref="IAutohubSapB1Service"/>.
+/// </summary>
+[System.Runtime.Versioning.SupportedOSPlatform("windows")]
+public sealed class AutohubSapB1DiApiService : SapB1DiApiService, IAutohubSapB1Service
+{
+    public AutohubSapB1DiApiService(IOptions<SapB1Settings> settings, ILogger<SapB1DiApiService> logger)
+        : base(settings, logger)
+    {
+    }
+}
