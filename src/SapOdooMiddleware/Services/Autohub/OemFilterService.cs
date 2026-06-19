@@ -38,27 +38,45 @@ public sealed class OemFilterService : IOemFilterService
     private static readonly Regex EngineSizePattern = new(
         @"^\d+(\.\d+)?L$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    // 4–20 chars, uppercase alphanumerics plus dash/space, starting alphanumeric.
+    // 4–20 chars, uppercase alphanumerics plus dash, starting alphanumeric. (Run per token, after
+    // splitting — so a token no longer carries embedded spaces.)
     private static readonly Regex OemTokenPattern = new(
-        @"^[A-Z0-9][A-Z0-9\-\s]{3,19}$", RegexOptions.Compiled);
+        @"^[A-Z0-9][A-Z0-9\-]{3,19}$", RegexOptions.Compiled);
+
+    // OemNumbers elements arrive as multi-token strings straight from invoice text, e.g.
+    // "3.0L Diesel LR097157 LR029146 LR074623". Split each element into individual tokens so the real
+    // OE codes aren't discarded as one un-matchable blob. Separators: whitespace, comma, semicolon, slash.
+    private static readonly Regex TokenSeparator = new(@"[\s,;/]+", RegexOptions.Compiled);
+
+    private static readonly char[] EdgePunctuation = { '(', ')', '[', ']', '.', ',', ';', ':', '\'', '"' };
 
     public OemFilterResult Filter(IReadOnlyList<string> rawOems, string? supplierArticleNumber, string? brand)
     {
         var clean = new List<string>();
         var noise = new List<string>();
+        var seen  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var raw in rawOems ?? Array.Empty<string>())
         {
-            var token = raw?.Trim() ?? "";
-            if (token.Length == 0)
+            if (string.IsNullOrWhiteSpace(raw))
                 continue;
 
-            if (NoiseBlacklist.Contains(token) || EngineSizePattern.IsMatch(token))
-                noise.Add(token);
-            else if (OemTokenPattern.IsMatch(token) && token.Any(char.IsDigit))
-                clean.Add(token);
-            else
-                noise.Add(token);
+            foreach (var piece in TokenSeparator.Split(raw))
+            {
+                var token = piece.Trim().Trim(EdgePunctuation).Trim();
+                if (token.Length == 0)
+                    continue;
+
+                if (NoiseBlacklist.Contains(token) || EngineSizePattern.IsMatch(token))
+                    noise.Add(token);
+                else if (OemTokenPattern.IsMatch(token) && token.Any(char.IsDigit))
+                {
+                    if (seen.Add(token))           // dedupe across all elements
+                        clean.Add(token);
+                }
+                else
+                    noise.Add(token);
+            }
         }
 
         return new OemFilterResult
