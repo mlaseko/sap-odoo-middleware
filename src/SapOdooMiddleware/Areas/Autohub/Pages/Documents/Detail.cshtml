@@ -165,11 +165,12 @@
                     <details class="actions-menu">
                         <summary>⋮</summary>
                         <div class="menu">
+                            <button type="button" data-action="automatch">Auto-match (retry)</button>
                             @if (l.ReviewStatus == "needs_confirmation")
                             {
                                 <button type="button" data-action="confirm">Confirm match…</button>
                             }
-                            <button type="button" data-action="match">Match…</button>
+                            <button type="button" data-action="match">Manual match…</button>
                             <button type="button" data-action="create_new">Create New (enrich)</button>
                             <button type="button" data-action="skip">Skip</button>
                             @if (l.ReviewStatus == "skip")
@@ -331,8 +332,11 @@
             const action = btn.dataset.action;
             const details = btn.closest('details'); if (details) details.open = false;
             try {
-                if (action === 'match') {
-                    const sku = prompt('SAP item code to match this line to:');
+                if (action === 'automatch') {
+                    const updated = await api('POST', '/lines/' + lineId + '/auto-match');
+                    if (updated) setRowPill(row, updated.review_status);
+                } else if (action === 'match') {
+                    const sku = prompt('Manual match — enter the SAP item code (verified against the Autohub company):');
                     if (!sku) return;
                     const updated = await api('POST', '/lines/' + lineId + '/match', { item_code: sku });
                     if (updated) setRowPill(row, updated.review_status);

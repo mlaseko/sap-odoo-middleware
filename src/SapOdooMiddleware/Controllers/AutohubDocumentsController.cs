@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Ingestion;
 using SapOdooMiddleware.Persistence;
+using SapOdooMiddleware.Services;
 using SapOdooMiddleware.Services.Autohub;
 
 namespace SapOdooMiddleware.Controllers;
@@ -22,6 +23,7 @@ public class AutohubDocumentsController : ControllerBase
     private readonly IEnrichmentResultRouter _router;
     private readonly IOemFilterService _oemFilter;
     private readonly PartsItemCreationService _itemCreation;
+    private readonly IAutohubSapB1Service _sap;   // Autohub company (Molas Live 2021) connection
 
     public AutohubDocumentsController(
         IStagingPartsDocumentRepository docs,
@@ -31,7 +33,8 @@ public class AutohubDocumentsController : ControllerBase
         IEnrichmentService enrichment,
         IEnrichmentResultRouter router,
         IOemFilterService oemFilter,
-        PartsItemCreationService itemCreation)
+        PartsItemCreationService itemCreation,
+        IAutohubSapB1Service sap)
     {
         _docs = docs;
         _review = review;
@@ -41,6 +44,7 @@ public class AutohubDocumentsController : ControllerBase
         _router = router;
         _oemFilter = oemFilter;
         _itemCreation = itemCreation;
+        _sap = sap;
     }
 
     private string CurrentUser => HttpContext.User?.Identity?.Name is { Length: > 0 } n ? n : "operator";
@@ -124,12 +128,62 @@ public class AutohubDocumentsController : ControllerBase
         return null;
     }
 
+    /// <summary>Manual match: the operator types a SAP item code. Verified against the Autohub company.</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/match")]
     public async Task<IActionResult> MatchLine(Guid documentId, Guid lineId, [FromBody] PartsMatchRequest body, CancellationToken ct)
     {
         if (await GuardLine(documentId, lineId, ct) is { } err) return err;
         if (string.IsNullOrWhiteSpace(body.ItemCode)) return BadRequest(new { error = "item_code is required." });
-        await _review.SetReviewStatusAsync(lineId, "matched", body.ItemCode.Trim(), ct);
+        var itemCode = body.ItemCode.Trim();
+
+        // Verify the item exists in the Autohub SAP company before marking matched — otherwise a typo (or
+        // matching before the item is created) leaves the line "matched" to a code SAP doesn't have.
+        bool exists;
+        try
+        {
+            exists = await _sap.ItemExistsAsync(itemCode);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                new { error = $"Could not verify '{itemCode}' in the Autohub SAP company (service unavailable): {ex.Message}" });
+        }
+        if (!exists)
+            return BadRequest(new { error = $"Item '{itemCode}' does not exist in the Autohub SAP company. Use 'Create New' to create it instead." });
+
+        await _review.SetReviewStatusAsync(lineId, "matched", itemCode, ct);
+        return Ok(await _review.GetByIdAsync(lineId, ct));
+    }
+
+    /// <summary>Re-run the Tier-1/2 auto-matcher for a SINGLE line (e.g. a 'needs manual' line), applying
+    /// the decision. Lets the operator retry auto-match on one row without touching the rest.</summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/auto-match")]
+    public async Task<IActionResult> AutoMatchLine(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        var line = await _review.GetByIdAsync(lineId, ct);
+        if (line is null) return NotFound();
+
+        var candidate = new PartsLineMatchCandidate(
+            line.Id, line.DocumentId, line.OemNumbers, line.SupplierArticleNumber, line.IsPromotional, line.Brand);
+        var decision = await _autoMatch.DecideAsync(candidate, ct);
+
+        switch (decision.Status)
+        {
+            case "matched":
+                await _review.SetReviewStatusAsync(lineId, "matched", decision.ItemCode, ct);
+                break;
+            case "skip":
+                await _review.SetReviewStatusAsync(lineId, "skip", null, ct);
+                break;
+            case "needs_confirmation":
+                var d = decision.SuggestedDonor;
+                await _review.SetNeedsConfirmationAsync(lineId, d?.ItemCode, d?.OitmId, d?.SupplierName, decision.MatchStrategy, ct);
+                break;
+            default:   // no match — return to the pending → enrichment pipeline
+                await _review.SetReviewStatusAsync(lineId, "pending", null, ct);
+                break;
+        }
         return Ok(await _review.GetByIdAsync(lineId, ct));
     }
 
