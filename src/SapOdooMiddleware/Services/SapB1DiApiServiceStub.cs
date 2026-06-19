@@ -9,7 +9,7 @@ namespace SapOdooMiddleware.Services;
 /// It is used only for builds where the SAPbobsCOM COM reference is unavailable
 /// (e.g. Linux CI, development on macOS).
 /// </summary>
-internal sealed class SapB1DiApiServiceStub : ISapB1Service
+internal class SapB1DiApiServiceStub : ISapB1Service
 {
     public Task<SapB1PingResponse> PingAsync() =>
         throw new PlatformNotSupportedException(
@@ -150,4 +150,9 @@ internal sealed class SapB1DiApiServiceStub : ISapB1Service
     public Task UpdateBlankFieldsAsync(string itemCode, SapLubesItemRequest desired, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+}
+
+/// <summary>Non-Windows stub for the Autohub-company SAP connection (<see cref="IAutohubSapB1Service"/>).</summary>
+internal sealed class AutohubSapB1DiApiServiceStub : SapB1DiApiServiceStub, IAutohubSapB1Service
+{
 }

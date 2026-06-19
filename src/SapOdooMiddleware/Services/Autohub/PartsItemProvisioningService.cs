@@ -29,14 +29,16 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
     private readonly IPricingCalculationService _pricing;
     private readonly ISkuGenerationService _sku;
     private readonly IOemFilterService _filter;
-    private readonly ISapB1Service _sap;
+    // Autohub items are created in the Autohub company (Companies:Autohub:SapB1), NOT the default Lubes
+    // company — so this is the Autohub-bound SAP connection, not the shared ISapB1Service.
+    private readonly IAutohubSapB1Service _sap;
     private readonly INeonBridgeService _bridge;
     private readonly IPartsReviewRepository _review;
     private readonly ILogger<PartsItemProvisioningService> _logger;
 
     public PartsItemProvisioningService(
         IEnrichmentService enrichment, IForexConversionService forex, IPricingCalculationService pricing,
-        ISkuGenerationService sku, IOemFilterService filter, ISapB1Service sap, INeonBridgeService bridge,
+        ISkuGenerationService sku, IOemFilterService filter, IAutohubSapB1Service sap, INeonBridgeService bridge,
         IPartsReviewRepository review, ILogger<PartsItemProvisioningService> logger)
     {
         _enrichment = enrichment;
