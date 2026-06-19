@@ -164,8 +164,10 @@ public class AutohubDocumentsController : ControllerBase
         var line = await _review.GetByIdAsync(lineId, ct);
         if (line is null) return NotFound();
 
+        var doc = await _docs.GetByIdAsync(documentId, ct);   // for the document-supplier brand fallback
         var candidate = new PartsLineMatchCandidate(
-            line.Id, line.DocumentId, line.OemNumbers, line.SupplierArticleNumber, line.IsPromotional, line.Brand);
+            line.Id, line.DocumentId, line.OemNumbers, line.SupplierArticleNumber, line.IsPromotional,
+            line.Brand, doc?.SupplierName);
         var decision = await _autoMatch.DecideAsync(candidate, ct);
 
         switch (decision.Status)
@@ -302,7 +304,7 @@ public class AutohubDocumentsController : ControllerBase
         int newlyMatched = 0, needsConfirmation = 0, stillPending = 0;
         foreach (var l in pending)
         {
-            var candidate = new PartsLineMatchCandidate(l.Id, l.DocumentId, l.OemNumbers, l.SupplierArticleNumber, l.IsPromotional, l.Brand);
+            var candidate = new PartsLineMatchCandidate(l.Id, l.DocumentId, l.OemNumbers, l.SupplierArticleNumber, l.IsPromotional, l.Brand, doc.SupplierName);
             var decision = await _autoMatch.DecideAsync(candidate, ct);
             switch (decision.Status)
             {

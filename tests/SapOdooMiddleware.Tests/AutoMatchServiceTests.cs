@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Services.Autohub;
 
@@ -28,10 +29,11 @@ public class AutoMatchServiceTests
     private static OitmMatch Art(string code, string? supplier) => new(code, 2, supplier, "article_number");
 
     private static PartsLineMatchCandidate Line(
-        IEnumerable<string>? oems = null, string? article = null, bool promo = false, string? brand = null)
-        => new(Guid.NewGuid(), Guid.NewGuid(), (oems ?? Array.Empty<string>()).ToList(), article, promo, brand);
+        IEnumerable<string>? oems = null, string? article = null, bool promo = false, string? brand = null,
+        string? docSupplier = null)
+        => new(Guid.NewGuid(), Guid.NewGuid(), (oems ?? Array.Empty<string>()).ToList(), article, promo, brand, docSupplier);
 
-    private static AutoMatchService Build(FakeOitm oitm) => new(oitm, new OemFilterService());
+    private static AutoMatchService Build(FakeOitm oitm) => new(oitm, new OemFilterService(), NullLogger<AutoMatchService>.Instance);
 
     [Fact]
     public async Task Promotional_IsSkipped()
@@ -105,5 +107,62 @@ public class AutoMatchServiceTests
         Assert.Equal("matched", d.Status);
         Assert.Equal("LR100200", d.ItemCode);
         Assert.Equal("GL0010", oitm.LastArticle);
+    }
+
+    // ---- Document-supplier brand fallback (blank line.Brand) ----
+
+    [Fact]
+    public async Task BlankBrand_DocSupplier_DifferentSupplierDonor_FallsThroughTier1()
+    {
+        // GJ0198: line.Brand blank, document supplier 'Germax'; Tier-1 OEM donor is an OE-supplier item.
+        // Effective brand 'Germax' ≠ 'OE' → DifferentSupplier → fall through Tier 1 (NOT needs_confirmation).
+        var oitm = new FakeOitm { ByOem = Oem("LR100602", "OE"), ByArticle = null };
+        var d = await Build(oitm).DecideAsync(
+            Line(oems: new[] { "LR097157", "LR029146" }, article: "GJ0198", brand: "", docSupplier: "Germax"),
+            CancellationToken.None);
+
+        Assert.Equal("pending", d.Status);          // fell through, no Tier-2 hit
+        Assert.Null(d.ItemCode);
+    }
+
+    [Fact]
+    public async Task BlankBrand_DocSupplier_Tier2SameSupplier_Matches()
+    {
+        // Same line, but Tier 2 now finds the Germax-supplier variant → matched via tier2_article.
+        var oitm = new FakeOitm { ByOem = Oem("LR100602", "OE"), ByArticle = Art("LR100746", "GERMAX") };
+        var d = await Build(oitm).DecideAsync(
+            Line(oems: new[] { "LR097157", "LR029146" }, article: "GJ0198", brand: "", docSupplier: "Germax"),
+            CancellationToken.None);
+
+        Assert.Equal("matched", d.Status);
+        Assert.Equal("LR100746", d.ItemCode);
+        Assert.Equal("tier2_article", d.MatchStrategy);
+    }
+
+    [Fact]
+    public async Task NonEmptyBrand_StillWins_Tier1SameSupplier_NoRegression()
+    {
+        // Explicit line.Brand takes precedence; the document supplier is ignored.
+        var oitm = new FakeOitm { ByOem = Oem("X100", "BOSCH") };
+        var d = await Build(oitm).DecideAsync(
+            Line(oems: new[] { "0986452041" }, article: "A1", brand: "BOSCH", docSupplier: "Germax"),
+            CancellationToken.None);
+
+        Assert.Equal("matched", d.Status);
+        Assert.Equal("X100", d.ItemCode);
+        Assert.Equal("tier1_oem", d.MatchStrategy);
+    }
+
+    [Fact]
+    public async Task BlankBrand_NoDocSupplier_StillNeedsConfirmation_NoRegression()
+    {
+        // Both blank → NoBrandOnInvoice → needs_confirmation off the OEM donor (unchanged behaviour).
+        var oitm = new FakeOitm { ByOem = Oem("LR100602", "OE") };
+        var d = await Build(oitm).DecideAsync(
+            Line(oems: new[] { "LR097157" }, article: "GJ0198", brand: "", docSupplier: null),
+            CancellationToken.None);
+
+        Assert.Equal("needs_confirmation", d.Status);
+        Assert.Equal("LR100602", d.SuggestedDonor?.ItemCode);
     }
 }
