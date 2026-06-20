@@ -69,6 +69,16 @@ public class LineValidatorTests
     }
 
     [Fact]
+    public void GermaxGjSku_IsPreserved_NoAmbiguityWarning()
+    {
+        // GJ#### is a Germax SKU series (GJ0248, GJ0416…). It is OEM-shaped but a known supplier prefix,
+        // so it must be kept as-is with no sku_ambiguous_both_populated warning — even when OEMs exist.
+        var r = V.Validate(Line(sku: "GJ0248", oems: new[] { "LR011694" }));
+        Assert.Equal("GJ0248", r.Line.SupplierArticleNumber);
+        Assert.Empty(r.Issues);
+    }
+
+    [Fact]
     public void Quantity_RecoveredFromArithmetic()
     {
         // qty looks like an invoice row number (162); 270 / 45 = 6 is the real quantity.

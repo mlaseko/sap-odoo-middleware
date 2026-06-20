@@ -46,7 +46,12 @@ public sealed class PartsLineMatchRepository : IPartsLineMatchRepository
             SELECT l."Id", l."DocumentId", l."OemNumbers", l."SupplierArticleNumber", l."IsPromotional", l."Brand", d."SupplierName"
             FROM public."staging_document_line" l
             JOIN public."staging_document" d ON d."Id" = l."DocumentId"
+            -- Only lines enrichment has NOT yet routed: once EnrichmentSource is set the line already
+            -- has an outcome (matched / needs_manual / ready-but-pending), so the matcher must stop
+            -- re-touching it — otherwise enriched-but-still-'pending' create-new candidates get
+            -- re-evaluated every poll forever (the 10s AutoMatch loop). On-demand re-match stays per-line.
             WHERE l."ReviewStatus" = 'pending' AND d."Status" = 'extracted'
+              AND l."EnrichmentSource" IS NULL
             ORDER BY d."ExtractedAt" NULLS LAST, l."LineNumber"
             LIMIT @limit;
             """;

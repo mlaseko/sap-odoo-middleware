@@ -372,6 +372,32 @@ public class AutohubDocumentsController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// Manual create: create SAP items for the given lines using an operator-supplied item group + SKU
+    /// prefix, for parts DGX enrichment could not classify (no suggested group/prefix). Bypasses the
+    /// enrichment requirement; per-line is just this with a single id.
+    /// </summary>
+    [HttpPost("{documentId:guid}/bulk-create-manual")]
+    public async Task<IActionResult> BulkCreateManual(Guid documentId, [FromBody] BulkCreateManualRequest body, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(documentId, ct);
+        if (doc is null) return NotFound();
+        if (body?.LineIds is not { Count: > 0 }) return BadRequest(new { error = "lineIds is required." });
+        if (body.ItemsGroupCode <= 0) return BadRequest(new { error = "itemsGroupCode is required (a positive SAP item group)." });
+        if (string.IsNullOrWhiteSpace(body.SkuPrefix)) return BadRequest(new { error = "skuPrefix is required (e.g. 'LR')." });
+
+        var manual = new ManualItemOverride(
+            body.ItemsGroupCode, body.SkuPrefix.Trim().ToUpperInvariant(), body.Description, body.FitForAuto, body.ImageUrl);
+        var result = await _itemCreation.BulkCreateManualAsync(documentId, body.LineIds, manual, ct);
+        return Ok(new
+        {
+            attempted = result.Attempted,
+            created = result.Created,
+            failed = result.Failed,
+            failures = result.Failures.Select(f => new { lineId = f.LineId, articleNumber = f.ArticleNumber, error = f.Error })
+        });
+    }
+
     /// <summary>Transition the document to 'reviewed'. 409 if not extracted or lines not terminal.</summary>
     [HttpPost("{documentId:guid}/complete-review")]
     public async Task<IActionResult> CompleteReview(Guid documentId, CancellationToken ct)
@@ -399,6 +425,7 @@ public class AutohubDocumentsController : ControllerBase
         if (doc is null) return NotFound();
 
         var counts = await _review.GetStatusCountsAsync(documentId, ct);
+        var awaitingEnrichment = await _review.CountAwaitingEnrichmentAsync(documentId, ct);
         var canComplete = doc.Status == "extracted"
             && counts.GetValueOrDefault("pending") == 0
             && counts.GetValueOrDefault("create_failed") == 0
@@ -406,10 +433,12 @@ public class AutohubDocumentsController : ControllerBase
             && counts.GetValueOrDefault("needs_manual") == 0
             && counts.GetValueOrDefault("needs_confirmation") == 0;
 
-        return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, canComplete, status = doc.Status });
+        return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, awaitingEnrichment, canComplete, status = doc.Status });
     }
 }
 
 public sealed record PartsMatchRequest(string ItemCode);
+public sealed record BulkCreateManualRequest(
+    List<Guid> LineIds, int ItemsGroupCode, string SkuPrefix, string? Description, string? FitForAuto, string? ImageUrl);
 public sealed record CreateNewRequest(bool Confirmed);
 public sealed record UpdateLineRequest(decimal? Quantity, decimal? UnitPriceForeign, string? Description);

@@ -54,6 +54,9 @@ public interface IPartsReviewRepository
     /// <summary>Repoint a line at a different parts_catalog row (after a cross-supplier own-identity row is minted).</summary>
     Task UpdateNeonOitmIdAsync(Guid lineId, long neonOitmId, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>Count of lines still awaiting background enrichment (pending, not-yet-enriched, non-promotional) for one document.</summary>
+    Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct);
     Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
 
     /// <summary>Persist the full enrichment outcome (source, borrowed, neon_oitm_id, status, strategy, payload) on the line.</summary>
@@ -270,6 +273,24 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct)) counts[r.GetString(0)] = (int)r.GetInt64(1);
         return counts;
+    }
+
+    public async Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct)
+    {
+        // Same predicate the background enricher selects on (GetLinesNeedingEnrichmentAsync), scoped to
+        // one document: pending, not-yet-enriched, non-promotional lines still waiting for DGX.
+        const string sql = """
+            SELECT COUNT(*) FROM public."staging_document_line"
+            WHERE "DocumentId" = @doc
+              AND "ReviewStatus" = 'pending'
+              AND "EnrichmentSource" IS NULL
+              AND "IsPromotional" = false;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        var result = await cmd.ExecuteScalarAsync(ct);
+        return result is null or DBNull ? 0 : Convert.ToInt32(result);
     }
 
     public async Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct)

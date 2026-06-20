@@ -42,6 +42,14 @@ public interface INeonBridgeService
     /// <see cref="NeonBridgeLinkResult"/> the caller logs (a throw here could provoke a duplicate on retry).
     /// </summary>
     Task<NeonBridgeLinkResult> LinkAsync(int neonOitmId, string sapItemCode, CancellationToken ct);
+
+    /// <summary>
+    /// Manual create (no donor): INSERT a fresh own-identity <c>oitm</c> row for a newly-created SAP item,
+    /// plus its OEM cross-references, so future invoices for this (supplier, article) auto-match instead of
+    /// landing in needs_manual. Returns the new oitm id (or null if the insert produced no row).
+    /// </summary>
+    Task<long?> CreateFreshRowAsync(string sapItemCode, string articleNumber, string? supplierName,
+        IReadOnlyList<string> oemNumbers, string source, CancellationToken ct);
 }
 
 /// <summary>
@@ -189,5 +197,57 @@ public sealed class NeonBridgeService : INeonBridgeService
             "Neon bridge: oitm id {OitmId} already linked to '{Existing}', refusing to overwrite with '{New}'. Likely a duplicate SAP item — reconcile.",
             neonOitmId, current, sapItemCode);
         return new NeonBridgeLinkResult(NeonBridgeLinkStatus.BlockedByExisting, current);
+    }
+
+    public async Task<long?> CreateFreshRowAsync(string sapItemCode, string articleNumber, string? supplierName,
+        IReadOnlyList<string> oemNumbers, string source, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        var canonicalOem = oemNumbers.Count > 0 ? oemNumbers[0] : null;
+
+        const string insert = """
+            INSERT INTO oitm (article_number, supplier_name, canonical_oem_number, item_code, tecdoc_article_id, source)
+            VALUES (@article, @supplier, @canonical, @itemCode, NULL, @source)
+            RETURNING id;
+            """;
+        long newId;
+        await using (var cmd = new NpgsqlCommand(insert, conn))
+        {
+            cmd.Parameters.AddWithValue("article", articleNumber);
+            cmd.Parameters.AddWithValue("supplier", (object?)supplierName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("canonical", (object?)canonicalOem ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("itemCode", sapItemCode);
+            cmd.Parameters.AddWithValue("source", source);
+            var res = await cmd.ExecuteScalarAsync(ct);
+            if (res is null or DBNull)
+            {
+                _logger.LogWarning("Manual create: fresh oitm insert for {Code} produced no row.", sapItemCode);
+                return null;
+            }
+            newId = Convert.ToInt64(res);
+        }
+
+        // Carry the line's OEM numbers as cross-references so Tier-1 OEM auto-match finds the item later.
+        if (oemNumbers.Count > 0)
+        {
+            const string xref = """
+                INSERT INTO oitm_cross_reference (oitm_id, oem_number, reference_type)
+                VALUES (@id, @oem, 'oem');
+                """;
+            foreach (var oem in oemNumbers)
+            {
+                await using var cmd = new NpgsqlCommand(xref, conn);
+                cmd.Parameters.AddWithValue("id", newId);
+                cmd.Parameters.AddWithValue("oem", oem);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
+        }
+
+        _logger.LogInformation(
+            "Manual create: minted fresh oitm {NewId} (supplier {Supplier}, ItemCode {Code}, {OemCount} OEM ref(s)).",
+            newId, supplierName, sapItemCode, oemNumbers.Count);
+        return newId;
     }
 }
