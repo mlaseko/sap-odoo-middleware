@@ -60,5 +60,5 @@ public static class ExcelTemplateSchema
     /// with one of these is treated as an OEM that bled into the SKU column (see <c>LineValidator</c>).
     /// </summary>
     public static readonly string[] KnownSkuPrefixes =
-        { "GL", "GLR", "GLD", "GLW", "GLEV", "GLRV", "GW", "TAN", "VK" };
+        { "GL", "GLR", "GLD", "GLW", "GLEV", "GLRV", "GJ", "GW", "TAN", "VK" };
 }

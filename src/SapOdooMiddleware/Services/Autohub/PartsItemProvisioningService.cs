@@ -9,9 +9,23 @@ namespace SapOdooMiddleware.Services.Autohub;
 /// <summary>Per-line provisioning outcome. Status ∈ {created, failed, needs_confirmation}.</summary>
 public sealed record PartsProvisioningOutcome(string Status, string? ItemCode, string? Error);
 
+/// <summary>
+/// Operator-supplied values for manual creation, used when DGX enrichment could not classify the part
+/// (no <c>suggested_itms_grp_cod</c> / <c>suggested_sku_prefix</c>). Lets the operator pick the SAP item
+/// group and brand prefix directly so the line can still be created.
+/// </summary>
+public sealed record ManualItemOverride(int ItemsGroupCode, string SkuPrefix, string? Description, string? FitForAuto, string? ImageUrl);
+
 public interface IPartsItemProvisioningService
 {
     Task<PartsProvisioningOutcome> ProvisionAsync(PartsProvisioningLine line, string? currency, CancellationToken ct);
+
+    /// <summary>
+    /// Create a SAP item from operator-supplied item group + SKU prefix, bypassing the enrichment
+    /// <c>item_data</c>/group requirement (for parts DGX can't classify). Mirrors a fresh own-identity
+    /// Neon row so future invoices auto-match it. Persists its own created/failed outcome.
+    /// </summary>
+    Task<PartsProvisioningOutcome> ProvisionManualAsync(PartsProvisioningLine line, string? currency, ManualItemOverride manual, CancellationToken ct);
 }
 
 /// <summary>
@@ -200,6 +214,88 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         }
 
         await _review.RecordCreatedAsync(line.Id, itemCode, prices.Cost, prices.Retail, prices.Wholesale, rate, ct);
+        return new PartsProvisioningOutcome("created", itemCode, null);
+    }
+
+    /// <summary>
+    /// Manual create: the operator supplies the SAP item group + prefix that enrichment couldn't.
+    /// Self-contained (parallel to <see cref="ProvisionAsync"/>, NOT a refactor of it, so the proven
+    /// enrichment path stays byte-identical): validate → forex → price → allocate SKU → write OITM →
+    /// mint a fresh Neon mirror row (no donor) so future invoices auto-match. No DGX call, no
+    /// enrichment-confirmation gate. Persists its own created/failed outcome.
+    /// </summary>
+    public async Task<PartsProvisioningOutcome> ProvisionManualAsync(
+        PartsProvisioningLine line, string? currency, ManualItemOverride manual, CancellationToken ct)
+    {
+        var article = line.SupplierArticleNumber?.Trim();
+        if (string.IsNullOrWhiteSpace(article))
+            return await Fail(line.Id, "Line has no supplier article number.", ct);
+        if (line.UnitPriceForeign is not > 0m)
+            return await Fail(line.Id, "Line has no positive unit price.", ct);
+        if (string.IsNullOrWhiteSpace(currency))
+            return await Fail(line.Id, "Document currency is unknown; cannot convert cost.", ct);
+        if (manual.ItemsGroupCode <= 0)
+            return await Fail(line.Id, "A SAP item group is required for manual creation.", ct);
+
+        var prefix = string.IsNullOrWhiteSpace(manual.SkuPrefix) ? "GEN" : manual.SkuPrefix.Trim();
+        var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
+
+        decimal costTzs;
+        try
+        {
+            costTzs = await _forex.ConvertToTzsAsync(line.UnitPriceForeign.Value, currency!, DateTime.UtcNow, ct);
+        }
+        catch (Exception ex)
+        {
+            return await Fail(line.Id, $"Forex conversion failed: {ex.Message}", ct);
+        }
+        var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
+
+        var prices = await _pricing.CalculateAsync(costTzs, line.Brand ?? "", ct);
+
+        // Same atomic-counter caveat as ProvisionAsync: the number is burned even if the SAP write fails.
+        var itemCode = await _sku.GenerateAsync(prefix, ct);
+        var itemName = BuildItemName(filtered, article!);
+
+        var sapReq = new SapAutohubItemRequest(
+            ItemCode: itemCode,
+            ItemName: itemName,
+            ItemsGroupCode: manual.ItemsGroupCode,
+            CostPrice: prices.Cost,
+            RetailPrice: prices.Retail,
+            WholesalePrice: prices.Wholesale,
+            ArticleNumber: article!,
+            Description: manual.Description ?? line.Description,
+            FitForAuto: manual.FitForAuto,
+            ImageUrl: manual.ImageUrl);
+
+        try
+        {
+            await _sap.CreateAutohubItemAsync(sapReq);
+        }
+        catch (Exception ex)
+        {
+            return await Fail(line.Id, $"SAP item write failed: {ex.Message}", ct);
+        }
+
+        // Mirror a fresh own-identity Neon row (no donor to copy from) so future invoices for this
+        // (supplier, article) auto-match instead of repeatedly landing in needs_manual. Best-effort:
+        // the SAP item already exists, so a mirror failure must NOT fail the line (a retry would mint a
+        // duplicate). Log for reconcile.
+        try
+        {
+            var supplier = string.IsNullOrWhiteSpace(line.Brand) ? null : line.Brand;
+            await _bridge.CreateFreshRowAsync(itemCode, article!, supplier, filtered, "manual_create", ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Manual create: SAP item {ItemCode} created but the Neon mirror insert failed; reconcile required.", itemCode);
+        }
+
+        await _review.RecordCreatedAsync(line.Id, itemCode, prices.Cost, prices.Retail, prices.Wholesale, rate, ct);
+        _logger.LogInformation("Manual create: line {LineId} → SAP item {ItemCode} (group {Group}, prefix {Prefix}).",
+            line.Id, itemCode, manual.ItemsGroupCode, prefix);
         return new PartsProvisioningOutcome("created", itemCode, null);
     }
 

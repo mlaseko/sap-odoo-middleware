@@ -78,6 +78,70 @@ public sealed class PartsItemCreationService
 
         return new PartsBulkCreateResult(toCreate.Count, created, needsConfirmation, failures.Count, failures);
     }
+
+    /// <summary>
+    /// Manual create for the given lines using an operator-supplied SAP item group + SKU prefix (for parts
+    /// DGX couldn't classify). Same sequential/timeout/continue-on-failure shape as <see cref="BulkCreateAsync"/>.
+    /// Lines are taken as-is regardless of ReviewStatus (the operator chose them); enrichment is bypassed.
+    /// </summary>
+    public async Task<PartsBulkCreateResult> BulkCreateManualAsync(
+        Guid documentId, IReadOnlyList<Guid> lineIds, ManualItemOverride manual, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(documentId, ct);
+        var currency = doc?.Currency;
+
+        int created = 0;
+        var failures = new List<PartsBulkCreateFailure>();
+
+        foreach (var lineId in lineIds)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var row = await _review.GetByIdAsync(lineId, ct);
+            if (row is null || row.DocumentId != documentId)
+            {
+                failures.Add(new PartsBulkCreateFailure(lineId, null, "line not found in this document"));
+                continue;
+            }
+
+            // Manual create ignores enrichment, so the donor/payload fields are null by design.
+            var provLine = new PartsProvisioningLine(
+                Id: row.Id, SupplierArticleNumber: row.SupplierArticleNumber, OemNumbers: row.OemNumbers,
+                Brand: row.Brand, Description: row.Description, UnitPriceForeign: row.UnitPriceForeign,
+                EnrichmentConfirmed: false, NeonOitmId: null, EnrichmentPayloadJson: null, MatchStrategy: row.MatchStrategy);
+
+            try
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(PerItemTimeout);
+
+                var outcome = await _provisioning.ProvisionManualAsync(provLine, currency, manual, timeoutCts.Token);
+                if (outcome.Status == "created") created++;
+                else failures.Add(new PartsBulkCreateFailure(lineId, row.SupplierArticleNumber, outcome.Error ?? "failed"));
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw; // host shutdown — abort the batch
+            }
+            catch (OperationCanceledException)
+            {
+                await _review.RecordCreateFailedAsync(lineId, $"Timed out after {PerItemTimeout.TotalSeconds:N0}s.", ct);
+                failures.Add(new PartsBulkCreateFailure(lineId, row.SupplierArticleNumber, "timed out"));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Manual bulk-create failed for line {LineId} (article {Article}).", lineId, row.SupplierArticleNumber);
+                await _review.RecordCreateFailedAsync(lineId, ex.Message, ct);
+                failures.Add(new PartsBulkCreateFailure(lineId, row.SupplierArticleNumber, ex.Message));
+            }
+        }
+
+        _logger.LogInformation(
+            "Autohub manual bulk-create for {Id}: attempted {Attempted}, created {Created}, failed {Failed} (group {Group}, prefix {Prefix}).",
+            documentId, lineIds.Count, created, failures.Count, manual.ItemsGroupCode, manual.SkuPrefix);
+
+        return new PartsBulkCreateResult(lineIds.Count, created, 0, failures.Count, failures);
+    }
 }
 
 public record PartsBulkCreateResult(int Attempted, int Created, int NeedsConfirmation, int Failed, List<PartsBulkCreateFailure> Failures);
