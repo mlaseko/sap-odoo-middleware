@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Persistence;
+using SapOdooMiddleware.Services.Autohub;
 using SapOdooMiddleware.Services.Vision;
 
 namespace SapOdooMiddleware.Ingestion;
@@ -20,6 +21,7 @@ public class PartsExtractionJob
     private readonly IPdfPageRenderer                _renderer;
     private readonly IInvoicePartsExtractor          _extractor;
     private readonly PartsInvoiceValidator           _validator;
+    private readonly ILineValidator                  _lineValidator;
     private readonly VisionExtractorSettings         _settings;
     private readonly ILogger<PartsExtractionJob>     _logger;
 
@@ -29,16 +31,18 @@ public class PartsExtractionJob
         IPdfPageRenderer renderer,
         IInvoicePartsExtractor extractor,
         PartsInvoiceValidator validator,
+        ILineValidator lineValidator,
         IOptions<VisionExtractorSettings> settings,
         ILogger<PartsExtractionJob> logger)
     {
-        _docs      = docs;
-        _lines     = lines;
-        _renderer  = renderer;
-        _extractor = extractor;
-        _validator = validator;
-        _settings  = settings.Value;
-        _logger    = logger;
+        _docs          = docs;
+        _lines         = lines;
+        _renderer      = renderer;
+        _extractor     = extractor;
+        _validator     = validator;
+        _lineValidator = lineValidator;
+        _settings      = settings.Value;
+        _logger        = logger;
     }
 
     public async Task RunAsync(Guid documentId, CancellationToken ct)
@@ -107,6 +111,20 @@ public class PartsExtractionJob
                 return;
             }
 
+            // Defence-in-depth: run the shared per-line validator over the vision output (the SAME rules
+            // the Excel import applies) so obviously-broken SKUs/quantities are nulled or recovered from
+            // the line arithmetic before they reach matching/creation. Never fabricates — worst case a
+            // line is routed to manual review rather than corrupting SAP.
+            var lineIssues = new List<LineValidationIssue>();
+            var validatedLines = new List<(int pageNo, PartsInvoiceLine line)>(allLines.Count);
+            foreach (var (pageNo, line) in allLines)
+            {
+                var vr = _lineValidator.Validate(line);
+                lineIssues.AddRange(vr.Issues);
+                validatedLines.Add((pageNo, vr.Line));
+            }
+            allLines = validatedLines;
+
             // Persist lines (replace prior → idempotent re-extract), renumbering globally across pages.
             await _lines.DeleteByDocumentAsync(documentId, ct);
             var rows = allLines.Select((t, idx) => MapToRow(documentId, idx + 1, t.pageNo, t.line)).ToList();
@@ -121,6 +139,15 @@ public class PartsExtractionJob
             if (failedPages.Count > 0)
                 msgs.Add($"{failedPages.Count}/{pages.Count} page(s) failed: " +
                          string.Join("; ", failedPages.Select(p => $"page {p.PageNo}: {p.Error}")));
+            if (lineIssues.Count > 0)
+            {
+                var hist = lineIssues.GroupBy(i => i.Code).OrderByDescending(g => g.Count())
+                    .Select(g => $"{g.Key}: {g.Count()}");
+                var histText = string.Join(", ", hist);
+                _logger.LogInformation("Parts document {Id}: line validator corrected {Count} value(s) ({Hist}).",
+                    documentId, lineIssues.Count, histText);
+                msgs.Add($"{lineIssues.Count} line value(s) auto-corrected ({histText}).");
+            }
             var errorMessage = msgs.Count > 0 ? string.Join(" | ", msgs) : null;
 
             var rawJson = JsonSerializer.Serialize(rawByPage);

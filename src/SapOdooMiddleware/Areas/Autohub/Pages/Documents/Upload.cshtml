@@ -11,12 +11,50 @@
 
 @if (Model.Error is not null)
 {
-    <div class="error">@Model.Error</div>
+    <div class="error">
+        @Model.Error
+        @if (Model.ExistingDocumentId is not null)
+        {
+            <a href="/autohub/documents/@Model.ExistingDocumentId">Open the existing document →</a>
+        }
+    </div>
+}
+
+@if (Model.ExcelErrors is { Count: > 0 })
+{
+    <div class="card" style="max-width:680px;border-left:3px solid #ef4444;">
+        <p class="card-title">Excel import errors</p>
+        <table class="table" style="width:100%;">
+            <thead><tr><th style="text-align:left;">Row</th><th style="text-align:left;">Field</th><th style="text-align:left;">Issue</th></tr></thead>
+            <tbody>
+            @foreach (var e in Model.ExcelErrors)
+            {
+                <tr>
+                    <td>@(e.Row > 0 ? e.Row.ToString() : "—")</td>
+                    <td>@e.Field</td>
+                    <td>@e.Issue</td>
+                </tr>
+            }
+            </tbody>
+        </table>
+    </div>
 }
 
 <div class="card" style="max-width:560px;">
+    <p class="card-title">Upload Excel <span class="sub">(faster, recommended when available)</span></p>
+    <p class="sub">Deterministic, sub-second, no vision errors. Fill in the template, then upload it here.</p>
+    <p><a class="btn" href="?handler=ExcelTemplate">⬇ Download Excel template</a></p>
+    <form method="post" asp-page-handler="Excel" enctype="multipart/form-data">
+        <p><input type="file" name="Excel" accept=".xlsx" required /></p>
+        <div class="card-actions">
+            <button class="btn btn-primary" type="submit">Upload Excel</button>
+        </div>
+    </form>
+</div>
+
+<div class="card" style="max-width:560px;">
     <form method="post" enctype="multipart/form-data">
-        <p class="card-title">Choose a PDF</p>
+        <p class="card-title">Upload PDF <span class="sub">(uses vision extraction)</span></p>
         <p><input type="file" name="Pdf" accept=".pdf" required /></p>
         <div class="card-actions">
             <button class="btn btn-primary" type="submit">Upload &amp; extract</button>
