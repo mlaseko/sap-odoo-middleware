@@ -425,6 +425,7 @@ public class AutohubDocumentsController : ControllerBase
         if (doc is null) return NotFound();
 
         var counts = await _review.GetStatusCountsAsync(documentId, ct);
+        var awaitingEnrichment = await _review.CountAwaitingEnrichmentAsync(documentId, ct);
         var canComplete = doc.Status == "extracted"
             && counts.GetValueOrDefault("pending") == 0
             && counts.GetValueOrDefault("create_failed") == 0
@@ -432,7 +433,7 @@ public class AutohubDocumentsController : ControllerBase
             && counts.GetValueOrDefault("needs_manual") == 0
             && counts.GetValueOrDefault("needs_confirmation") == 0;
 
-        return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, canComplete, status = doc.Status });
+        return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, awaitingEnrichment, canComplete, status = doc.Status });
     }
 }
 

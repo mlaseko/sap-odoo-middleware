@@ -100,8 +100,16 @@ public sealed class AutoMatchWorker : BackgroundService
             }
         }
 
-        _logger.LogInformation(
-            "AutoMatch pass: {Matched} matched, {Skipped} skipped, {Confirm} needs-confirm, {Pending} left pending (of {Total}).",
-            matched, skipped, confirm, pending, candidates.Count);
+        // Only surface a pass at INFO when it actually changed something. A steady state of
+        // "N candidates, all still pending" produces an identical line every 10s forever (the loop the
+        // operator saw); log that at Debug so it stops spamming the operational log. The EnrichmentSource
+        // filter on the candidate query already drops enrichment-routed lines, so a persistent count here
+        // means lines genuinely awaiting a first match/enrichment pass.
+        if (matched + skipped + confirm > 0)
+            _logger.LogInformation(
+                "AutoMatch pass: {Matched} matched, {Skipped} skipped, {Confirm} needs-confirm, {Pending} left pending (of {Total}).",
+                matched, skipped, confirm, pending, candidates.Count);
+        else
+            _logger.LogDebug("AutoMatch pass: no changes, {Pending} still pending (of {Total}).", pending, candidates.Count);
     }
 }
