@@ -14,6 +14,7 @@ using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
 using SapOdooMiddleware.Services.Autohub;
+using SapOdooMiddleware.Services.Autohub.Excel;
 using SapOdooMiddleware.Services.Vision;
 using SapOdooMiddleware.Workers;
 
@@ -191,6 +192,13 @@ builder.Services.AddHttpClient<IInvoicePartsExtractor, HttpPartsInvoiceExtractor
 });
 builder.Services.AddSingleton<IPartsExtractionQueue, PartsExtractionQueue>();
 builder.Services.AddHostedService<PartsExtractionWorker>();
+
+// --- Autohub Excel invoice import (deterministic alternative to vision extraction) ---
+// The shared line validator is also injected into PartsExtractionJob (PDF path) as defence-in-depth.
+builder.Services.AddSingleton<ILineValidator, LineValidator>();
+builder.Services.AddSingleton<ExcelTemplateGenerator>();
+builder.Services.AddSingleton<ExcelInvoiceParser>();
+builder.Services.AddScoped<ExcelUploadHandler>();
 
 // --- Autohub Phase B foundation: pricing/forex/sku tables + pure services (no hosted service) ---
 builder.Services.Configure<AutohubPricingSettings>(builder.Configuration.GetSection(AutohubPricingSettings.SectionName));
