@@ -257,6 +257,15 @@ public class AutohubDocumentsController : ControllerBase
         return Ok(await _review.GetByIdAsync(lineId, ct));
     }
 
+    /// <summary>Flag a line 'needs_manual' (operator will match / manual-create / skip it). Available from any status.</summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/needs-manual")]
+    public async Task<IActionResult> MarkNeedsManual(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
+        return Ok(await _review.GetByIdAsync(lineId, ct));
+    }
+
     /// <summary>The persisted DGX enrichment for a line (detail panel). 204 if the line was never enriched.</summary>
     [HttpGet("{documentId:guid}/lines/{lineId:guid}/enrichment")]
     public async Task<IActionResult> GetLineEnrichment(Guid documentId, Guid lineId, CancellationToken ct)
@@ -366,6 +375,16 @@ public class AutohubDocumentsController : ControllerBase
         var doc = await _docs.GetByIdAsync(documentId, ct);
         if (doc is null) return NotFound();
         return Ok(new { reEnriched = await _review.BulkReenrichBlockersAsync(documentId, ct) });
+    }
+
+    /// <summary>Confirm all unconfirmed 'create_new' lines at once, so Bulk Create stops blocking on the
+    /// cross-supplier gate (review the borrowed lines first). Returns the count confirmed.</summary>
+    [HttpPost("{documentId:guid}/bulk-confirm-create-new")]
+    public async Task<IActionResult> BulkConfirmCreateNew(Guid documentId, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(documentId, ct);
+        if (doc is null) return NotFound();
+        return Ok(new { confirmed = await _review.BulkConfirmCreateNewAsync(documentId, CurrentUser, ct) });
     }
 
     [HttpPost("{documentId:guid}/bulk-create")]

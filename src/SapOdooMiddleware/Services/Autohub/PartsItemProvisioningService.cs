@@ -115,9 +115,14 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
 
         if (enr.ItemData is null)
             return await Fail(line.Id, "Enrichment returned no item data.", ct);
-        if (enr.ConfirmationRequired && !line.EnrichmentConfirmed)
+        // Only a GENUINE cross-supplier borrow (another supplier's data applied to our item) needs operator
+        // sign-off before creating — same-supplier / own-data enrichment creates straight through. DGX's
+        // blanket confirmation_required fires on nearly everything, so it is NOT the gate (it blocked bulk
+        // creation for every borrowed/unmatched line). The MatchStrategy already records the cross-supplier
+        // decision the router made.
+        if (EnrichmentStrategies.IsCrossSupplierStrategy(line.MatchStrategy) && !line.EnrichmentConfirmed)
             return new PartsProvisioningOutcome("needs_confirmation", null,
-                "Borrowed enrichment requires operator confirmation before creation.");
+                "Cross-supplier borrowed enrichment requires operator confirmation before creation.");
 
         var data = enr.ItemData;
         if (data.SuggestedItmsGrpCod is not { } groupCode)
