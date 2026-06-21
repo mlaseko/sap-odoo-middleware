@@ -28,6 +28,17 @@ public class SapB1Settings
     /// <summary>SLD Server address (host:port, e.g. "WIN-GJGQ73V0C3K:40000"). Leave empty to skip.</summary>
     public string SLDServer { get; set; } = string.Empty;
 
+    /// <summary>
+    /// SQL Server login for DIRECT SQL reads (SKU-counter refresh, setup verifier) — NOT the DI API.
+    /// The DI API authenticates with the SAP B1 application user (<see cref="UserName"/>) via the SLD/
+    /// license server, but the direct-SQL services need a real SQL login (e.g. 'sa'). Leave empty to
+    /// reuse <see cref="UserName"/>/<see cref="Password"/> (only valid when those ARE the SQL login).
+    /// </summary>
+    public string DbUserName { get; set; } = string.Empty;
+
+    /// <summary>SQL Server password paired with <see cref="DbUserName"/>.</summary>
+    public string DbPassword { get; set; } = string.Empty;
+
     /// <summary>Whether to auto-create a pick list after SO creation.</summary>
     public bool AutoCreatePickList { get; set; } = true;
 

@@ -13,8 +13,8 @@ public sealed record AutohubSapSetupResult(
 /// <summary>
 /// Read-only pre-flight check that the <b>Autohub</b> SAP company (Companies:Autohub:SapB1, e.g.
 /// "Molas Live 2021") has the master-data the Autohub item-create assumes: ≥5 price lists (so PL01/03/05
-/// land on the right lists), item groups, the OITM UDFs (U_Article_No/Description/FitForAuto/ImageUrl),
-/// the O1/I1 VAT groups, and UoM group 1 ("Packing Units"). Connects via plain SqlClient (the Autohub
+/// land on the right lists), item groups, the OITM UDFs (U_Item_Name/Article_No/Engine_code/
+/// ItemManufacturer/MdlTEST), the TZ/TZS VAT groups, and UoM group 1 ("Packing Units"). Connects via plain SqlClient (the Autohub
 /// company is MSSQL) — no DI-API license seat consumed. Surfaces problems before a bulk-create instead of
 /// per-line create_failed.
 /// </summary>
@@ -45,8 +45,9 @@ public sealed class AutohubSapSetupVerifier
         {
             DataSource = sap.Server,
             InitialCatalog = sap.CompanyDb,
-            UserID = sap.UserName,
-            Password = sap.Password,
+            // Direct SQL needs a real SQL login (DbUserName), NOT the DI API's SAP B1 application user.
+            UserID = string.IsNullOrWhiteSpace(sap.DbUserName) ? sap.UserName : sap.DbUserName,
+            Password = string.IsNullOrWhiteSpace(sap.DbUserName) ? sap.Password : sap.DbPassword,
             TrustServerCertificate = true,
             ConnectTimeout = 15,
         }.ConnectionString;
@@ -70,21 +71,22 @@ public sealed class AutohubSapSetupVerifier
                 groups.Count == 0 ? "none found" : $"{groups.Count} groups: " +
                     string.Join(", ", groups.Take(20).Select(r => $"{r[0]}:{r[1]}")) + (groups.Count > 20 ? " …" : "")));
 
-            // 3) OITM UDFs — set on create (U_Article_No is also the Tier-2 match key). CUFD AliasID has no U_.
-            var wanted = new[] { "Article_No", "Description", "FitForAuto", "ImageUrl" };
+            // 3) OITM UDFs — the actual MOLAS_Live_2021 fields set on create (U_Article_No is also the
+            // Tier-2 match key). CUFD AliasID has no U_ prefix.
+            var wanted = new[] { "Item_Name", "Article_No", "Engine_code", "ItemManufacturer", "MdlTEST" };
             var present = (await ReadRowsAsync(conn,
-                    "SELECT AliasID FROM CUFD WHERE TableID = 'OITM' AND AliasID IN ('Article_No','Description','FitForAuto','ImageUrl')", ct))
+                    "SELECT AliasID FROM CUFD WHERE TableID = 'OITM' AND AliasID IN ('Item_Name','Article_No','Engine_code','ItemManufacturer','MdlTEST')", ct))
                 .Select(r => (string)r[0]).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var missing = wanted.Where(w => !present.Contains(w)).ToList();
-            checks.Add(new SapSetupCheck("OITM user fields (U_Article_No/U_Description/U_FitForAuto/U_ImageUrl)",
+            checks.Add(new SapSetupCheck("OITM user fields (U_Item_Name/U_Article_No/U_Engine_code/U_ItemManufacturer/U_MdlTEST)",
                 missing.Count == 0,
                 missing.Count == 0 ? "all present" : "MISSING: " + string.Join(", ", missing.Select(m => "U_" + m))));
 
-            // 4) VAT groups — O1 (sales) and I1 (purchase) referenced on create.
-            var vat = (await ReadRowsAsync(conn, "SELECT Code FROM OVTG WHERE Code IN ('O1','I1')", ct))
+            // 4) VAT groups — TZ (sales) and TZS (purchase) referenced on create.
+            var vat = (await ReadRowsAsync(conn, "SELECT Code FROM OVTG WHERE Code IN ('TZ','TZS')", ct))
                 .Select(r => (string)r[0]).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var vatMissing = new[] { "O1", "I1" }.Where(c => !vat.Contains(c)).ToList();
-            checks.Add(new SapSetupCheck("VAT groups O1 / I1", vatMissing.Count == 0,
+            var vatMissing = new[] { "TZ", "TZS" }.Where(c => !vat.Contains(c)).ToList();
+            checks.Add(new SapSetupCheck("VAT groups TZ / TZS", vatMissing.Count == 0,
                 vatMissing.Count == 0 ? "both present" : "MISSING: " + string.Join(", ", vatMissing)));
 
             // 5) UoM group 1 ("Packing Units") — items are created in it.

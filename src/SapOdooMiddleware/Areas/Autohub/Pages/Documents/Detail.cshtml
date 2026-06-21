@@ -647,10 +647,43 @@
     });
 
     async function runBulkCreate() {
-        mBody.innerHTML = '<h3>Creating items…</h3><p>This can take a while (each item is written to SAP). Please keep this page open.</p>';
+        mBody.innerHTML = '<h3>Creating items…</h3>' +
+            '<p id="bc-progress">Starting…</p>' +
+            '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden;margin:8px 0;">' +
+            '<div id="bc-bar" style="height:100%;width:0%;background:var(--accent,#11827a);transition:width .3s;"></div></div>' +
+            '<p class="hint">Each item is written to SAP. Please keep this page open.</p>';
         mActions.innerHTML = '';
+
+        // Baseline: how many were already created, and how many this run is attempting.
+        let baseCreated = 0, target = 0;
+        try {
+            const s0 = await api('GET', '/review-summary');
+            const b0 = s0.by_status || {};
+            baseCreated = b0.created || 0;
+            target = (b0.create_new || 0) + (b0.create_failed || 0);
+        } catch (e) { /* progress is best-effort */ }
+
+        const renderProgress = (done) => {
+            const prog = document.getElementById('bc-progress');
+            const bar = document.getElementById('bc-bar');
+            if (prog) prog.textContent = target ? ('Created ' + done + ' of ' + target + '…') : ('Created ' + done + '…');
+            if (bar && target) bar.style.width = Math.min(100, Math.round(done / target * 100)) + '%';
+        };
+        renderProgress(0);
+
+        // The server commits each line as 'created' as it goes, so poll review-summary for live progress
+        // while the (blocking) bulk-create call runs.
+        const poll = setInterval(async () => {
+            try {
+                const s = await api('GET', '/review-summary');
+                const b = s.by_status || {};
+                renderProgress(Math.max(0, (b.created || 0) - baseCreated));
+            } catch (e) { /* ignore transient poll errors */ }
+        }, 2000);
+
         try {
             const r = await api('POST', '/bulk-create');
+            clearInterval(poll);
             let html = '<h3>Bulk create complete</h3><p>Created ' + r.created + ' of ' + r.attempted + '. Needs confirmation: ' + (r.needs_confirmation || 0) + '. Failed: ' + r.failed + '.</p>';
             if (r.needs_confirmation > 0) html += '<p class="hint">Needs-confirmation lines are cross-supplier borrowed enrichments — review them, or use “Confirm all &amp; Create” to sign off and create them.</p>';
             if (r.failures && r.failures.length) {
@@ -662,6 +695,7 @@
             const close = document.createElement('button'); close.className = 'btn btn-primary'; close.textContent = 'Close';
             close.onclick = () => location.reload(); mActions.innerHTML = ''; mActions.appendChild(close);
         } catch (e) {
+            clearInterval(poll);
             mBody.innerHTML = '<h3>Bulk create failed</h3><p>' + esc(e.message) + '</p>';
             const close = document.createElement('button'); close.className = 'btn'; close.textContent = 'Close'; close.onclick = () => location.reload();
             mActions.innerHTML = ''; mActions.appendChild(close);

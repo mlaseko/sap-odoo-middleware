@@ -158,9 +158,8 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             RetailPrice: prices.Retail,
             WholesalePrice: prices.Wholesale,
             ArticleNumber: article!,
-            Description: data.PrimaryDescription ?? line.Description,
-            FitForAuto: data.FitForAuto,
-            ImageUrl: data.ImageUrl);
+            PartName: data.PrimaryDescription ?? line.Description,
+            Manufacturer: line.Brand);
 
         try
         {
@@ -274,9 +273,8 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             RetailPrice: prices.Retail,
             WholesalePrice: prices.Wholesale,
             ArticleNumber: article!,
-            Description: manual.Description ?? line.Description,
-            FitForAuto: manual.FitForAuto,
-            ImageUrl: manual.ImageUrl);
+            PartName: manual.Description ?? line.Description,
+            Manufacturer: line.Brand);
 
         try
         {

@@ -123,8 +123,9 @@ public sealed class SapSkuCounterRefreshService : ISapSkuCounterRefreshService
         {
             DataSource = sap.Server,
             InitialCatalog = sap.CompanyDb,
-            UserID = sap.UserName,
-            Password = sap.Password,
+            // Direct SQL needs a real SQL login (DbUserName), NOT the DI API's SAP B1 application user.
+            UserID = string.IsNullOrWhiteSpace(sap.DbUserName) ? sap.UserName : sap.DbUserName,
+            Password = string.IsNullOrWhiteSpace(sap.DbUserName) ? sap.Password : sap.DbPassword,
             TrustServerCertificate = true,
         }.ConnectionString;
 
