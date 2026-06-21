@@ -74,7 +74,8 @@ public sealed class AutoMatchService : IAutoMatchService
         // trust it unless the donor is a clearly different *specific* supplier.
         if (!string.IsNullOrWhiteSpace(line.SupplierArticleNumber))
         {
-            var art = await _oitm.FindByArticleAsync(line.SupplierArticleNumber, ct);
+            // Pass the effective supplier so the febi_article_no column is only consulted for FEBI lines.
+            var art = await _oitm.FindByArticleAsync(line.SupplierArticleNumber, effectiveBrand, ct);
             if (art is not null)
             {
                 if (string.IsNullOrEmpty(art.SupplierName))

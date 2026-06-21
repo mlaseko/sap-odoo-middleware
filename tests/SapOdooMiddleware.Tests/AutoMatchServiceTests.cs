@@ -12,15 +12,17 @@ public class AutoMatchServiceTests
         public OitmMatch? ByArticle;
         public IReadOnlyList<string>? LastOems;
         public string? LastArticle;
+        public string? LastSearchingSupplier;
 
         public Task<OitmMatch?> FindByOemAsync(IReadOnlyList<string> oems, CancellationToken ct)
         {
             LastOems = oems;
             return Task.FromResult(ByOem);
         }
-        public Task<OitmMatch?> FindByArticleAsync(string article, CancellationToken ct)
+        public Task<OitmMatch?> FindByArticleAsync(string article, string? searchingSupplier, CancellationToken ct)
         {
             LastArticle = article;
+            LastSearchingSupplier = searchingSupplier;
             return Task.FromResult(ByArticle);
         }
     }
@@ -164,5 +166,24 @@ public class AutoMatchServiceTests
 
         Assert.Equal("needs_confirmation", d.Status);
         Assert.Equal("LR100602", d.SuggestedDonor?.ItemCode);
+    }
+
+    // ---- Tier 2 forwards the effective supplier so the repo can gate febi_article_no ----
+
+    [Fact]
+    public async Task Tier2_ForwardsDocSupplier_WhenLineBrandBlank()
+    {
+        var oitm = new FakeOitm();   // no hits → pending, but the article lookup still runs
+        await Build(oitm).DecideAsync(Line(article: "G2261", brand: "", docSupplier: "Germax"), CancellationToken.None);
+        Assert.Equal("G2261", oitm.LastArticle);
+        Assert.Equal("Germax", oitm.LastSearchingSupplier);   // doc-supplier fallback reaches the febi gate
+    }
+
+    [Fact]
+    public async Task Tier2_ForwardsLineBrand_WhenPresent()
+    {
+        var oitm = new FakeOitm();
+        await Build(oitm).DecideAsync(Line(article: "A1", brand: "FEBI"), CancellationToken.None);
+        Assert.Equal("FEBI", oitm.LastSearchingSupplier);
     }
 }

@@ -15,8 +15,13 @@ public interface IOitmMatchRepository
     /// <summary>Tier 1: the SAP item whose OEM cross-reference matches any of the given OEMs (with supplier), or null.</summary>
     Task<OitmMatch?> FindByOemAsync(IReadOnlyList<string> oemNumbers, CancellationToken ct);
 
-    /// <summary>Tier 2: the SAP item whose supplier article number equals <paramref name="articleNumber"/> (with supplier), or null.</summary>
-    Task<OitmMatch?> FindByArticleAsync(string articleNumber, CancellationToken ct);
+    /// <summary>
+    /// Tier 2: the SAP item whose supplier article number equals <paramref name="articleNumber"/> (with
+    /// supplier), or null. <paramref name="searchingSupplier"/> is the invoice line's supplier identity:
+    /// the <c>febi_article_no</c> column is ONLY consulted when that supplier is explicitly FEBI, so a
+    /// non-FEBI article that happens to equal some FEBI item's febi_article_no can't bleed into a match.
+    /// </summary>
+    Task<OitmMatch?> FindByArticleAsync(string articleNumber, string? searchingSupplier, CancellationToken ct);
 }
 
 /// <summary>
@@ -60,19 +65,22 @@ public sealed class OitmMatchRepository : IOitmMatchRepository
         return await r.ReadAsync(ct) ? Map(r) : null;
     }
 
-    public async Task<OitmMatch?> FindByArticleAsync(string articleNumber, CancellationToken ct)
+    public async Task<OitmMatch?> FindByArticleAsync(string articleNumber, string? searchingSupplier, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(articleNumber)) return null;
 
-        // Direct article (TecDoc-direct items) first, then febi_article_no (borrowed/Germax items),
-        // then neon_germax_products as a defensive fallback should febi_article_no ever lag the scraper.
+        // FEBI guard: febi_article_no is FEBI's own numbering. Matching it for a NON-FEBI supplier lets a
+        // coincidental article collision link to the wrong supplier's item, so only consult that column
+        // when the searching supplier is explicitly FEBI. (Defensive — under audit.) Direct article first,
+        // then (FEBI only) febi_article_no, then neon_germax_products as a scraper-lag fallback.
+        var includeFebi = IsFebi(searchingSupplier);
         const string sql = """
             WITH article_match AS (
                 SELECT o.item_code, o.id AS oitm_id, o.supplier_name,
                        CASE WHEN o.article_number = @article THEN 'article_number' ELSE 'febi_article_no' END AS matched_field,
                        1 AS priority
                 FROM oitm o
-                WHERE (o.article_number = @article OR o.febi_article_no = @article)
+                WHERE (o.article_number = @article OR (@includeFebi AND o.febi_article_no = @article))
                   AND o.item_code IS NOT NULL
                 UNION ALL
                 SELECT g.item_code, NULL::bigint, NULL::text, 'germax_article_number' AS matched_field, 2 AS priority
@@ -86,9 +94,14 @@ public sealed class OitmMatchRepository : IOitmMatchRepository
         await conn.OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("article", articleNumber.Trim());
+        cmd.Parameters.AddWithValue("includeFebi", includeFebi);
         await using var r = await cmd.ExecuteReaderAsync(ct);
         return await r.ReadAsync(ct) ? Map(r) : null;
     }
+
+    /// <summary>The searching supplier is FEBI (covers "FEBI" and "febi bilstein").</summary>
+    private static bool IsFebi(string? supplier) =>
+        !string.IsNullOrWhiteSpace(supplier) && supplier.Contains("FEBI", StringComparison.OrdinalIgnoreCase);
 
     private static OitmMatch Map(NpgsqlDataReader r) => new(
         ItemCode:     r.GetString(0),
