@@ -13,7 +13,7 @@ public sealed record AutohubSapSetupResult(
 /// <summary>
 /// Read-only pre-flight check that the <b>Autohub</b> SAP company (Companies:Autohub:SapB1, e.g.
 /// "Molas Live 2021") has the master-data the Autohub item-create assumes: ≥5 price lists (so PL01/03/05
-/// land on the right lists), item groups, the OITM UDFs (U_Item_Name/Article_No/Engine_code/
+/// land on the right lists), item groups, the OITM UDFs (U_Item_Name/Article_No/Engine_Code/
 /// ItemManufacturer/MdlTEST), the TZ/TZS VAT groups, and UoM group 1 ("Packing Units"). Connects via plain SqlClient (the Autohub
 /// company is MSSQL) — no DI-API license seat consumed. Surfaces problems before a bulk-create instead of
 /// per-line create_failed.
@@ -73,12 +73,12 @@ public sealed class AutohubSapSetupVerifier
 
             // 3) OITM UDFs — the actual MOLAS_Live_2021 fields set on create (U_Article_No is also the
             // Tier-2 match key). CUFD AliasID has no U_ prefix.
-            var wanted = new[] { "Item_Name", "Article_No", "Engine_code", "ItemManufacturer", "MdlTEST" };
+            var wanted = new[] { "Item_Name", "Article_No", "Engine_Code", "ItemManufacturer", "MdlTEST" };
             var present = (await ReadRowsAsync(conn,
-                    "SELECT AliasID FROM CUFD WHERE TableID = 'OITM' AND AliasID IN ('Item_Name','Article_No','Engine_code','ItemManufacturer','MdlTEST')", ct))
+                    "SELECT AliasID FROM CUFD WHERE TableID = 'OITM' AND AliasID IN ('Item_Name','Article_No','Engine_Code','ItemManufacturer','MdlTEST')", ct))
                 .Select(r => (string)r[0]).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var missing = wanted.Where(w => !present.Contains(w)).ToList();
-            checks.Add(new SapSetupCheck("OITM user fields (U_Item_Name/U_Article_No/U_Engine_code/U_ItemManufacturer/U_MdlTEST)",
+            checks.Add(new SapSetupCheck("OITM user fields (U_Item_Name/U_Article_No/U_Engine_Code/U_ItemManufacturer/U_MdlTEST)",
                 missing.Count == 0,
                 missing.Count == 0 ? "all present" : "MISSING: " + string.Join(", ", missing.Select(m => "U_" + m))));
 

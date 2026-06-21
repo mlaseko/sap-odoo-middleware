@@ -7,7 +7,7 @@ namespace SapOdooMiddleware.Models.Sap;
 ///   ItemName (standard) = OEMs + article joined by '/'
 ///   U_Item_Name         = part description (e.g. "BRAKE PADS")
 ///   U_Article_No        = supplier article (also the Tier-2 match key)
-///   U_Engine_code       = supplier article (per the company's convention)
+///   U_Engine_Code       = supplier article (per the company's convention)
 ///   U_ItemManufacturer  = brand/supplier (e.g. GERMAX)
 ///   U_MdlTEST           = brand/supplier (mirrors U_ItemManufacturer)
 /// </summary>
@@ -18,6 +18,6 @@ public record SapAutohubItemRequest(
     decimal CostPrice,        // PriceList 1
     decimal RetailPrice,      // PriceList 3
     decimal WholesalePrice,   // PriceList 5
-    string  ArticleNumber,    // U_Article_No + U_Engine_code (also the Tier-2 match key)
+    string  ArticleNumber,    // U_Article_No + U_Engine_Code (also the Tier-2 match key)
     string? PartName,         // U_Item_Name
     string? Manufacturer);    // U_ItemManufacturer + U_MdlTEST
