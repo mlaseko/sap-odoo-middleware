@@ -3983,14 +3983,14 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 items.PriceList.Currency = "TZS";
 
                 // UDFs — the actual MOLAS_Live_2021 OITM fields. ItemName (standard) already holds the
-                // OEM/article list. U_Article_No is also the Tier-2 match key. U_Engine_code mirrors the
+                // OEM/article list. U_Article_No is also the Tier-2 match key. U_Engine_Code mirrors the
                 // article and U_MdlTEST mirrors the manufacturer per the company's data convention.
                 var ctx = $"item {request.ItemCode}";
                 var article = request.ArticleNumber ?? string.Empty;
                 var manufacturer = request.Manufacturer ?? string.Empty;
                 TrySetUserField(items.UserFields, "U_Item_Name",        request.PartName ?? string.Empty, ctx);
                 TrySetUserField(items.UserFields, "U_Article_No",       article, ctx);
-                TrySetUserField(items.UserFields, "U_Engine_code",      article, ctx);
+                TrySetUserField(items.UserFields, "U_Engine_Code",      article, ctx);
                 TrySetUserField(items.UserFields, "U_ItemManufacturer", manufacturer, ctx);
                 TrySetUserField(items.UserFields, "U_MdlTEST",          manufacturer, ctx);
 
