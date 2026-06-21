@@ -3965,8 +3965,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 // UoM group "Packing Units" (entry 1), same as Lubes.
                 items.UoMGroupEntry  = 1;
 
-                items.SalesVATGroup    = "O1";
-                items.PurchaseVATGroup = "I1";
+                // VAT groups for the Autohub company (MOLAS_Live_2021): TZ (sales) / TZS (purchase).
+                items.SalesVATGroup    = "TZ";
+                items.PurchaseVATGroup = "TZS";
 
                 // Autohub price lists: PL01=Cost (idx 0), PL03=Retail (idx 2), PL05=Wholesale (idx 4).
                 items.PriceList.SetCurrentLine(0);
@@ -3981,12 +3982,17 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 items.PriceList.Price    = (double)request.WholesalePrice;
                 items.PriceList.Currency = "TZS";
 
-                // UDFs (confirmed to exist on OITM). U_Article_No is also the Tier-2 match key.
+                // UDFs — the actual MOLAS_Live_2021 OITM fields. ItemName (standard) already holds the
+                // OEM/article list. U_Article_No is also the Tier-2 match key. U_Engine_code mirrors the
+                // article and U_MdlTEST mirrors the manufacturer per the company's data convention.
                 var ctx = $"item {request.ItemCode}";
-                TrySetUserField(items.UserFields, "U_Article_No",  request.ArticleNumber ?? string.Empty, ctx);
-                TrySetUserField(items.UserFields, "U_Description", request.Description ?? string.Empty, ctx);
-                TrySetUserField(items.UserFields, "U_FitForAuto",  request.FitForAuto ?? string.Empty, ctx);
-                TrySetUserField(items.UserFields, "U_ImageUrl",    request.ImageUrl ?? string.Empty, ctx);
+                var article = request.ArticleNumber ?? string.Empty;
+                var manufacturer = request.Manufacturer ?? string.Empty;
+                TrySetUserField(items.UserFields, "U_Item_Name",        request.PartName ?? string.Empty, ctx);
+                TrySetUserField(items.UserFields, "U_Article_No",       article, ctx);
+                TrySetUserField(items.UserFields, "U_Engine_code",      article, ctx);
+                TrySetUserField(items.UserFields, "U_ItemManufacturer", manufacturer, ctx);
+                TrySetUserField(items.UserFields, "U_MdlTEST",          manufacturer, ctx);
 
                 int result = items.Add();
                 if (result != 0)
