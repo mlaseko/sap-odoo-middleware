@@ -142,6 +142,8 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
 
         var prices = await _pricing.CalculateAsync(costTzs, line.Brand ?? "", ct);
+        if (prices.Cost <= 0m)
+            return await Fail(line.Id, "Computed price-list 01 (cost) is zero — check the forex rate and pricing config before creating the SAP item.", ct);
 
         // Allocate the final ItemCode. NOTE: the counter is atomic but burns a number even if the
         // SAP write below fails — gaps in SAP item codes are acceptable; we never reuse/duplicate.
@@ -257,6 +259,8 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
 
         var prices = await _pricing.CalculateAsync(costTzs, line.Brand ?? "", ct);
+        if (prices.Cost <= 0m)
+            return await Fail(line.Id, "Computed price-list 01 (cost) is zero — check the forex rate and pricing config before creating the SAP item.", ct);
 
         // Same atomic-counter caveat as ProvisionAsync: the number is burned even if the SAP write fails.
         var itemCode = await _sku.GenerateAsync(prefix, ct);
