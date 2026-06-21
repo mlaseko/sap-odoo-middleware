@@ -133,11 +133,11 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         decimal costTzs;
         try
         {
-            costTzs = await _forex.ConvertToTzsAsync(line.UnitPriceForeign.Value, currency!, DateTime.UtcNow, ct);
+            costTzs = await ConvertToTzsWithRetryAsync(line.UnitPriceForeign.Value, currency!, ct);
         }
         catch (Exception ex)
         {
-            return await Fail(line.Id, $"Forex conversion failed: {ex.Message}", ct);
+            return await Fail(line.Id, $"Forex conversion failed after retries: {ex.Message}", ct);
         }
         var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
 
@@ -250,11 +250,11 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         decimal costTzs;
         try
         {
-            costTzs = await _forex.ConvertToTzsAsync(line.UnitPriceForeign.Value, currency!, DateTime.UtcNow, ct);
+            costTzs = await ConvertToTzsWithRetryAsync(line.UnitPriceForeign.Value, currency!, ct);
         }
         catch (Exception ex)
         {
-            return await Fail(line.Id, $"Forex conversion failed: {ex.Message}", ct);
+            return await Fail(line.Id, $"Forex conversion failed after retries: {ex.Message}", ct);
         }
         var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
 
@@ -315,6 +315,34 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         parts.Add(article);
         var name = string.Join("/", parts);
         return name.Length > 200 ? name[..200] : name;
+    }
+
+    /// <summary>
+    /// Forex conversion with a SHORT exponential backoff (1s → 2s → 4s, 3 attempts) to ride out a transient
+    /// blip reading the forex_rate table. Deliberately short — NOT the minutes-to-hours schedule used by the
+    /// background workers — because this runs inline inside Bulk Create's per-item timeout. A deterministic
+    /// failure (e.g. no rate row for the currency) just exhausts the attempts and surfaces the same error.
+    /// Cancellation (the per-item timeout / host shutdown) is never retried.
+    /// </summary>
+    private async Task<decimal> ConvertToTzsWithRetryAsync(decimal amount, string currency, CancellationToken ct)
+    {
+        const int maxAttempts = 3;
+        var delay = TimeSpan.FromSeconds(1);
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await _forex.ConvertToTzsAsync(amount, currency, DateTime.UtcNow, ct);
+            }
+            catch (Exception ex) when (attempt < maxAttempts && ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "Forex conversion attempt {Attempt}/{Max} failed for {Currency}; retrying in {Delay}s.",
+                    attempt, maxAttempts, currency, delay.TotalSeconds);
+                await Task.Delay(delay, ct);
+                delay = TimeSpan.FromTicks(delay.Ticks * 2);
+            }
+        }
     }
 
     private async Task<PartsProvisioningOutcome> Fail(Guid lineId, string error, CancellationToken ct)
