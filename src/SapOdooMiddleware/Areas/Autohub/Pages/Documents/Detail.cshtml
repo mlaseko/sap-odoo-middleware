@@ -299,6 +299,12 @@
         const rsb = document.getElementById('btn-reopen-skipped'); if (rsb) rsb.disabled = (b.skip || 0) === 0;
         const bc = document.getElementById('btn-bulkcreate'); if (bc) bc.disabled = createN === 0;
         const cp = document.getElementById('btn-complete'); if (cp) cp.disabled = !s.can_complete;
+
+        // Auto-poll only while there's live work to watch (enrichment running, or lines still in flight).
+        // Once the document settles, stop the loop — operator actions refresh manually. A re-enrich/upload
+        // that creates live work calls refreshSummary(), which re-arms the poll here.
+        const live = awaiting > 0 || (b.pending || 0) > 0 || s.status === 'extracting' || s.status === 'uploaded';
+        ensurePolling(live);
     }
 
     // ---- modal helpers ----
@@ -648,10 +654,22 @@
         }
     }
 
-    refreshSummary();
-    // Light poll so the background-enrichment indicator (and counts) update live while the operator
-    // waits. review-summary is a cheap count query; 10s matches the worker cadence.
-    setInterval(refreshSummary, 10000);
+    // Self-managing poll: refreshSummary() arms/disarms this via ensurePolling() based on whether there's
+    // live work. Each tick skips the fetch while the tab is hidden (no server load on a backgrounded tab),
+    // so we no longer poll review-summary forever on an idle, fully-settled document.
+    let pollTimer = null;
+    function ensurePolling(live) {
+        if (live && pollTimer === null) {
+            pollTimer = setInterval(() => { if (!document.hidden) refreshSummary(); }, 10000);
+        } else if (!live && pollTimer !== null) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+    // Re-check immediately when the tab becomes visible again (so a settled→live change isn't missed).
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshSummary(); });
+
+    refreshSummary();   // initial load; arms the poll iff there's live work
 })();
 
 // ---- delete invoice (works in any document state, so it lives outside the review IIFE) ----

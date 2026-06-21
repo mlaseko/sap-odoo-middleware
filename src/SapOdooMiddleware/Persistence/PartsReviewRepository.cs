@@ -45,6 +45,13 @@ public interface IPartsReviewRepository
     /// <summary>Re-run enrichment: reset skipped (non-promotional) lines to 'pending' with enrichment state cleared so the background worker re-queries DGX. Returns the count.</summary>
     Task<int> BulkReenrichSkippedAsync(Guid documentId, CancellationToken ct);
 
+    /// <summary>
+    /// Re-run enrichment for the RESIDUAL BLOCKERS only: lines DGX couldn't classify
+    /// (EnrichmentStatus 'partial'/'unmatched'), never touching already-resolved lines
+    /// ('matched'/'created'). Resets them to 'pending' with enrichment state cleared. Returns the count.
+    /// </summary>
+    Task<int> BulkReenrichBlockersAsync(Guid documentId, CancellationToken ct);
+
     /// <summary>Operator edits to an extracted line before creation (qty / unit price / description). Recomputes the line total.</summary>
     Task UpdateLineFieldsAsync(Guid lineId, decimal? quantity, decimal? unitPriceForeign, string? description, CancellationToken ct);
 
@@ -218,6 +225,29 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         return await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<int> BulkReenrichBlockersAsync(Guid documentId, CancellationToken ct)
+    {
+        // Only the residual blockers — partial/unmatched enrichments DGX couldn't classify — and never a
+        // line the operator/worker already resolved ('matched'/'created'). Full reset → 'pending' with
+        // enrichment state cleared so the worker re-queries the (now-improved) DGX classifier.
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = 'pending',
+                "EnrichmentSource" = NULL, "BorrowedFromArticle" = NULL, "BorrowedFromSupplier" = NULL,
+                "NeonOitmId" = NULL, "EnrichmentStatus" = NULL, "EnrichmentErrorCode" = NULL,
+                "EnrichedAt" = NULL, "EnrichmentPayloadJson" = NULL, "EnrichmentConfirmationRequired" = false,
+                "EnrichmentConfirmedBy" = NULL, "EnrichmentConfirmedAt" = NULL, "MatchStrategy" = NULL
+            WHERE "DocumentId" = @doc
+              AND "EnrichmentStatus" IN ('partial', 'unmatched')
+              AND "ReviewStatus" NOT IN ('matched', 'created')
+              AND "IsPromotional" = false;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task UpdateLineFieldsAsync(Guid lineId, decimal? quantity, decimal? unitPriceForeign, string? description, CancellationToken ct)
     {
         // COALESCE keeps untouched fields; the line total is kept consistent with the edited qty/price.
@@ -277,14 +307,19 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
 
     public async Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct)
     {
-        // Same predicate the background enricher selects on (GetLinesNeedingEnrichmentAsync), scoped to
-        // one document: pending, not-yet-enriched, non-promotional lines still waiting for DGX.
+        // EXACT predicate the background enricher selects on (GetLinesNeedingEnrichmentAsync), scoped to
+        // one document — including the document-level "Status = 'extracted'" gate. Without it the count
+        // can show lines the worker will never touch (e.g. a doc still 'extracting' or already 'reviewed'),
+        // so the indicator would claim "enrichment running" against work that never progresses.
         const string sql = """
-            SELECT COUNT(*) FROM public."staging_document_line"
-            WHERE "DocumentId" = @doc
-              AND "ReviewStatus" = 'pending'
-              AND "EnrichmentSource" IS NULL
-              AND "IsPromotional" = false;
+            SELECT COUNT(*)
+            FROM public."staging_document_line" l
+            JOIN public."staging_document" d ON d."Id" = l."DocumentId"
+            WHERE l."DocumentId" = @doc
+              AND d."Status" = 'extracted'
+              AND l."ReviewStatus" = 'pending'
+              AND l."EnrichmentSource" IS NULL
+              AND l."IsPromotional" = false;
             """;
         await using var conn = await OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
