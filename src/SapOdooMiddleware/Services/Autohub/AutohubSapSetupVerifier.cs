@@ -14,7 +14,7 @@ public sealed record AutohubSapSetupResult(
 /// Read-only pre-flight check that the <b>Autohub</b> SAP company (Companies:Autohub:SapB1, e.g.
 /// "Molas Live 2021") has the master-data the Autohub item-create assumes: ≥5 price lists (so PL01/03/05
 /// land on the right lists), item groups, the OITM UDFs (U_Item_Name/Article_No/Engine_Code/
-/// ItemManufacturer/MdlTEST), the TZ/TZS VAT groups, and UoM group 1 ("Packing Units"). Connects via plain SqlClient (the Autohub
+/// ItemManufacturer/MdlTEST), the TZ/TZS VAT groups, and UoM group -1 ("Manual"). Connects via plain SqlClient (the Autohub
 /// company is MSSQL) — no DI-API license seat consumed. Surfaces problems before a bulk-create instead of
 /// per-line create_failed.
 /// </summary>
@@ -89,10 +89,10 @@ public sealed class AutohubSapSetupVerifier
             checks.Add(new SapSetupCheck("VAT groups TZ / TZS", vatMissing.Count == 0,
                 vatMissing.Count == 0 ? "both present" : "MISSING: " + string.Join(", ", vatMissing)));
 
-            // 5) UoM group 1 ("Packing Units") — items are created in it.
-            var uom = await ReadRowsAsync(conn, "SELECT UgpEntry, UgpName FROM OUGP WHERE UgpEntry = 1", ct);
-            checks.Add(new SapSetupCheck("UoM group entry 1 (Packing Units)", uom.Count > 0,
-                uom.Count == 0 ? "not found" : $"UgpEntry 1 = {uom[0][1]}"));
+            // 5) UoM group -1 ("Manual") — Autohub items are created in it (this company has no other group).
+            var uom = await ReadRowsAsync(conn, "SELECT UgpEntry, UgpName FROM OUGP WHERE UgpEntry = -1", ct);
+            checks.Add(new SapSetupCheck("UoM group entry -1 (Manual)", uom.Count > 0,
+                uom.Count == 0 ? "not found" : $"UgpEntry -1 = {uom[0][1]}"));
 
             return new AutohubSapSetupResult(true, sap.CompanyDb, checks.All(c => c.Ok), checks);
         }

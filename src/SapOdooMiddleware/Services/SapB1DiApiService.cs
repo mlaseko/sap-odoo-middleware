@@ -3962,8 +3962,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 items.PurchaseItem   = BoYesNoEnum.tYES;
                 items.ItemsGroupCode = request.ItemsGroupCode;
 
-                // UoM group "Packing Units" (entry 1), same as Lubes.
-                items.UoMGroupEntry  = 1;
+                // UoM group: the Autohub company (MOLAS_Live_2021) only has the built-in "Manual" group
+                // (entry -1) — its existing items all use it — so use -1 here. (Lubes has a "Packing
+                // Units" group at entry 1; setting entry 1 here fails with -2028 "no matching records".)
+                items.UoMGroupEntry  = -1;
 
                 // VAT groups for the Autohub company (MOLAS_Live_2021): TZ (sales) / TZS (purchase).
                 items.SalesVATGroup    = "TZ";
