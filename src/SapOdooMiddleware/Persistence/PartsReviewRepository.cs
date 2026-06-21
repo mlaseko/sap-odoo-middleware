@@ -72,6 +72,10 @@ public interface IPartsReviewRepository
         string? payloadJson, CancellationToken ct);
 
     Task ConfirmEnrichmentAsync(Guid lineId, string confirmedBy, CancellationToken ct);
+
+    /// <summary>Bulk-confirm enrichment for every unconfirmed 'create_new' line of a document ("Confirm all &amp; create"). Returns the count.</summary>
+    Task<int> BulkConfirmCreateNewAsync(Guid documentId, string confirmedBy, CancellationToken ct);
+
     Task RecordCreatedAsync(Guid lineId, string itemCode, decimal pl01, decimal pl03, decimal pl05, decimal forexRate, CancellationToken ct);
     Task RecordCreateFailedAsync(Guid lineId, string error, CancellationToken ct);
     Task<IReadOnlyList<PartsProvisioningLine>> ListCreateNewAsync(Guid documentId, CancellationToken ct);
@@ -428,6 +432,22 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         cmd.Parameters.AddWithValue("by", confirmedBy);
         cmd.Parameters.AddWithValue("id", lineId);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> BulkConfirmCreateNewAsync(Guid documentId, string confirmedBy, CancellationToken ct)
+    {
+        // Sign off every unconfirmed create_new line at once. Only genuine cross-supplier borrows are gated
+        // at creation, so confirming the rest is harmless — Bulk Create then proceeds for all of them.
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "EnrichmentConfirmedBy" = @by, "EnrichmentConfirmedAt" = NOW()
+            WHERE "DocumentId" = @doc AND "ReviewStatus" = 'create_new' AND "EnrichmentConfirmedAt" IS NULL;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("by", confirmedBy);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task RecordCreatedAsync(Guid lineId, string itemCode, decimal pl01, decimal pl03, decimal pl05, decimal forexRate, CancellationToken ct)

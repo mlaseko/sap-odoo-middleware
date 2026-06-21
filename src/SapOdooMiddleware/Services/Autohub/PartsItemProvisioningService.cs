@@ -115,9 +115,14 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
 
         if (enr.ItemData is null)
             return await Fail(line.Id, "Enrichment returned no item data.", ct);
-        if (enr.ConfirmationRequired && !line.EnrichmentConfirmed)
+        // Only a GENUINE cross-supplier borrow (another supplier's data applied to our item) needs operator
+        // sign-off before creating — same-supplier / own-data enrichment creates straight through. DGX's
+        // blanket confirmation_required fires on nearly everything, so it is NOT the gate (it blocked bulk
+        // creation for every borrowed/unmatched line). The MatchStrategy already records the cross-supplier
+        // decision the router made.
+        if (EnrichmentStrategies.IsCrossSupplierStrategy(line.MatchStrategy) && !line.EnrichmentConfirmed)
             return new PartsProvisioningOutcome("needs_confirmation", null,
-                "Borrowed enrichment requires operator confirmation before creation.");
+                "Cross-supplier borrowed enrichment requires operator confirmation before creation.");
 
         var data = enr.ItemData;
         if (data.SuggestedItmsGrpCod is not { } groupCode)
@@ -128,15 +133,17 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         decimal costTzs;
         try
         {
-            costTzs = await _forex.ConvertToTzsAsync(line.UnitPriceForeign.Value, currency!, DateTime.UtcNow, ct);
+            costTzs = await ConvertToTzsWithRetryAsync(line.UnitPriceForeign.Value, currency!, ct);
         }
         catch (Exception ex)
         {
-            return await Fail(line.Id, $"Forex conversion failed: {ex.Message}", ct);
+            return await Fail(line.Id, $"Forex conversion failed after retries: {ex.Message}", ct);
         }
         var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
 
         var prices = await _pricing.CalculateAsync(costTzs, line.Brand ?? "", ct);
+        if (prices.Cost <= 0m)
+            return await Fail(line.Id, "Computed price-list 01 (cost) is zero — check the forex rate and pricing config before creating the SAP item.", ct);
 
         // Allocate the final ItemCode. NOTE: the counter is atomic but burns a number even if the
         // SAP write below fails — gaps in SAP item codes are acceptable; we never reuse/duplicate.
@@ -243,15 +250,17 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         decimal costTzs;
         try
         {
-            costTzs = await _forex.ConvertToTzsAsync(line.UnitPriceForeign.Value, currency!, DateTime.UtcNow, ct);
+            costTzs = await ConvertToTzsWithRetryAsync(line.UnitPriceForeign.Value, currency!, ct);
         }
         catch (Exception ex)
         {
-            return await Fail(line.Id, $"Forex conversion failed: {ex.Message}", ct);
+            return await Fail(line.Id, $"Forex conversion failed after retries: {ex.Message}", ct);
         }
         var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
 
         var prices = await _pricing.CalculateAsync(costTzs, line.Brand ?? "", ct);
+        if (prices.Cost <= 0m)
+            return await Fail(line.Id, "Computed price-list 01 (cost) is zero — check the forex rate and pricing config before creating the SAP item.", ct);
 
         // Same atomic-counter caveat as ProvisionAsync: the number is burned even if the SAP write fails.
         var itemCode = await _sku.GenerateAsync(prefix, ct);
@@ -306,6 +315,34 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         parts.Add(article);
         var name = string.Join("/", parts);
         return name.Length > 200 ? name[..200] : name;
+    }
+
+    /// <summary>
+    /// Forex conversion with a SHORT exponential backoff (1s → 2s → 4s, 3 attempts) to ride out a transient
+    /// blip reading the forex_rate table. Deliberately short — NOT the minutes-to-hours schedule used by the
+    /// background workers — because this runs inline inside Bulk Create's per-item timeout. A deterministic
+    /// failure (e.g. no rate row for the currency) just exhausts the attempts and surfaces the same error.
+    /// Cancellation (the per-item timeout / host shutdown) is never retried.
+    /// </summary>
+    private async Task<decimal> ConvertToTzsWithRetryAsync(decimal amount, string currency, CancellationToken ct)
+    {
+        const int maxAttempts = 3;
+        var delay = TimeSpan.FromSeconds(1);
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await _forex.ConvertToTzsAsync(amount, currency, DateTime.UtcNow, ct);
+            }
+            catch (Exception ex) when (attempt < maxAttempts && ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex,
+                    "Forex conversion attempt {Attempt}/{Max} failed for {Currency}; retrying in {Delay}s.",
+                    attempt, maxAttempts, currency, delay.TotalSeconds);
+                await Task.Delay(delay, ct);
+                delay = TimeSpan.FromTicks(delay.Ticks * 2);
+            }
+        }
     }
 
     private async Task<PartsProvisioningOutcome> Fail(Guid lineId, string error, CancellationToken ct)

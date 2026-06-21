@@ -118,6 +118,7 @@
                 <button id="btn-skip-pending" class="btn btn-sm" type="button">Skip All Pending (<span id="cnt-skip-pending">@(Model.Count("pending") + Model.Count("needs_manual"))</span>)</button>
                 <button id="btn-reopen-skipped" class="btn btn-sm" type="button">Reopen Skipped (<span id="cnt-reopen-skipped">@Model.Count("skip")</span>)</button>
                 <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@(Model.Count("create_new") + Model.Count("create_failed"))</span>)</button>
+                <button id="btn-confirm-create" class="btn btn-sm" type="button">Confirm all &amp; Create</button>
                 <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>
             </div>
         }
@@ -177,7 +178,12 @@
                                 <button type="button" data-action="confirm">Confirm match…</button>
                             }
                             <button type="button" data-action="match">Manual match…</button>
-                            <button type="button" data-action="create_new">Create New (enrich)</button>
+                            <button type="button" data-action="create_new">Create New (SAP)</button>
+                            <button type="button" data-action="reenrich">Re-enrich…</button>
+                            @if (l.ReviewStatus != "needs_manual")
+                            {
+                                <button type="button" data-action="needs_manual">Mark needs manual</button>
+                            }
                             <button type="button" data-action="skip">Skip</button>
                             @if (l.ReviewStatus == "skip")
                             {
@@ -329,9 +335,13 @@
     function enrichmentHtml(enr) {
         const d = enr.item_data || {};
         const bf = enr.borrowed_from;
-        let html = '<h3>Enrich &amp; create item</h3>';
-        html += '<p>Source: <strong>' + esc(enr.enrichment_source || enr.source || 'unknown') + '</strong>';
-        if (enr.confirmation_required) html += ' <span class="pill pill-yellow">confirmation required</span>';
+        const noData = !enr.item_data;
+        // Enrichment already happened during extraction — show its outcome, don't imply it's pending.
+        let html = '<h3>Item enrichment</h3>';
+        html += '<p>Enrichment: <strong>' + (noData ? 'no catalog match found' : 'done') + '</strong>' +
+                ' &middot; source <strong>' + esc(enr.enrichment_source || enr.source || 'unknown') + '</strong>';
+        // Only a genuine cross-supplier borrow needs sign-off before creating.
+        if (bf) html += ' <span class="pill pill-yellow">borrowed — confirm before create</span>';
         html += '</p>';
         if (bf) {
             html += '<p class="ld-borrowed">Borrowed from article <strong>' + esc(bf.article_number) + '</strong>' +
@@ -373,7 +383,15 @@
                 } else if (action === 'confirm') {
                     openConfirmModal(row, lineId);
                 } else if (action === 'create_new') {
-                    await createNewFlow(row, lineId);
+                    // Enrichment already ran at extraction — Create New just marks the line for SAP
+                    // creation (no re-enrichment). The explicit choice also confirms it for the gate.
+                    const updated = await api('POST', '/lines/' + lineId + '/create-new', { confirmed: true });
+                    if (updated) setRowPill(row, updated.review_status);
+                } else if (action === 'reenrich') {
+                    await createNewFlow(row, lineId);   // explicit re-enrichment (rarely needed)
+                } else if (action === 'needs_manual') {
+                    const updated = await api('POST', '/lines/' + lineId + '/needs-manual');
+                    if (updated) setRowPill(row, updated.review_status);
                 }
                 await refreshSummary();
             } catch (e) {
@@ -613,12 +631,28 @@
             ]);
     });
 
+    document.getElementById('btn-confirm-create')?.addEventListener('click', () => {
+        openModal(
+            '<h3>Confirm all &amp; create</h3><p>This confirms <strong>every</strong> create-new line — including ' +
+            'any cross-supplier <em>borrowed</em> enrichments — without per-line review, then creates them in SAP. ' +
+            'Review borrowed lines first if unsure. Continue?</p>',
+            [
+                { label: 'Cancel', onClick: closeModal },
+                { label: 'Confirm all & create', primary: true, onClick: async () => {
+                    try { await api('POST', '/bulk-confirm-create-new'); }
+                    catch (e) { alert('Confirm failed: ' + e.message); return; }
+                    await runBulkCreate();
+                } }
+            ]);
+    });
+
     async function runBulkCreate() {
-        mBody.innerHTML = '<h3>Creating items…</h3><p>This can take a while (each item is enriched + written to SAP). Please keep this page open.</p>';
+        mBody.innerHTML = '<h3>Creating items…</h3><p>This can take a while (each item is written to SAP). Please keep this page open.</p>';
         mActions.innerHTML = '';
         try {
             const r = await api('POST', '/bulk-create');
             let html = '<h3>Bulk create complete</h3><p>Created ' + r.created + ' of ' + r.attempted + '. Needs confirmation: ' + (r.needs_confirmation || 0) + '. Failed: ' + r.failed + '.</p>';
+            if (r.needs_confirmation > 0) html += '<p class="hint">Needs-confirmation lines are cross-supplier borrowed enrichments — review them, or use “Confirm all &amp; Create” to sign off and create them.</p>';
             if (r.failures && r.failures.length) {
                 html += '<ul class="failure-list">';
                 r.failures.forEach(f => { html += '<li><strong>' + esc(f.article_number || '?') + '</strong>: ' + esc(f.error) + '</li>'; });
