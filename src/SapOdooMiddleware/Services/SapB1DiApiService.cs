@@ -2894,12 +2894,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     public async Task<SapDeliveryStatusResponse?> FindDeliveryByOrderAsync(int soDocEntry)
-    /// <summary>
-    /// Reads a SAP Delivery Note and returns all unique Odoo SO
-    /// references from the base documents (one per line's BaseEntry).
-    /// Used for multi-SO delivery callback handling.
-    /// </summary>
-    public async Task<List<string>> ReadDeliveryBaseSoRefsAsync(int docEntry)
     {
         await _lock.WaitAsync();
         try
@@ -2944,6 +2938,25 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 DocNum = docNum,
                 Status = status,
             };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads a SAP Delivery Note and returns all unique Odoo SO
+    /// references from the base documents (one per line's BaseEntry).
+    /// Used for multi-SO delivery callback handling.
+    /// </summary>
+    public async Task<List<string>> ReadDeliveryBaseSoRefsAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
             var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
 
             try
@@ -2967,12 +2980,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
 
                 var soRefs = new List<string>();
-                foreach (int soDocEntry in soDocEntries)
+                foreach (int soDE in soDocEntries)
                 {
                     var so = (Documents)_company.GetBusinessObject(BoObjectTypes.oOrders);
                     try
                     {
-                        if (so.GetByKey(soDocEntry))
+                        if (so.GetByKey(soDE))
                         {
                             string odooRef = "";
                             try { odooRef = so.UserFields.Fields.Item("U_Odoo_SO_ID").Value?.ToString() ?? ""; }
