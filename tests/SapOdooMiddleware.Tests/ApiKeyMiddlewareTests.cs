@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Moq;
+using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Services;
 
 namespace SapOdooMiddleware.Tests;
@@ -44,7 +45,7 @@ public class ApiKeyMiddlewareTests : IClassFixture<ApiKeyMiddlewareTests.TestApp
         var json = JsonNode.Parse(body);
         var errors = json?["errors"]?.AsArray();
         Assert.NotNull(errors);
-        Assert.Contains("Missing X-Api-Key header", errors![0]!.GetValue<string>());
+        Assert.Contains("Missing API key", errors![0]!.GetValue<string>());
     }
 
     [Fact]
@@ -97,6 +98,24 @@ public class ApiKeyMiddlewareTests : IClassFixture<ApiKeyMiddlewareTests.TestApp
     }
 
     [Fact]
+    public async Task DocumentStatus_NoApiKey_PassesAuth()
+    {
+        // GET /api/documents/{guid}/status is the one exempt path — no key, must not 401.
+        // With the mocked repo returning null it resolves to 404, proving it passed the gate.
+        var response = await _client.GetAsync($"/api/documents/{Guid.NewGuid()}/status");
+        Assert.NotEqual(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DocumentLines_NoApiKey_Returns401()
+    {
+        // Sibling /api/documents/* paths stay protected — only /status is exempt.
+        var response = await _client.GetAsync($"/api/documents/{Guid.NewGuid()}/lines");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task ServerKeyEmpty_AnyRequest_Returns401_WithConfigMessage()
     {
         // Create a factory with an empty server key
@@ -144,6 +163,13 @@ public class ApiKeyMiddlewareTests : IClassFixture<ApiKeyMiddlewareTests.TestApp
                 // Replace real services with mocks
                 services.AddSingleton(new Mock<ISapB1Service>().Object);
                 services.AddSingleton<IOdooService>(new Mock<IOdooService>().Object);
+
+                // Mock the staging repo so the (exempt) status endpoint resolves without Neon.
+                var docRepo = new Mock<IStagingDocumentRepository>();
+                docRepo
+                    .Setup(r => r.GetByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+                    .ReturnsAsync((StagingDocumentRow?)null);
+                services.AddSingleton<IStagingDocumentRepository>(docRepo.Object);
             });
         }
     }

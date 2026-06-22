@@ -1,0 +1,99 @@
+@page "/autohub/documents"
+@model SapOdooMiddleware.Areas.Autohub.Pages.Documents.IndexModel
+@functions {
+    static string StatusPill(string? s) => s switch
+    {
+        "reviewed" or "completed" or "extracted" => "pill-green",
+        "extracting" or "uploaded" => "pill-yellow",
+        "failed" or "error" => "pill-red",
+        _ => "pill-grey",
+    };
+    static string ValPill(string? s) => s switch
+    {
+        "passed" or "ok" or "valid" => "pill-green",
+        "warning" or "review" => "pill-yellow",
+        "failed" or "invalid" => "pill-red",
+        _ => "pill-grey",
+    };
+}
+
+<div class="page-head">
+    <div>
+        <h2>Recent documents</h2>
+        <div class="sub">Autohub spare-parts invoices — latest @Model.Docs.Count</div>
+    </div>
+    <a class="btn btn-primary" href="/autohub/documents/upload">＋ Upload new</a>
+</div>
+
+@if (TempData["Notice"] is string notice)
+{
+    <div class="notice">@notice</div>
+}
+
+@if (Model.Docs.Count == 0)
+{
+    <div class="empty">No invoices uploaded yet. <a href="/autohub/documents/upload">Upload your first invoice</a>.</div>
+}
+else
+{
+    <table>
+        <thead>
+            <tr>
+                <th>Uploaded</th>
+                <th>File</th>
+                <th>Supplier</th>
+                <th>Invoice #</th>
+                <th>Invoice date</th>
+                <th class="num">Pages</th>
+                <th>Status</th>
+                <th>Validation</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var d in Model.Docs)
+        {
+            <tr>
+                <td>@d.UploadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                <td>@d.OriginalFilename</td>
+                <td>@d.SupplierName</td>
+                <td>@d.InvoiceNumber</td>
+                <td>@(d.InvoiceDate?.ToString("yyyy-MM-dd"))</td>
+                <td class="num">@d.PageCount</td>
+                <td><span class="pill @StatusPill(d.Status)">@d.Status</span></td>
+                <td>
+                    @if (!string.IsNullOrWhiteSpace(d.ValidationStatus))
+                    {
+                        <span class="pill @ValPill(d.ValidationStatus)">@d.ValidationStatus</span>
+                    }
+                </td>
+                <td class="num" style="white-space:nowrap;">
+                    <a class="btn btn-sm" href="/autohub/documents/@d.Id">View →</a>
+                    <a href="#" class="btn btn-sm btn-danger del-doc" data-doc-id="@d.Id" data-name="@(d.InvoiceNumber ?? d.OriginalFilename)">Delete</a>
+                </td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}
+
+<script>
+(function () {
+    const apiKey = document.querySelector('meta[name="api-key"]')?.content || '';
+    document.querySelectorAll('a.del-doc').forEach(a => {
+        a.addEventListener('click', async (e) => {
+            e.preventDefault();
+            const id = a.dataset.docId;
+            if (!confirm('Delete "' + (a.dataset.name || id) + '" and all its extracted lines? This cannot be undone.')) return;
+            try {
+                const r = await fetch('/api/autohub/documents/' + id, {
+                    method: 'DELETE',
+                    headers: apiKey ? { 'X-Api-Key': apiKey } : {}
+                });
+                if (!r.ok) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
+                a.closest('tr').remove();
+            } catch (err) { alert('Delete failed: ' + err.message); }
+        });
+    });
+})();
+</script>

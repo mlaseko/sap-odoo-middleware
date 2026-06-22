@@ -30,9 +30,11 @@ public class LookupController : ControllerBase
     /// Searches SAP for a document matching the Odoo reference in UDFs.
     ///
     /// Supported document types:
-    ///   sales-order, delivery, invoice, payment, return, credit-memo
+    ///   sales-order, delivery, invoice, payment, return, credit-memo, customer
     ///
     /// Returns the SAP DocEntry, DocNum, status, and PickListEntry (for SO/delivery).
+    /// For <c>customer</c> the lookup is keyed by OCRD.U_OdooCustomerId and
+    /// returns CardCode (DocEntry/DocNum default to 0).
     /// Returns 404 if no matching document is found.
     /// </summary>
     [HttpGet("{documentType}")]

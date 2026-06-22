@@ -70,6 +70,7 @@ public class InvoicesCogsIntegrationTests
             .Setup(o => o.CreateOrUpdateCogsJournalAsync(It.Is<CogsJournalRequest>(r =>
                 r.DocEntry == 700 &&
                 r.DocNum == 800 &&
+                r.OdooInvoiceId == 42 &&
                 r.Lines.Count == 2 &&
                 r.Lines[0].ItemCode == "ITEM001" &&
                 r.Lines[0].UnitCost == 80.0 &&

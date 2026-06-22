@@ -69,6 +69,18 @@ public interface ISapB1Service
     Task<SapDeliveryStatusResponse> GetDeliveryStatusAsync(int docEntry);
 
     /// <summary>
+    /// Reads a Delivery Note and returns all unique Odoo SO refs
+    /// from the base documents. Used for multi-SO delivery handling.
+    /// </summary>
+    Task<List<string>> ReadDeliveryBaseSoRefsAsync(int docEntry);
+
+    /// <summary>
+    /// Reads the delivered items from a SAP delivery note.
+    /// Returns item codes and quantities for partial delivery handling.
+    /// </summary>
+    Task<List<(string ItemCode, double Quantity)>> ReadDeliveryLinesAsync(int docEntry);
+
+    /// <summary>
     /// Returns the document status (open/closed) of a Return Request (ORRR) in SAP B1.
     /// Odoo gates return validation on this — the picking can only be validated
     /// once the Return Request is closed (SAP has processed the inventory adjustment).
@@ -87,6 +99,16 @@ public interface ISapB1Service
     /// Updates UDF fields on an existing Return Request (ORRR) in SAP B1 by DocEntry.
     /// </summary>
     Task<SapGoodsReturnResponse> UpdateGoodsReturnAsync(int docEntry, SapGoodsReturnRequest request);
+
+    /// <summary>
+    /// Cancels a Goods Return (ORDN) in SAP B1 by DocEntry.
+    /// </summary>
+    Task CancelGoodsReturnAsync(int docEntry);
+
+    /// <summary>
+    /// Cancels a Credit Memo (ORIN) in SAP B1 by DocEntry.
+    /// </summary>
+    Task CancelCreditMemoAsync(int docEntry);
 
     /// <summary>
     /// Creates a Customer (BusinessPartner CardType=C) in SAP B1 via DI API.
@@ -128,6 +150,54 @@ public interface ISapB1Service
     /// </summary>
     Task<SapB1PingResponse> PingAsync();
 
+    // ================================
+    // ITEM PROVISIONING (Lubes)
+    // ================================
+
+    /// <summary>
+    /// Returns true if an OITM item with the given ItemCode already exists in SAP B1.
+    /// Used by Item Provisioning for an idempotency pre-check.
+    /// </summary>
+    Task<bool> ItemExistsAsync(string itemCode);
+
+    /// <summary>
+    /// Creates a Liqui Moly item master (OITM) in SAP B1 via DI API:
+    /// item type I, Inventory/Sales/Purchase = Y, UoM group "Packing Units",
+    /// VAT groups O1/I1, net (excl-VAT) TZS prices on price lists 1/2/3, and the
+    /// <c>U_Odoo_Category</c> UDF set to the Odoo category name. <c>U_Odoo_Product_ID</c>
+    /// is left empty at create and stamped later by the backref worker.
+    /// </summary>
+    Task CreateLubesItemAsync(SapLubesItemRequest request);
+
+    /// <summary>
+    /// Creates a spare-parts item master (OITM) in SAP B1 (Molas Autohub) via DI API:
+    /// item type I, Inventory/Sales/Purchase = Y, UoM group "Packing Units", VAT groups O1/I1,
+    /// TZS prices on price lists 1/3/5 (Cost/Retail/Wholesale), and the U_Article_No / U_Description /
+    /// U_FitForAuto / U_ImageUrl UDFs. OEM cross-references are NOT written to SAP (kept in Neon).
+    /// </summary>
+    Task CreateAutohubItemAsync(SapAutohubItemRequest request);
+
+    /// <summary>
+    /// Stamps the Odoo product id onto the SAP item's <c>U_Odoo_Product_ID</c> UDF.
+    /// Used by the backref worker once the Neon → Odoo automation has created the product.
+    /// </summary>
+    Task UpdateOdooProductIdAsync(string itemCode, string odooProductId);
+
+    /// <summary>
+    /// Returns a snapshot of the existing OITM item's Odoo-category UDF and price-list
+    /// prices, or <c>null</c> if the item does not exist. Used by the orchestrator to
+    /// decide between create and idempotent recovery.
+    /// </summary>
+    Task<SapItemSnapshot?> GetItemSnapshotAsync(string itemCode, CancellationToken ct);
+
+    /// <summary>
+    /// Idempotent recovery for an item that already exists in SAP: fills only the
+    /// blank fields (empty <c>U_Odoo_Category</c> UDF and/or any price-list price that
+    /// is 0) from <paramref name="desired"/>. Never overwrites a non-blank SAP value,
+    /// and only calls <c>Items.Update()</c> when at least one blank field needs filling.
+    /// </summary>
+    Task UpdateBlankFieldsAsync(string itemCode, SapLubesItemRequest desired, CancellationToken ct);
+
     /// <summary>
     /// Looks up a SAP document by its Odoo reference stored in a UDF.
     /// Used by the SAP Field Sync page to find missing SAP identifiers.
@@ -155,4 +225,19 @@ public interface ISapB1Service
     /// or null if no delivery exists for the given SO.
     /// </summary>
     Task<SapDeliveryStatusResponse?> FindDeliveryByOrderAsync(int soDocEntry);
+
+    /// Executes the inventory valuation SQL against SAP B1 via DI API Recordset.DoQuery()
+    /// and returns the total on-hand inventory value in TZS as of <paramref name="asOfDate"/>.
+    /// When <paramref name="asOfDate"/> is null, today's server date is used.
+    /// </summary>
+    Task<decimal> GetInventoryValuationTotalAsync(DateOnly? asOfDate);
+
+    /// <summary>Creates a Purchase Order in SAP B1 (oPurchaseOrders) and returns its DocEntry/DocNum.</summary>
+    Task<SapPurchaseOrderResponse> CreatePurchaseOrderAsync(SapPurchaseOrderRequest request);
+
+    /// <summary>
+    /// Returns the DocEntry/DocNum of an existing open/closed Purchase Order for the given vendor and
+    /// vendor reference (OPOR.CardCode + OPOR.NumAtCard), or null if none — used to prevent duplicate POs.
+    /// </summary>
+    Task<(int DocEntry, int DocNum)?> FindPurchaseOrderByNumAtCardAsync(string cardCode, string numAtCard);
 }
