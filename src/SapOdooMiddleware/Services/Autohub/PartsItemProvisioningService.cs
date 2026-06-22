@@ -148,7 +148,14 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         // Allocate the final ItemCode. NOTE: the counter is atomic but burns a number even if the
         // SAP write below fails — gaps in SAP item codes are acceptable; we never reuse/duplicate.
         var itemCode = await _sku.GenerateAsync(prefix, ct);
-        var itemName = BuildItemName(filtered, article!);
+        // ItemName carries the OEM cross-references: the line's invoice OEM(s) PLUS the donor's OEM
+        // cross-references — reference_type='oem' ONLY, never aftermarket/IAM equivalents — up to five,
+        // then the supplier article. The invoice usually lists a single OEM, so without these the item
+        // would show just one.
+        var donorOems = enr.NeonOitmId is { } oemDonorId
+            ? await _bridge.GetOemCrossReferencesAsync(oemDonorId, ct)
+            : (IReadOnlyList<string>)Array.Empty<string>();
+        var itemName = BuildItemName(MergeOems(filtered, donorOems), article!);
 
         var sapReq = new SapAutohubItemRequest(
             ItemCode: itemCode,
@@ -306,13 +313,29 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         return new PartsProvisioningOutcome("created", itemCode, null);
     }
 
-    /// <summary>D5 ItemName: up to five filtered OEMs then the supplier article, joined by '/'.</summary>
+    /// <summary>D5 ItemName: up to five OEMs then the supplier article, joined by '/'.</summary>
     private static string BuildItemName(IReadOnlyList<string> oems, string article)
     {
         var parts = oems.Take(5).ToList();
         parts.Add(article);
         var name = string.Join("/", parts);
         return name.Length > 200 ? name[..200] : name;
+    }
+
+    /// <summary>
+    /// The line's invoice OEM(s) first, then the enrichment cross-reference OEMs (filtered_oems),
+    /// de-duplicated (case-insensitive, order preserved). <see cref="BuildItemName"/> keeps up to five.
+    /// </summary>
+    private static List<string> MergeOems(IReadOnlyList<string> lineOems, IReadOnlyList<string>? enrichedOems)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var merged = new List<string>();
+        foreach (var o in lineOems.Concat(enrichedOems ?? Enumerable.Empty<string>()))
+        {
+            var t = o?.Trim();
+            if (!string.IsNullOrEmpty(t) && seen.Add(t)) merged.Add(t);
+        }
+        return merged;
     }
 
     /// <summary>
