@@ -1,0 +1,47 @@
+@inject Microsoft.Extensions.Options.IOptions<SapOdooMiddleware.Configuration.ApiKeySettings> ApiKeyOptions
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    @* Operator-UI pages call /api/* (review/match/create) from the browser; those routes require
+       X-Api-Key. Surface the configured key to same-origin scripts so apiFetch can attach it.
+       Operators are trusted and the app is network-restricted; the key is not otherwise secret. *@
+    <meta name="api-key" content="@ApiKeyOptions.Value.Key" />
+    @if (ViewData["AutoRefresh"] is true)
+    {
+        <meta http-equiv="refresh" content="3" />
+    }
+    <title>@ViewData["Title"] — Invoice Ingestion</title>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body>
+    @{
+        var reqPath = Context.Request.Path.Value ?? "";
+        var isAutohub = reqPath.StartsWith("/autohub", StringComparison.OrdinalIgnoreCase)
+                     || reqPath.StartsWith("/api/autohub", StringComparison.OrdinalIgnoreCase);
+        var docsBase = isAutohub ? "/autohub/documents" : "/documents";
+        var navDocs   = (reqPath.StartsWith(docsBase, StringComparison.OrdinalIgnoreCase) && !reqPath.EndsWith("/upload")) ? "nav-active" : "";
+        var navUpload = reqPath.EndsWith("/upload", StringComparison.OrdinalIgnoreCase) ? "nav-active" : "";
+        var navAdmin  = reqPath.StartsWith("/admin", StringComparison.OrdinalIgnoreCase) ? "nav-active" : "";
+    }
+    <header class="topbar">
+        <div class="topbar-inner">
+            <a class="brand" href="@docsBase"><span class="dot"></span> Invoice Ingestion</a>
+            <nav class="topnav">
+                <a href="@docsBase" class="@navDocs">Documents</a>
+                <a href="@docsBase/upload" class="@navUpload">Upload</a>
+                <a href="/admin" class="@navAdmin">Admin</a>
+            </nav>
+            <div class="tenant-switch">
+                <span class="ts-label">Tenant</span>
+                <a href="/documents" class="@(isAutohub ? "" : "tenant-active")">Lubes</a>
+                <a href="/autohub/documents" class="@(isAutohub ? "tenant-active" : "")">Autohub</a>
+            </div>
+        </div>
+    </header>
+    <main>
+        @RenderBody()
+    </main>
+</body>
+</html>

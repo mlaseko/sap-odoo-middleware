@@ -69,17 +69,16 @@ public class SapSalesOrderRequest
         !string.IsNullOrEmpty(UOdooSoId) ? UOdooSoId : (OdooSoRef ?? string.Empty);
 
     /// <summary>
-    /// Returns the effective Odoo delivery note reference, checked in priority order:
-    /// <c>OdooDeliveryId</c> (JSON: <c>odoo_delivery_id</c>), then header-level <c>Name</c>,
-    /// then the first non-empty line-level <c>UOdooDeliveryId</c>.
+    /// Returns the effective Odoo delivery note reference.
+    /// Uses only the explicit <c>OdooDeliveryId</c> field (JSON: <c>odoo_delivery_id</c>).
+    /// Returns null when no delivery ID is available (SO exported
+    /// before delivery was created).
     /// </summary>
     [JsonIgnore]
     public string? ResolvedDeliveryId =>
         !string.IsNullOrEmpty(OdooDeliveryId)
             ? OdooDeliveryId
-            : !string.IsNullOrEmpty(Name)
-                ? Name
-                : Lines.FirstOrDefault(l => !string.IsNullOrEmpty(l.UOdooDeliveryId))?.UOdooDeliveryId;
+            : null;
 }
 
 public class SapSalesOrderLineRequest

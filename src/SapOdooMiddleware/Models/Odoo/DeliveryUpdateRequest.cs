@@ -32,10 +32,27 @@ public class DeliveryUpdateRequest
     public string Status { get; set; } = "delivered";
 
     /// <summary>
+    /// Items actually delivered in this SAP delivery note.
+    /// When provided, only these items/quantities get confirmed in Odoo
+    /// (partial delivery). When null, all demand is confirmed (full delivery).
+    /// Populated by the WebhookQueueProcessor from the SAP delivery document.
+    /// </summary>
+    public List<DeliveredItem>? DeliveredItems { get; set; }
+
+    /// <summary>
     /// Returns the effective Odoo SO identifier: <c>UOdooSoId</c> if set,
     /// otherwise falls back to the deprecated <c>OdooSoRef</c>.
     /// </summary>
     [JsonIgnore]
     public string ResolvedSoId =>
         !string.IsNullOrEmpty(UOdooSoId) ? UOdooSoId : (OdooSoRef ?? string.Empty);
+}
+
+/// <summary>
+/// An item delivered in a SAP delivery note, with its actual quantity.
+/// </summary>
+public class DeliveredItem
+{
+    public string ItemCode { get; set; } = string.Empty;
+    public double Quantity { get; set; }
 }

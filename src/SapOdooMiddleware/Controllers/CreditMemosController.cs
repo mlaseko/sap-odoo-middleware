@@ -104,6 +104,36 @@ public class CreditMemosController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// DELETE /api/credit-memos/{docEntry}
+    /// Cancels a Credit Memo in SAP B1 when the credit note
+    /// is reset to draft or reversed in Odoo.
+    /// </summary>
+    [HttpDelete("{docEntry:int}")]
+    public async Task<IActionResult> Cancel(int docEntry)
+    {
+        _logger.LogInformation(
+            "Received Credit Memo cancel request — DocEntry={DocEntry}",
+            docEntry);
+
+        try
+        {
+            await _sapService.CancelCreditMemoAsync(docEntry);
+
+            _logger.LogInformation(
+                "SAP Credit Memo cancelled: DocEntry={DocEntry}", docEntry);
+
+            return Ok(ApiResponse<object>.Ok(new { doc_entry = docEntry, action = "cancelled" }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to cancel SAP Credit Memo DocEntry={DocEntry}", docEntry);
+
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
+    }
+
     private async Task WriteBackToOdoo(SapCreditMemoRequest request, SapCreditMemoResponse result)
     {
         try

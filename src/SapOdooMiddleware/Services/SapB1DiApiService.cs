@@ -200,6 +200,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         ("OINV", "Odoo_SO_ID", "Odoo Sales Order ID", 0, 50),
         ("OINV", "Odoo_LastSync", "Last Odoo Sync Date", 3, 0),
         ("OINV", "Odoo_SyncDir", "Odoo Sync Direction", 0, 10),
+
+        // OITM (Items) — Item Provisioning
+        ("OITM", "Odoo_Category", "Odoo Category Name", 0, 70),
+        ("OITM", "Odoo_Product_ID", "Odoo Product ID", 0, 20),
     ];
 
     public async Task<List<string>> EnsureUdfsAsync()
@@ -277,6 +281,81 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     // ================================
     // SALES ORDER
     // ================================
+    /// <summary>
+    /// Runs a single OBIN+OIBQ query to snapshot on-hand stock across
+    /// the SO's item codes.  Result is the shape
+    /// <see cref="BinAllocationPlanner.BinStock"/> expects so the caller
+    /// can pass it straight to <see cref="BinAllocationPlanner.Plan"/>.
+    ///
+    /// When <paramref name="allowFallback"/> is true the BinCode IN (…)
+    /// filter is dropped so every bin with stock for these items is
+    /// returned — the planner then walks priority bins first and uses
+    /// the rest as a second-chance pass.  When false, only priority
+    /// bins are returned (legacy behaviour).
+    ///
+    /// Returns an empty dictionary when <paramref name="itemCodes"/> is
+    /// empty or when <paramref name="binPriority"/> has no entries (no
+    /// bin management in effect).
+    /// </summary>
+    private Dictionary<string, BinAllocationPlanner.BinStock> QueryBinStockForItems(
+        IReadOnlyCollection<string> itemCodes,
+        IReadOnlyList<string> binPriority,
+        bool allowFallback)
+    {
+        var binInfo = new Dictionary<string, BinAllocationPlanner.BinStock>(
+            StringComparer.OrdinalIgnoreCase);
+
+        if (itemCodes.Count == 0 || binPriority.Count == 0)
+            return binInfo;
+
+        var itemCodesForSql = string.Join(",",
+            itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
+        var binCodesForSql = string.Join(",",
+            binPriority.Select(bc => $"'{bc.Replace("'", "''")}'"));
+
+        string binFilter = allowFallback
+            ? string.Empty
+            : $"BIN.\"BinCode\" IN ({binCodesForSql}) AND ";
+
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery(
+                $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", "
+                + $"IB.\"ItemCode\", IB.\"OnHandQty\" "
+                + $"FROM OBIN BIN "
+                + $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" "
+                + $"WHERE {binFilter}IB.\"ItemCode\" IN ({itemCodesForSql}) "
+                + $"AND IB.\"OnHandQty\" > 0");
+
+            while (!rs.EoF)
+            {
+                var binCode = (string)rs.Fields.Item("BinCode").Value;
+                var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
+                var whsCode = (string)rs.Fields.Item("WhsCode").Value;
+                var itemCode = (string)rs.Fields.Item("ItemCode").Value;
+                var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
+
+                if (!binInfo.TryGetValue(binCode, out var existing))
+                {
+                    existing = new BinAllocationPlanner.BinStock(
+                        absEntry, binCode, whsCode,
+                        new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase));
+                    binInfo[binCode] = existing;
+                }
+                existing.OnHandByItemCode[itemCode] = onHand;
+
+                rs.MoveNext();
+            }
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+
+        return binInfo;
+    }
+
     public async Task<SapSalesOrderResponse> CreateSalesOrderAsync(SapSalesOrderRequest request)
     {
         await _lock.WaitAsync();
@@ -339,26 +418,80 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
             _logger.LogDebug("UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header.", syncDate, SyncDirectionOdooToSap);
 
+            // ── Stock-aware warehouse planning ──
+            // Odoo doesn't carry warehouse data on SO lines; relying on
+            // SAP's BP/user/company default sends lines to a warehouse
+            // that may have zero stock for the item (happened on
+            // S09868: item 1598 was posted to MainWHSE while its only
+            // stock lived in COCWHSE, so the pick list had nothing to
+            // allocate).  We fix that here by snapshotting on-hand
+            // stock once and using BinAllocationPlanner to assign each
+            // line a WhsCode derived from the highest-priority bin
+            // that actually holds stock for the item.  The plan is
+            // reused further down to build the pick list without
+            // re-querying.
+            var binPriority = _settings.BinLocationPriority ?? new List<string>();
+            bool allowFallback = _settings.AllowFallbackBinAllocation;
+            var requestItemCodes = request.Lines
+                .Where(l => !string.IsNullOrWhiteSpace(l.ItemCode))
+                .Select(l => l.ItemCode)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var binInfo = QueryBinStockForItems(requestItemCodes, binPriority, allowFallback);
+
+            if (binPriority.Count > 0)
+            {
+                _logger.LogInformation(
+                    "Bin stock query returned data for {BinCount} bin(s) across {ItemCount} item(s) (fallback={Fallback})",
+                    binInfo.Count, requestItemCodes.Count, allowFallback);
+            }
+
+            var planInputs = request.Lines.Select((l, idx) =>
+                new BinAllocationPlanner.LineInput(
+                    idx, l.ItemCode, l.Quantity, l.WarehouseCode)).ToList();
+            var plans = binPriority.Count > 0
+                ? BinAllocationPlanner.Plan(
+                    planInputs, binPriority, binInfo, allowFallback,
+                    _settings.DefaultWarehouseCode ?? string.Empty)
+                : planInputs.Select(pi => new BinAllocationPlanner.LinePlan(
+                    pi.LineIdx, pi.ItemCode, pi.Required,
+                    pi.ExplicitWhsCode ?? _settings.DefaultWarehouseCode ?? string.Empty,
+                    Array.Empty<BinAllocationPlanner.BinPick>(), 0)).ToList();
+
             for (int i = 0; i < request.Lines.Count; i++)
             {
                 if (i > 0)
                     order.Lines.Add();
 
                 var line = request.Lines[i];
+                var linePlan = plans[i];
 
-                // Display value for logging only — "(default)" when no warehouse was specified.
-                var warehouseForLogging = line.WarehouseCode ?? "(default)";
+                // Plan.WhsCode overrides SAP's default cascade when
+                // Odoo didn't pin an explicit warehouse on the line.
+                // When Odoo did pin one, the plan honours it (Phase 0)
+                // so the caller's choice still wins.
+                string? resolvedWhs = !string.IsNullOrEmpty(line.WarehouseCode)
+                    ? line.WarehouseCode
+                    : !string.IsNullOrEmpty(linePlan.WhsCode)
+                        ? linePlan.WhsCode
+                        : null;
 
-                _logger.LogDebug(
-                    "Line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={UnitPrice}, Warehouse={Warehouse}",
-                    i, line.ItemCode, line.Quantity, line.UnitPrice, warehouseForLogging);
+                var warehouseForLogging = resolvedWhs ?? "(SAP default)";
+
+                _logger.LogInformation(
+                    "Line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={UnitPrice}, "
+                    + "Warehouse={Warehouse} (source={Source}, planBins={BinCount}, shortfall={Shortfall})",
+                    i, line.ItemCode, line.Quantity, line.UnitPrice, warehouseForLogging,
+                    !string.IsNullOrEmpty(line.WarehouseCode) ? "request"
+                        : !string.IsNullOrEmpty(linePlan.WhsCode) ? "plan" : "sap-default",
+                    linePlan.Picks.Count, linePlan.Shortfall);
 
                 order.Lines.ItemCode = line.ItemCode;
                 order.Lines.Quantity = line.Quantity;
                 order.Lines.UnitPrice = line.UnitPrice;
 
-                if (!string.IsNullOrEmpty(line.WarehouseCode))
-                    order.Lines.WarehouseCode = line.WarehouseCode;
+                if (!string.IsNullOrEmpty(resolvedWhs))
+                    order.Lines.WarehouseCode = resolvedWhs;
 
                 if (!string.IsNullOrEmpty(line.UOdooSoLineId))
                     TrySetUserField(order.Lines.UserFields, "U_Odoo_SOLine_ID", line.UOdooSoLineId, $"line[{i}]");
@@ -400,6 +533,29 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 UOdooSoId = request.ResolvedSoId
             };
 
+            // Emit one structured warning per line that couldn't be
+            // fully bin-allocated.  These are attached to the response
+            // even when AutoCreatePickList is disabled so the ICC can
+            // surface them on the integration.log regardless of whether
+            // the pick-list path actually ran.
+            foreach (var p in plans.Where(p => p.Shortfall > 0))
+            {
+                response.Warnings.Add(new SalesOrderWarning
+                {
+                    Code = "BIN_SHORTFALL",
+                    ItemCode = p.ItemCode,
+                    LineNum = p.LineIdx,
+                    WarehouseCode = p.WhsCode,
+                    Required = p.Required,
+                    Allocated = p.Required - p.Shortfall,
+                    Message =
+                        $"Item {p.ItemCode} (line {p.LineIdx}): required {p.Required:0.##}, "
+                        + $"allocated {(p.Required - p.Shortfall):0.##} across "
+                        + $"{p.Picks.Count} bin(s) in warehouse {p.WhsCode}. "
+                        + "Pick list line skipped; warehouse must allocate manually."
+                });
+            }
+
             if (_settings.AutoCreatePickList)
             {
                 _logger.LogInformation(
@@ -408,51 +564,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
                 try
                 {
-                    var binPriority = _settings.BinLocationPriority;
-                    bool useBinAllocation = binPriority != null && binPriority.Count > 0;
+                    bool useBinAllocation = binPriority.Count > 0;
 
-                    // ── Resolve bin AbsEntry values and stock levels ──
-                    // Maps: BinCode → (AbsEntry, WhsCode, { ItemCode → AvailableQty })
-                    var binInfo = new Dictionary<string, (int absEntry, string whsCode, Dictionary<string, double> stock)>();
-
-                    if (useBinAllocation)
-                    {
-                        // Collect all unique item codes from SO lines
-                        var itemCodes = lineCaptures.Select(lc => lc.itemCode).Distinct().ToList();
-                        var itemCodesForSql = string.Join(",", itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
-                        var binCodesForSql = string.Join(",", binPriority!.Select(bc => $"'{bc.Replace("'", "''")}'"));
-
-                        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
-                        rs.DoQuery(
-                            $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
-                            $"FROM OBIN BIN " +
-                            $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" " +
-                            $"WHERE BIN.\"BinCode\" IN ({binCodesForSql}) " +
-                            $"AND IB.\"ItemCode\" IN ({itemCodesForSql}) " +
-                            $"AND IB.\"OnHandQty\" > 0");
-
-                        while (!rs.EoF)
-                        {
-                            var binCode = (string)rs.Fields.Item("BinCode").Value;
-                            var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
-                            var whsCode = (string)rs.Fields.Item("WhsCode").Value;
-                            var itemCode = (string)rs.Fields.Item("ItemCode").Value;
-                            var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
-
-                            if (!binInfo.ContainsKey(binCode))
-                                binInfo[binCode] = (absEntry, whsCode, new Dictionary<string, double>());
-                            binInfo[binCode].stock[itemCode] = onHand;
-
-                            rs.MoveNext();
-                        }
-                        Marshal.ReleaseComObject(rs);
-
-                        _logger.LogInformation(
-                            "Bin stock query returned data for {BinCount} bins across {ItemCount} items",
-                            binInfo.Count, itemCodes.Count);
-                    }
-
-                    // ── Build pick list with cascading bin allocation ──
                     var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
                     pickList.PickDate = DateTime.Now;
 
@@ -462,10 +575,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     for (int i = 0; i < lineCaptures.Count; i++)
                     {
                         var (lineNum, qty, itemCode, lineWhsCode) = lineCaptures[i];
+                        var linePlan = plans[i];
 
                         if (!useBinAllocation)
                         {
-                            // Legacy behavior: no bin allocation
+                            // Legacy behaviour: no bin management configured.
                             if (pickLineIndex > 0) pickList.Lines.Add();
                             pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
                             pickList.Lines.OrderEntry = docEntry;
@@ -476,56 +590,37 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                             continue;
                         }
 
-                        // Cascading allocation across priority bins
-                        double remaining = qty;
-                        var allocations = new List<(int binAbsEntry, string binCode, double allocQty)>();
-
-                        foreach (var binCode in binPriority!)
+                        if (linePlan.Shortfall > 0 || linePlan.Picks.Count == 0)
                         {
-                            if (remaining <= 0) break;
-
-                            if (!binInfo.TryGetValue(binCode, out var bin)) continue;
-                            // Only use bins that belong to the same warehouse as the SO line
-                            if (!string.IsNullOrEmpty(lineWhsCode)
-                                && !string.Equals(bin.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
-                                continue;
-                            if (!bin.stock.TryGetValue(itemCode, out var available) || available <= 0) continue;
-
-                            double take = Math.Min(remaining, available);
-                            allocations.Add((bin.absEntry, binCode, take));
-                            remaining -= take;
-                            // Reduce available so subsequent lines don't over-allocate
-                            bin.stock[itemCode] = available - take;
-                        }
-
-                        if (remaining > 0)
-                        {
-                            // Not enough stock across all bins — skip this line entirely
                             _logger.LogWarning(
-                                "Skipping pick list for item {ItemCode} (line {LineNum}): " +
-                                "need {Required}, only {Available} available across priority bins",
-                                itemCode, lineNum, qty, qty - remaining);
+                                "Skipping pick list for item {ItemCode} (line {LineNum}): "
+                                + "plan allocated {Allocated}/{Required} in warehouse {Whs} "
+                                + "(fallback={Fallback})",
+                                itemCode, lineNum,
+                                qty - linePlan.Shortfall, qty, linePlan.WhsCode, allowFallback);
                             continue;
                         }
 
-                        // Add pick list line with bin allocations
                         if (pickLineIndex > 0) pickList.Lines.Add();
                         pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
                         pickList.Lines.OrderEntry = docEntry;
                         pickList.Lines.OrderRowID = lineNum;
                         pickList.Lines.ReleasedQuantity = qty;
 
-                        for (int b = 0; b < allocations.Count; b++)
+                        for (int b = 0; b < linePlan.Picks.Count; b++)
                         {
+                            var pick = linePlan.Picks[b];
                             if (b > 0) pickList.Lines.BinAllocations.Add();
-                            pickList.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
-                            pickList.Lines.BinAllocations.Quantity = allocations[b].allocQty;
+                            pickList.Lines.BinAllocations.BinAbsEntry = pick.AbsEntry;
+                            pickList.Lines.BinAllocations.Quantity = pick.Qty;
                             pickList.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = pickLineIndex;
 
                             _logger.LogInformation(
-                                "  Item {ItemCode} line {LineNum}: bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}",
-                                itemCode, lineNum, allocations[b].binCode,
-                                allocations[b].binAbsEntry, allocations[b].allocQty);
+                                "  Item {ItemCode} line {LineNum}: bin {BinCode} "
+                                + "(AbsEntry={AbsEntry}, Whs={Whs}) → {Qty}{Tag}",
+                                itemCode, lineNum, pick.BinCode,
+                                pick.AbsEntry, pick.WhsCode, pick.Qty,
+                                pick.IsFallback ? " [fallback]" : "");
                         }
 
                         anyLineAllocated = true;
@@ -535,7 +630,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     if (!anyLineAllocated)
                     {
                         _logger.LogWarning(
-                            "No lines could be fully allocated from priority bins — skipping pick list creation for DocEntry={DocEntry}",
+                            "No lines could be fully allocated — skipping pick list creation for DocEntry={DocEntry}",
                             docEntry);
                         Marshal.ReleaseComObject(pickList);
                     }
@@ -593,6 +688,44 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "Updating SAP SO — DocEntry={DocEntry}, ResolvedSoId={ResolvedSoId}",
                 docEntry, request.ResolvedSoId);
 
+            // ── Pre-flight: refuse the SO update entirely if the active
+            //    pick list is in 'Picked' status.  At that point the
+            //    warehouse has already started gathering items and
+            //    line-quantity / line-set changes would silently
+            //    invalidate their work.  SAP also refuses Close() on a
+            //    Picked pick list, so the cancel-and-replace path in
+            //    _RefreshPickListForSO would fail anyway — better to
+            //    fail fast BEFORE any SAP changes are committed and
+            //    surface a clear operator instruction.  The SO update
+            //    can be retried after the operator either posts the
+            //    delivery (which Closes the pick list) or undoes the
+            //    picking in SAP B1's Pick & Pack Manager (which reverts
+            //    the line back to Released).
+            if (request.Lines.Count > 0 && _settings.AutoCreatePickList)
+            {
+                int? preflightPkl = LookupPickListForSalesOrder(docEntry);
+                if (preflightPkl.HasValue)
+                {
+                    string preflightStatus = GetPickListStatus(preflightPkl.Value);
+                    if (preflightStatus == "P")
+                    {
+                        throw new InvalidOperationException(
+                            $"Cannot update SO DocEntry={docEntry}: pick list "
+                            + $"AbsEntry={preflightPkl.Value} is in 'Picked' status. "
+                            + "Warehouse has already started picking — line changes "
+                            + "would invalidate their work.\n\n"
+                            + "Operator action required (in SAP B1):\n"
+                            + "  1. Open Pick & Pack Manager → find pick list "
+                            + $"AbsEntry={preflightPkl.Value}\n"
+                            + "  2. Either: post the delivery from it (which Closes "
+                            + "the pick list), OR undo the picking (which reverts "
+                            + "the lines to Released)\n"
+                            + "  3. Re-trigger the SO update from Odoo (re-sync via "
+                            + "ICC or manual push).");
+                    }
+                }
+            }
+
             var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
 
             if (!order.GetByKey(docEntry))
@@ -640,6 +773,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "UDF U_Odoo_LastSync set to '{Value}' and U_Odoo_SyncDir set to '{SyncDir}' on SO header update.",
                 syncDate, SyncDirectionOdooToSap);
 
+            // Update line quantities when lines are provided
+            if (request.Lines.Count > 0)
+            {
+                _UpdateSalesOrderLines(order, request);
+            }
+
             int result = order.Update();
 
             if (result != 0)
@@ -656,17 +795,686 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 "✅ SAP SO updated: DocEntry={DocEntry}, DocNum={DocNum}",
                 docEntry, docNum);
 
+            // Refresh pick list if lines were updated.  _RefreshPickListForSO
+            // builds a replacement pick list first, and only closes the old
+            // one after the new one is safely added (atomic refresh).  On
+            // success it returns the new AbsEntry so we can include it on
+            // the response — the ICC writes it back onto the Odoo sale.order
+            // (x_sap_picklist_id) and every related outgoing stock.picking
+            // so warehouse staff and downstream documents reference the new
+            // pick list.  On failure it returns a warning for ICC to log
+            // while leaving the old pick list in place.
+            string? pickListWarning = null;
+            int? refreshedPickListEntry = null;
+            if (request.Lines.Count > 0 && _settings.AutoCreatePickList)
+            {
+                (pickListWarning, refreshedPickListEntry) =
+                    _RefreshPickListForSO(docEntry, request);
+            }
+
             return new SapSalesOrderResponse
             {
                 DocEntry = docEntry,
                 DocNum = docNum,
-                UOdooSoId = request.ResolvedSoId
+                UOdooSoId = request.ResolvedSoId,
+                PickListEntry = refreshedPickListEntry,
+                Warning = pickListWarning,
             };
         }
         finally
         {
             _lock.Release();
         }
+    }
+
+    /// <summary>
+    /// Updates SAP SO line quantities to match the incoming request.
+    /// Matches lines by ItemCode. For matched lines, updates Quantity
+    /// and UnitPrice.  New items are appended as additional lines;
+    /// newly-appended lines receive a stock-aware WhsCode from
+    /// <see cref="BinAllocationPlanner"/> (existing SAP lines keep
+    /// their current warehouse — SAP B1 will generally refuse to
+    /// change WhsCode on a line that has been picked or partially
+    /// delivered, so we avoid that class of bug).
+    /// </summary>
+    private void _UpdateSalesOrderLines(Documents order, SapSalesOrderRequest request)
+    {
+        int sapLineCount = order.Lines.Count;
+
+        // Build a map of existing SAP lines by ItemCode
+        var sapLines = new Dictionary<string, int>();
+        for (int i = 0; i < sapLineCount; i++)
+        {
+            order.Lines.SetCurrentLine(i);
+            var ic = order.Lines.ItemCode ?? "";
+            if (!sapLines.ContainsKey(ic))
+                sapLines[ic] = i;
+        }
+
+        // Identify NEW lines (item codes not already on the SAP doc)
+        // and plan bin allocation for them so each gets an appropriate
+        // WhsCode.  Existing lines are not re-planned — their WhsCode
+        // stays as SAP has it.
+        var newLines = request.Lines
+            .Select((rl, idx) => (reqIdx: idx, line: rl))
+            .Where(x => !string.IsNullOrWhiteSpace(x.line.ItemCode)
+                     && !sapLines.ContainsKey(x.line.ItemCode))
+            .ToList();
+
+        var newLinePlans = new Dictionary<int, BinAllocationPlanner.LinePlan>();
+        if (newLines.Count > 0)
+        {
+            var binPriority = _settings.BinLocationPriority ?? new List<string>();
+            bool allowFallback = _settings.AllowFallbackBinAllocation;
+            var itemCodes = newLines
+                .Select(x => x.line.ItemCode)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var binInfo = QueryBinStockForItems(itemCodes, binPriority, allowFallback);
+            var planInputs = newLines.Select(x =>
+                new BinAllocationPlanner.LineInput(
+                    x.reqIdx, x.line.ItemCode, x.line.Quantity, x.line.WarehouseCode))
+                .ToList();
+            var plans = binPriority.Count > 0
+                ? BinAllocationPlanner.Plan(
+                    planInputs, binPriority, binInfo, allowFallback,
+                    _settings.DefaultWarehouseCode ?? string.Empty)
+                : planInputs.Select(pi => new BinAllocationPlanner.LinePlan(
+                    pi.LineIdx, pi.ItemCode, pi.Required,
+                    pi.ExplicitWhsCode ?? _settings.DefaultWarehouseCode ?? string.Empty,
+                    Array.Empty<BinAllocationPlanner.BinPick>(), 0)).ToList();
+            foreach (var p in plans)
+                newLinePlans[p.LineIdx] = p;
+        }
+
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            var reqLine = request.Lines[i];
+            if (sapLines.TryGetValue(reqLine.ItemCode, out int sapIdx))
+            {
+                // Update existing line
+                order.Lines.SetCurrentLine(sapIdx);
+                double oldQty = order.Lines.Quantity;
+                if (Math.Abs(oldQty - reqLine.Quantity) > 0.001)
+                {
+                    order.Lines.Quantity = reqLine.Quantity;
+                    _logger.LogInformation(
+                        "SO line updated: ItemCode={ItemCode}, Qty {OldQty} -> {NewQty}",
+                        reqLine.ItemCode, oldQty, reqLine.Quantity);
+                }
+                if (Math.Abs(order.Lines.UnitPrice - reqLine.UnitPrice) > 0.001)
+                {
+                    order.Lines.UnitPrice = reqLine.UnitPrice;
+                }
+            }
+            else
+            {
+                // New line — append
+                order.Lines.Add();
+                order.Lines.ItemCode = reqLine.ItemCode;
+                order.Lines.Quantity = reqLine.Quantity;
+                order.Lines.UnitPrice = reqLine.UnitPrice;
+
+                string? resolvedWhs = !string.IsNullOrEmpty(reqLine.WarehouseCode)
+                    ? reqLine.WarehouseCode
+                    : (newLinePlans.TryGetValue(i, out var linePlan)
+                        && !string.IsNullOrEmpty(linePlan.WhsCode))
+                        ? linePlan.WhsCode
+                        : null;
+                if (!string.IsNullOrEmpty(resolvedWhs))
+                    order.Lines.WarehouseCode = resolvedWhs;
+
+                _logger.LogInformation(
+                    "SO line added: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Whs={Whs}",
+                    reqLine.ItemCode, reqLine.Quantity, reqLine.UnitPrice,
+                    resolvedWhs ?? "(SAP default)");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Refreshes the pick list for an SO after its lines were updated.
+    /// Uses an atomic "create-then-close" pattern: a replacement pick
+    /// list is built and added FIRST, and only when it succeeds is the
+    /// old pick list closed.  If the replacement cannot be built (e.g.
+    /// bin stock is insufficient for one of the new lines) the old
+    /// pick list is left untouched so the warehouse is never left
+    /// with zero active pick lists.
+    /// </summary>
+    /// <returns>
+    /// A tuple <c>(warning, pickListEntry)</c> where:
+    ///   <list type="bullet">
+    ///     <item><c>warning</c> is <c>null</c> on clean success, or a
+    ///       human-readable string when the existing pick list was
+    ///       already Picked/Closed, the replacement could not be built,
+    ///       or an exception was caught — in all cases the SO header
+    ///       + lines update itself has already succeeded.</item>
+    ///     <item><c>pickListEntry</c> is the AbsEntry of the pick list
+    ///       that is now ACTIVE for this SO.  When the replacement was
+    ///       built successfully this is the NEW pick list's AbsEntry;
+    ///       the ICC must write this back to <c>x_sap_picklist_id</c>
+    ///       on the Odoo sale.order and every related outgoing picking
+    ///       so downstream documents reference the new pick list.  When
+    ///       the replacement was skipped (P/C existing) this is the
+    ///       existing pick list's AbsEntry (unchanged).  When no pick
+    ///       list exists at all, this is <c>null</c>.</item>
+    ///   </list>
+    /// </returns>
+    private (string? warning, int? pickListEntry) _RefreshPickListForSO(
+        int soDocEntry, SapSalesOrderRequest request)
+    {
+        try
+        {
+            int? existingPklEntry = LookupPickListForSalesOrder(soDocEntry);
+
+            // If an existing pick list is present, inspect its status FIRST.
+            // Released ('R') → eligible to be closed and replaced.
+            // Picked ('P') / Closed ('C') → cannot be closed-and-replaced by
+            // the DI API; the warehouse has already started picking and SAP
+            // would reject the Close().  Surface a warning so operators know
+            // to manually add the missing line(s) to the active pick list.
+            string existingStatus = "N";
+            if (existingPklEntry.HasValue)
+            {
+                var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+                rs.DoQuery(
+                    $"SELECT \"Status\" FROM \"OPKL\" WHERE \"AbsEntry\" = {existingPklEntry.Value}");
+                if (!rs.EoF)
+                    existingStatus = rs.Fields.Item("Status").Value?.ToString() ?? "N";
+                Marshal.ReleaseComObject(rs);
+
+                if (existingStatus != "R")
+                {
+                    // Status C (Closed): either the delivery was posted
+                    // (delivered lines now have RemainingOpenQuantity=0 on
+                    // ORDR) or the pick list was cancelled without delivery
+                    // (all lines freed back to open).  Either way, the
+                    // items still needing picking are exactly the ORDR
+                    // lines with RemainingOpenQuantity > 0 — and those are
+                    // NOT claimed by any active pick list.  So we can
+                    // safely build a FOLLOW-UP pick list (without closing
+                    // the old one, which is already closed).
+                    //
+                    // Status P (Picked): items have been gathered but no
+                    // delivery has been posted yet.  The items are still
+                    // locked by the existing pick list — SAP would reject
+                    // a second release.  Must warn and let warehouse close
+                    // the existing pick list / post delivery first.
+                    if (existingStatus == "C")
+                    {
+                        _logger.LogInformation(
+                            "Pick list AbsEntry={PklEntry} is Closed — attempting "
+                            + "to create a FOLLOW-UP pick list for undelivered SO lines.",
+                            existingPklEntry.Value);
+
+                        var (followUpEntry, followUpWarning) =
+                            _TryCreatePickListForSO(soDocEntry);
+
+                        if (followUpEntry.HasValue)
+                        {
+                            _logger.LogInformation(
+                                "Follow-up pick list AbsEntry={NewEntry} created for "
+                                + "SO DocEntry={DocEntry}; original pick list "
+                                + "AbsEntry={OldEntry} left as-is (already Closed).",
+                                followUpEntry.Value, soDocEntry, existingPklEntry.Value);
+                            // NOTE: we deliberately do NOT close the old pick
+                            // list — it's already Closed.  Return the new
+                            // AbsEntry so the ICC writes it back to
+                            // sale.order.x_sap_picklist_id and every active
+                            // outgoing stock.picking.
+                            return (followUpWarning, followUpEntry);
+                        }
+                        // _TryCreatePickListForSO returned (null, msg):
+                        // either there were no undelivered lines (nothing
+                        // to do — return the existing closed AbsEntry with
+                        // no warning) or the build failed (fall through to
+                        // the P/C warning path below).
+                        if (followUpWarning == null)
+                        {
+                            // Nothing to pick — all lines are fully
+                            // delivered.  Keep existing AbsEntry aligned
+                            // on Odoo side; no caveat to surface.
+                            return (null, existingPklEntry);
+                        }
+                        _logger.LogWarning(
+                            "Follow-up pick list build failed for SO "
+                            + "DocEntry={DocEntry}: {Msg}. Falling through to "
+                            + "operator warning.", soDocEntry, followUpWarning);
+                    }
+
+                    string statusLabel = existingStatus switch
+                    {
+                        "P" => "Picked",
+                        "C" => "Closed",
+                        _ => existingStatus,
+                    };
+                    string warningPC =
+                        $"Pick list AbsEntry={existingPklEntry.Value} for SO DocEntry={soDocEntry} "
+                        + $"is {statusLabel} ({existingStatus}) — SO lines were updated in SAP but the "
+                        + "pick list could NOT be refreshed with the new line set. "
+                        + "Warehouse must add missing line(s) manually to the existing pick list, "
+                        + "or a new pick list must be created for the additional items.";
+                    _logger.LogWarning(
+                        "Pick list AbsEntry={PklEntry} status={Status} — SO DocEntry={DocEntry} "
+                        + "lines were updated but pick list NOT refreshed: {Warning}",
+                        existingPklEntry.Value, existingStatus, soDocEntry, warningPC);
+                    // Existing pick list is still the active one — return it
+                    // so the ICC keeps x_sap_picklist_id aligned.
+                    return (warningPC, existingPklEntry);
+                }
+            }
+
+            // ── Cancel-and-replace path (existing status = 'R') ────────
+            //
+            // Goal: ONE pick list per SO at all times.  Close the
+            // existing Released pick list FIRST, then build a brand-new
+            // pick list with all currently-open SO lines (including
+            // the lines that were on the old pick list, which become
+            // open again as soon as the old one is Closed).  The
+            // operator agreed to "fast and loose" semantics: no
+            // snapshot/rollback — if the new build fails after the old
+            // is closed, the SO has zero active pick lists and the
+            // operator must recreate it manually via SAP B1 Pick & Pack
+            // Manager → Open tab → Pick All, or by re-syncing the SO
+            // from Odoo.  See the catastrophe-log path below.
+            //
+            // P-status is filtered out at UpdateSalesOrderAsync's
+            // pre-flight (the SO update is refused entirely before any
+            // SAP changes commit), so by the time we reach here the
+            // existing pick list is guaranteed to be Releasable.
+            if (existingPklEntry.HasValue)
+            {
+                var pklToClose = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+                int closeResult;
+                string closeErr = string.Empty;
+                try
+                {
+                    if (!pklToClose.GetByKey(existingPklEntry.Value))
+                    {
+                        Marshal.ReleaseComObject(pklToClose);
+                        string msg =
+                            $"Pick list AbsEntry={existingPklEntry.Value} for SO DocEntry={soDocEntry} "
+                            + "was located by query but could not be opened by DI API. "
+                            + "Existing pick list left in place; refresh aborted.";
+                        _logger.LogWarning(msg);
+                        return (msg, existingPklEntry);
+                    }
+                    closeResult = pklToClose.Close();
+                    if (closeResult != 0)
+                        _company.GetLastError(out _, out closeErr);
+                }
+                finally { Marshal.ReleaseComObject(pklToClose); }
+
+                if (closeResult != 0)
+                {
+                    string msg =
+                        $"Could not close existing pick list AbsEntry={existingPklEntry.Value} "
+                        + $"for SO DocEntry={soDocEntry}: {closeErr}. "
+                        + "SAP refused the close — most likely a status flip to Picked "
+                        + "happened between the pre-flight check and now (concurrent "
+                        + "warehouse activity), or a row-lock collision.  Existing pick "
+                        + "list left in place; SO line changes were already committed "
+                        + "to SAP and need a manual reconciliation in Pick & Pack Manager.";
+                    _logger.LogWarning(
+                        "Pick list cancel-and-replace aborted for SO DocEntry={DocEntry}: {Msg}",
+                        soDocEntry, msg);
+                    return (msg, existingPklEntry);
+                }
+
+                _logger.LogInformation(
+                    "Closed existing pick list AbsEntry={PklEntry} for SO DocEntry={DocEntry} "
+                    + "ahead of cancel-and-replace.",
+                    existingPklEntry.Value, soDocEntry);
+            }
+
+            // Build the new pick list.  At this point any old pick list
+            // is Closed, so the SO lines that were on it are back to
+            // open and the planner can fully reallocate them.
+            var (newPklEntry, buildWarning) = _TryCreatePickListForSO(soDocEntry);
+
+            if (!newPklEntry.HasValue)
+            {
+                // CATASTROPHE: existing pick list (if any) is now
+                // Closed, but we couldn't build a new one.  The SO has
+                // zero active pick lists.  Operator must recreate
+                // manually — surface clear instructions.
+                string msg = buildWarning
+                    ?? $"Could not create new pick list for SO DocEntry={soDocEntry}.";
+                if (existingPklEntry.HasValue)
+                {
+                    msg += $" Old pick list AbsEntry={existingPklEntry.Value} was already Closed "
+                         + "and cannot be reopened.\n\n"
+                         + "Operator action required:\n"
+                         + "  1. Open SAP B1 → Pick & Pack Manager → Open tab\n"
+                         + "  2. Find SO DocEntry=" + soDocEntry + " and click 'Pick All' "
+                         + "to create a fresh pick list, OR re-sync the SO from Odoo "
+                         + "(ICC → Manual Push) so the middleware retries from a clean state.";
+                    _logger.LogError(
+                        "CATASTROPHE: pick list AbsEntry={OldPkl} was closed but new build "
+                        + "failed for SO DocEntry={DocEntry}: {Msg}",
+                        existingPklEntry.Value, soDocEntry, msg);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Pick list build failed for SO DocEntry={DocEntry}: {Msg}",
+                        soDocEntry, msg);
+                }
+                return (msg, null);
+            }
+
+            _logger.LogInformation(
+                "Pick list cancel-and-replace complete for SO DocEntry={DocEntry}: "
+                + "old AbsEntry={OldPkl} → new AbsEntry={NewPkl}.",
+                soDocEntry, existingPklEntry, newPklEntry.Value);
+
+            // Stamp the cancelled pick list with a remark pointing to
+            // its replacement, so SAP operators opening the closed
+            // pick list see why it was closed and where to look.
+            // Best-effort: if the Remarks update fails (rare — it's a
+            // free-text field with no status gate), log a warning but
+            // don't fail the refresh, the new pick list is already
+            // built and that's what matters.
+            if (existingPklEntry.HasValue)
+            {
+                try
+                {
+                    var oldPkl = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+                    try
+                    {
+                        if (oldPkl.GetByKey(existingPklEntry.Value))
+                        {
+                            string priorRemarks = oldPkl.Remarks ?? string.Empty;
+                            string cancelNote =
+                                (priorRemarks.Length > 0 ? priorRemarks + "\n\n" : string.Empty)
+                                + $"[CANCELLED {DateTime.Now:yyyy-MM-dd HH:mm}] "
+                                + $"SO DocEntry={soDocEntry} was updated in Odoo; "
+                                + $"this pick list was cancelled and replaced by "
+                                + $"pick list AbsEntry={newPklEntry.Value}. "
+                                + "Use the new pick list for picking — this one is "
+                                + "kept for audit only.";
+                            oldPkl.Remarks = cancelNote;
+                            int updateResult = oldPkl.Update();
+                            if (updateResult != 0)
+                            {
+                                _company.GetLastError(out _, out string updateErr);
+                                _logger.LogWarning(
+                                    "Could not stamp cancellation remark on pick list "
+                                    + "AbsEntry={OldPkl}: {Err}. Pick list is closed and "
+                                    + "replaced by AbsEntry={NewPkl} — non-fatal.",
+                                    existingPklEntry.Value, updateErr, newPklEntry.Value);
+                            }
+                            else
+                            {
+                                _logger.LogInformation(
+                                    "Stamped cancellation remark on pick list "
+                                    + "AbsEntry={OldPkl} pointing to AbsEntry={NewPkl}.",
+                                    existingPklEntry.Value, newPklEntry.Value);
+                            }
+                        }
+                    }
+                    finally { Marshal.ReleaseComObject(oldPkl); }
+                }
+                catch (Exception remarkEx)
+                {
+                    _logger.LogWarning(remarkEx,
+                        "Failed to stamp cancellation remark on pick list "
+                        + "AbsEntry={OldPkl} — non-fatal, replacement AbsEntry={NewPkl} "
+                        + "is already active.",
+                        existingPklEntry.Value, newPklEntry.Value);
+                }
+            }
+
+            // The build may still carry a partial-success warning (some
+            // items skipped due to no bin stock — e.g. cross-warehouse
+            // shortfall on item 9951).  Bubble it up so the operator
+            // can see which items need manual attention.  The new
+            // AbsEntry is returned so ICC writes it back onto the
+            // sale.order AND every related outgoing stock.picking via
+            // integration_job_line_drift._writeback_sale_order.
+            return (buildWarning, newPklEntry);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Pick list refresh failed for SO DocEntry={DocEntry}. "
+                + "SO lines were updated successfully — pick list may need manual attention.",
+                soDocEntry);
+            return (
+                $"Pick list refresh failed for SO DocEntry={soDocEntry}: {ex.Message}. "
+                + "SO lines were updated successfully but the pick list may be out of sync — "
+                + "please check manually in SAP B1.",
+                null);
+        }
+    }
+
+    /// <summary>
+    /// Attempts to build and add a new pick list for the given SO.
+    /// Uses the same bin-allocation cascade as
+    /// <see cref="CreateSalesOrderAsync(SapSalesOrderRequest)"/>: each
+    /// line walks <c>BinLocationPriority</c> in order, takes available
+    /// stock from each bin until the requested quantity is satisfied,
+    /// and is SKIPPED if the cascade can't cover the full quantity
+    /// (same bin-managed semantics SAP enforces for pick lists).
+    /// Lines are read from the current state of the SO so both adding
+    /// a new line and delivering part of an existing line are handled
+    /// by <c>RemainingOpenQuantity</c>.
+    /// </summary>
+    /// <returns>
+    /// <c>(pickListEntry, null)</c> on full success.
+    /// <c>(pickListEntry, "skipped items: ...")</c> on partial success
+    /// (pick list created with a subset of lines).
+    /// <c>(null, "diagnostic message")</c> on failure (no pick list added).
+    /// </returns>
+    private (int? pickListEntry, string? warning) _TryCreatePickListForSO(int soDocEntry)
+    {
+        // ── Pre-fetch quantities already released to ANOTHER active pick
+        //    list, so we never try to release more than is genuinely open.
+        //    SAP B1's RDR1.RemainingOpenQuantity = ordered − delivered, and
+        //    does NOT subtract released-to-pick-list quantities.  If a
+        //    caller invokes this method while another OPKL row is still in
+        //    Released or Picked status (e.g. the C-status follow-up branch
+        //    in _RefreshPickListForSO, or any future caller that builds
+        //    additively), the planner would otherwise try to claim already-
+        //    released qty and SAP would reject the Add() with error -10
+        //    "Released quantity exceeds open quantity".  The cancel-and-
+        //    replace path closes the old pick list before reaching this
+        //    point, so this dictionary is empty for that path — making the
+        //    filter a no-op there but a hard correctness guard for the
+        //    follow-up paths.
+        var alreadyReleased = GetActivelyReleasedQuantitiesBySOLine(soDocEntry);
+
+        // ── Read current SO lines + remaining open qty ──
+        var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
+        if (!order.GetByKey(soDocEntry))
+        {
+            Marshal.ReleaseComObject(order);
+            return (null, $"SO DocEntry={soDocEntry} not found in SAP.");
+        }
+
+        var lineCaptures = new List<(int lineNum, double qty, string itemCode, string whsCode)>();
+        int lineCount = order.Lines.Count;
+        for (int i = 0; i < lineCount; i++)
+        {
+            order.Lines.SetCurrentLine(i);
+            int lineNum = order.Lines.LineNum;
+            double remainingOpen = order.Lines.RemainingOpenQuantity;
+            if (remainingOpen <= 0)
+                continue;  // fully delivered line — nothing left to pick
+
+            double released = alreadyReleased.TryGetValue(lineNum, out var v) ? v : 0;
+            double availableToRelease = remainingOpen - released;
+            if (availableToRelease <= 0)
+            {
+                _logger.LogInformation(
+                    "Pick list build: skipping SO line {Line} item {Item} — already "
+                    + "fully released to another active pick list "
+                    + "(open={Open}, alreadyReleased={Released})",
+                    lineNum, order.Lines.ItemCode, remainingOpen, released);
+                continue;
+            }
+
+            lineCaptures.Add((
+                lineNum,
+                availableToRelease,
+                order.Lines.ItemCode ?? string.Empty,
+                order.Lines.WarehouseCode ?? string.Empty));
+        }
+        Marshal.ReleaseComObject(order);
+
+        if (lineCaptures.Count == 0)
+        {
+            // Nothing to pick (all lines fully delivered).  Not an error.
+            return (null, null);
+        }
+
+        // ── Plan bin allocation via the shared planner ──
+        // Existing SAP lines carry a WhsCode (set either by SAP's
+        // default cascade on the original create or by a previous
+        // plan).  We pass it as ExplicitWhsCode so Phase 0 pins the
+        // plan to the existing warehouse — we never repoint an
+        // already-posted SAP line here ("new lines only" policy
+        // applies at update time, and a refresh re-reads lines from
+        // the live SAP doc).
+        var binPriority = _settings.BinLocationPriority ?? new List<string>();
+        bool useBinAllocation = binPriority.Count > 0;
+        bool allowFallback = _settings.AllowFallbackBinAllocation;
+
+        var itemCodes = lineCaptures
+            .Select(lc => lc.itemCode)
+            .Where(ic => !string.IsNullOrWhiteSpace(ic))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var binInfo = useBinAllocation
+            ? QueryBinStockForItems(itemCodes, binPriority, allowFallback)
+            : new Dictionary<string, BinAllocationPlanner.BinStock>();
+
+        if (useBinAllocation)
+        {
+            _logger.LogInformation(
+                "Pick list refresh: bin stock query returned data for {BinCount} bin(s) across {ItemCount} item(s) "
+                + "(fallback={Fallback})",
+                binInfo.Count, itemCodes.Count, allowFallback);
+        }
+
+        var planInputs = lineCaptures.Select((lc, idx) =>
+            new BinAllocationPlanner.LineInput(
+                idx, lc.itemCode, lc.qty,
+                string.IsNullOrWhiteSpace(lc.whsCode) ? null : lc.whsCode))
+            .ToList();
+
+        var plans = useBinAllocation
+            ? BinAllocationPlanner.Plan(
+                planInputs, binPriority, binInfo, allowFallback,
+                _settings.DefaultWarehouseCode ?? string.Empty)
+            : planInputs.Select(pi => new BinAllocationPlanner.LinePlan(
+                pi.LineIdx, pi.ItemCode, pi.Required,
+                pi.ExplicitWhsCode ?? _settings.DefaultWarehouseCode ?? string.Empty,
+                Array.Empty<BinAllocationPlanner.BinPick>(), 0)).ToList();
+
+        // ── Build pick list with the per-line plans ──
+        var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+        pickList.PickDate = DateTime.Now;
+
+        bool anyLineAllocated = false;
+        int pickLineIndex = 0;
+        var skippedItems = new List<string>();
+
+        for (int i = 0; i < lineCaptures.Count; i++)
+        {
+            var (lineNum, qty, itemCode, lineWhsCode) = lineCaptures[i];
+            var linePlan = plans[i];
+
+            if (!useBinAllocation)
+            {
+                // Non-bin-managed warehouse — simple release.
+                if (pickLineIndex > 0) pickList.Lines.Add();
+                pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
+                pickList.Lines.OrderEntry = soDocEntry;
+                pickList.Lines.OrderRowID = lineNum;
+                pickList.Lines.ReleasedQuantity = qty;
+                anyLineAllocated = true;
+                pickLineIndex++;
+                continue;
+            }
+
+            if (linePlan.Shortfall > 0 || linePlan.Picks.Count == 0)
+            {
+                _logger.LogWarning(
+                    "Pick list refresh: skipping item {ItemCode} (line {LineNum}): "
+                    + "plan allocated {Allocated}/{Required} in warehouse {Whs} (fallback={Fallback})",
+                    itemCode, lineNum, qty - linePlan.Shortfall, qty, linePlan.WhsCode, allowFallback);
+                skippedItems.Add(itemCode);
+                continue;
+            }
+
+            if (pickLineIndex > 0) pickList.Lines.Add();
+            pickList.Lines.BaseObjectType = ((int)BoObjectTypes.oOrders).ToString();
+            pickList.Lines.OrderEntry = soDocEntry;
+            pickList.Lines.OrderRowID = lineNum;
+            pickList.Lines.ReleasedQuantity = qty;
+
+            for (int b = 0; b < linePlan.Picks.Count; b++)
+            {
+                var pick = linePlan.Picks[b];
+                if (b > 0) pickList.Lines.BinAllocations.Add();
+                pickList.Lines.BinAllocations.BinAbsEntry = pick.AbsEntry;
+                pickList.Lines.BinAllocations.Quantity = pick.Qty;
+                pickList.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = pickLineIndex;
+
+                _logger.LogInformation(
+                    "  Pick-refresh line[{LineNum}] item {ItemCode}: bin {BinCode} "
+                    + "(AbsEntry={AbsEntry}, Whs={Whs}) → {Qty}{Tag}",
+                    lineNum, itemCode, pick.BinCode, pick.AbsEntry, pick.WhsCode, pick.Qty,
+                    pick.IsFallback ? " [fallback]" : "");
+            }
+
+            anyLineAllocated = true;
+            pickLineIndex++;
+        }
+
+        if (!anyLineAllocated)
+        {
+            Marshal.ReleaseComObject(pickList);
+            string msg = skippedItems.Count > 0
+                ? $"No pick list created for SO DocEntry={soDocEntry}: all {skippedItems.Count} "
+                  + $"line(s) lack bin stock in priority bins — skipped items: "
+                  + string.Join(", ", skippedItems) + ". Add the relevant bins to "
+                  + "BinLocationPriority or replenish stock."
+                : $"No pick list created for SO DocEntry={soDocEntry}: no lines to pick.";
+            return (null, msg);
+        }
+
+        int plResult = pickList.Add();
+        if (plResult != 0)
+        {
+            _company!.GetLastError(out int ec, out string em);
+            Marshal.ReleaseComObject(pickList);
+            _logger.LogWarning(
+                "Pick list Add() failed for SO DocEntry={DocEntry} (ErrCode={ErrCode}): {ErrMsg}",
+                soDocEntry, ec, em);
+            return (null,
+                $"Pick list Add() rejected by SAP for SO DocEntry={soDocEntry}: {ec} — {em}");
+        }
+
+        int newPklEntry = int.Parse(_company!.GetNewObjectKey());
+        Marshal.ReleaseComObject(pickList);
+
+        _logger.LogInformation(
+            "Pick list created for SO DocEntry={DocEntry}: AbsEntry={PklEntry}, "
+            + "AllocatedLines={AllocatedLines}, SkippedLines={SkippedLines}",
+            soDocEntry, newPklEntry, pickLineIndex, skippedItems.Count);
+
+        if (skippedItems.Count > 0)
+        {
+            return (newPklEntry,
+                $"Pick list AbsEntry={newPklEntry} created for SO DocEntry={soDocEntry} "
+                + $"but {skippedItems.Count} line(s) were skipped due to missing bin stock: "
+                + string.Join(", ", skippedItems) + ". Warehouse must allocate and pick these "
+                + "items manually.");
+        }
+
+        return (newPklEntry, null);
     }
 
     // ================================
@@ -771,7 +1579,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             "Creating AR Invoice by copying from Delivery DocEntry={DeliveryDocEntry}",
             deliveryDocEntry);
 
-        // Load the source delivery to read its lines
         var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
 
         if (!delivery.GetByKey(deliveryDocEntry))
@@ -779,18 +1586,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             Marshal.ReleaseComObject(delivery);
             Marshal.ReleaseComObject(invoice);
             throw new InvalidOperationException(
-                $"SAP B1 Delivery Note with DocEntry={deliveryDocEntry} not found. " +
-                "Cannot create invoice by copy-from-delivery.");
+                $"SAP B1 Delivery Note with DocEntry={deliveryDocEntry} not found.");
         }
 
-        _logger.LogInformation(
-            "Loaded source Delivery: DocEntry={DocEntry}, DocNum={DocNum}, CardCode={CardCode}, LineCount={LineCount}",
-            delivery.DocEntry,
-            delivery.DocNum,
-            delivery.CardCode,
-            delivery.Lines.Count);
-
-        // Set invoice header fields
         invoice.CardCode = !string.IsNullOrEmpty(request.CustomerCode)
             ? request.CustomerCode
             : delivery.CardCode;
@@ -809,7 +1607,6 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         if (!string.IsNullOrEmpty(request.Currency))
             invoice.DocCurrency = request.Currency;
 
-        // Set header UDFs for Odoo traceability
         TrySetUserField(invoice.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Invoice header");
 
         if (!string.IsNullOrEmpty(request.UOdooSoId))
@@ -819,19 +1616,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(invoice.UserFields, "U_Odoo_LastSync", syncDate, "Invoice header");
         TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
 
-        // Copy lines from the delivery document.
-        // Each invoice line references its source delivery line via BaseType/BaseEntry/BaseLine.
-        // We set line fields explicitly (ItemCode, Quantity, Price, WarehouseCode) instead
-        // of relying on SAP's automatic copy, because auto-copy also inherits bin
-        // allocations from the delivery.  When the pick list allocated stock from a
-        // bin in a different warehouse (e.g. COCWHSE bin on a MainWHSE line), the
-        // inherited bin/warehouse mismatch causes DI API error -10.  Invoices don't
-        // move stock so bin allocations are unnecessary.
         int deliveryLineCount = delivery.Lines.Count;
-
-        _logger.LogInformation(
-            "Copying {DeliveryLineCount} line(s) from Delivery DocEntry={DeliveryDocEntry} to Invoice (explicit lines, no bin allocations)",
-            deliveryLineCount, deliveryDocEntry);
 
         for (int i = 0; i < deliveryLineCount; i++)
         {
@@ -840,30 +1625,16 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (i > 0)
                 invoice.Lines.Add();
 
-            // Set line data explicitly from the delivery
             invoice.Lines.ItemCode = delivery.Lines.ItemCode;
             invoice.Lines.Quantity = delivery.Lines.Quantity;
             invoice.Lines.UnitPrice = delivery.Lines.UnitPrice;
             invoice.Lines.WarehouseCode = delivery.Lines.WarehouseCode;
 
-            // Set base document reference to maintain the document chain
             invoice.Lines.BaseType = (int)BoObjectTypes.oDeliveryNotes;
             invoice.Lines.BaseEntry = deliveryDocEntry;
             invoice.Lines.BaseLine = delivery.Lines.LineNum;
-
-            _logger.LogDebug(
-                "Invoice Line[{Index}]: BaseType=oDeliveryNotes, BaseEntry={BaseEntry}, BaseLine={BaseLine}, " +
-                "ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Warehouse={Warehouse}",
-                i,
-                deliveryDocEntry,
-                delivery.Lines.LineNum,
-                delivery.Lines.ItemCode,
-                delivery.Lines.Quantity,
-                delivery.Lines.UnitPrice,
-                delivery.Lines.WarehouseCode);
         }
 
-        // Capture the originating Sales Order DocEntry from the delivery for the response
         int? baseSoDocEntry = request.SapSalesOrderDocEntry;
 
         Marshal.ReleaseComObject(delivery);
@@ -961,46 +1732,59 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         TrySetUserField(invoice.UserFields, "U_Odoo_SyncDir", SyncDirectionOdooToSap, "Invoice header");
 
         // Set lines
-        // ── Pre-query bin stock if bin allocation is configured ──
-        var binPriority = _settings.BinLocationPriority;
-        bool useBinAllocation = binPriority != null && binPriority.Count > 0;
-        var binInfo = new Dictionary<string, (int absEntry, string whsCode, Dictionary<string, double> stock)>();
+        // ── Plan bin allocation for pure-manual lines ──
+        // Invoice lines with a BaseDeliveryDocEntry inherit their bin
+        // allocation from the referenced delivery — SAP copies the
+        // deliveries' bin allocation, so we must NOT overwrite it.
+        // Only "pure manual" lines (no BaseDeliveryDocEntry) need the
+        // planner to assign WhsCode + bins.
+        //
+        // Same stock-aware approach as CreateSalesOrderAsync: the
+        // planner picks each line's warehouse from the highest-
+        // priority bin that actually holds stock, so invoices never
+        // land in a warehouse that has zero stock just because SAP's
+        // BP/user/company default said so.  Choice-X policy: lines
+        // stay whole in one warehouse; shortfalls are surfaced as
+        // structured warnings on the response.
+        var binPriority = _settings.BinLocationPriority ?? new List<string>();
+        bool useBinAllocation = binPriority.Count > 0;
+        bool allowFallback = _settings.AllowFallbackBinAllocation;
 
-        if (useBinAllocation)
+        var pureManualIndices = new List<int>();
+        for (int i = 0; i < request.Lines.Count; i++)
         {
-            var itemCodes = request.Lines.Select(l => l.ItemCode).Distinct().ToList();
-            var itemCodesForSql = string.Join(",", itemCodes.Select(ic => $"'{ic.Replace("'", "''")}'"));
-            var binCodesForSql = string.Join(",", binPriority!.Select(bc => $"'{bc.Replace("'", "''")}'"));
+            if (!request.Lines[i].BaseDeliveryDocEntry.HasValue)
+                pureManualIndices.Add(i);
+        }
 
-            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
-            rs.DoQuery(
-                $"SELECT BIN.\"AbsEntry\", BIN.\"BinCode\", BIN.\"WhsCode\", IB.\"ItemCode\", IB.\"OnHandQty\" " +
-                $"FROM OBIN BIN " +
-                $"INNER JOIN OIBQ IB ON IB.\"BinAbs\" = BIN.\"AbsEntry\" " +
-                $"WHERE BIN.\"BinCode\" IN ({binCodesForSql}) " +
-                $"AND IB.\"ItemCode\" IN ({itemCodesForSql}) " +
-                $"AND IB.\"OnHandQty\" > 0");
-
-            while (!rs.EoF)
+        var linePlans = new Dictionary<int, BinAllocationPlanner.LinePlan>();
+        if (useBinAllocation && pureManualIndices.Count > 0)
+        {
+            var itemCodes = pureManualIndices
+                .Select(idx => request.Lines[idx].ItemCode)
+                .Where(ic => !string.IsNullOrWhiteSpace(ic))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var binInfo = QueryBinStockForItems(itemCodes, binPriority, allowFallback);
+            var planInputs = pureManualIndices.Select(idx =>
             {
-                var binCode = (string)rs.Fields.Item("BinCode").Value;
-                var absEntry = (int)rs.Fields.Item("AbsEntry").Value;
-                var whsCode = (string)rs.Fields.Item("WhsCode").Value;
-                var itemCode = (string)rs.Fields.Item("ItemCode").Value;
-                var onHand = Convert.ToDouble(rs.Fields.Item("OnHandQty").Value);
-
-                if (!binInfo.ContainsKey(binCode))
-                    binInfo[binCode] = (absEntry, whsCode, new Dictionary<string, double>());
-                binInfo[binCode].stock[itemCode] = onHand;
-
-                rs.MoveNext();
-            }
-            Marshal.ReleaseComObject(rs);
+                var l = request.Lines[idx];
+                return new BinAllocationPlanner.LineInput(
+                    idx, l.ItemCode, l.Quantity, l.WarehouseCode);
+            }).ToList();
+            var plans = BinAllocationPlanner.Plan(
+                planInputs, binPriority, binInfo, allowFallback,
+                _settings.DefaultWarehouseCode ?? string.Empty);
+            foreach (var p in plans)
+                linePlans[p.LineIdx] = p;
 
             _logger.LogInformation(
-                "Invoice bin stock query: {BinCount} bins with stock for {ItemCount} items",
-                binInfo.Count, itemCodes.Count);
+                "Invoice bin stock query: {BinCount} bin(s) for {ItemCount} item(s) " +
+                "across {PureManualCount} pure-manual line(s) (fallback={Fallback})",
+                binInfo.Count, itemCodes.Count, pureManualIndices.Count, allowFallback);
         }
+
+        var warnings = new List<InvoiceWarning>();
 
         // ── Pre-load SO line numbers for SO-based linking ──
         // When delivery references are absent but a Sales Order DocEntry
@@ -1044,6 +1828,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 invoice.Lines.Add();
 
             var line = request.Lines[i];
+            linePlans.TryGetValue(i, out var linePlan);
 
             invoice.Lines.ItemCode = line.ItemCode;
             invoice.Lines.Quantity = line.Quantity;
@@ -1052,8 +1837,18 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             if (line.DiscountPercent.HasValue)
                 invoice.Lines.DiscountPercent = line.DiscountPercent.Value;
 
-            if (!string.IsNullOrEmpty(line.WarehouseCode))
-                invoice.Lines.WarehouseCode = line.WarehouseCode;
+            // WarehouseCode resolution:
+            //   1. Explicit request.Lines[i].WarehouseCode wins when set.
+            //   2. Otherwise use the planner's choice (pure-manual lines only).
+            //   3. Delivery-linked lines fall through to SAP's copy-from-
+            //      delivery behaviour — don't override.
+            string? resolvedWhs = !string.IsNullOrEmpty(line.WarehouseCode)
+                ? line.WarehouseCode
+                : (linePlan is not null && !string.IsNullOrEmpty(linePlan.WhsCode))
+                    ? linePlan.WhsCode
+                    : null;
+            if (!string.IsNullOrEmpty(resolvedWhs))
+                invoice.Lines.WarehouseCode = resolvedWhs;
 
             if (!string.IsNullOrEmpty(line.AccountCode))
                 invoice.Lines.AccountCode = line.AccountCode;
@@ -1088,60 +1883,60 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
             }
 
-            // ── Cascading bin allocation for this line ──
-            if (useBinAllocation && !line.BaseDeliveryDocEntry.HasValue)
+            // ── Planner-driven bin allocation for pure-manual lines ──
+            // Delivery-linked lines are skipped here because SAP will
+            // copy their bin allocation from the referenced delivery.
+            if (linePlan is not null && !line.BaseDeliveryDocEntry.HasValue)
             {
-                // Resolve the warehouse for this line — explicit, default, or SAP fallback
-                string lineWhsCode = !string.IsNullOrEmpty(line.WarehouseCode)
-                    ? line.WarehouseCode
-                    : _settings.DefaultWarehouseCode ?? "";
-
-                double remaining = line.Quantity;
-                var allocations = new List<(int binAbsEntry, string binCode, double allocQty)>();
-
-                foreach (var binCode in binPriority!)
+                if (linePlan.Shortfall > 0 || linePlan.Picks.Count == 0)
                 {
-                    if (remaining <= 0) break;
-                    if (!binInfo.TryGetValue(binCode, out var bin)) continue;
-                    // Only use bins that belong to the same warehouse as the line
-                    if (!string.IsNullOrEmpty(lineWhsCode)
-                        && !string.Equals(bin.whsCode, lineWhsCode, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    if (!bin.stock.TryGetValue(line.ItemCode, out var available) || available <= 0) continue;
+                    _logger.LogWarning(
+                        "Invoice line[{Index}] item {ItemCode}: plan allocated " +
+                        "{Allocated}/{Required} in warehouse {Whs} (fallback={Fallback}) — " +
+                        "no explicit bin allocation written, SAP/warehouse must reconcile",
+                        i, line.ItemCode,
+                        line.Quantity - linePlan.Shortfall, line.Quantity,
+                        linePlan.WhsCode, allowFallback);
 
-                    double take = Math.Min(remaining, available);
-                    allocations.Add((bin.absEntry, binCode, take));
-                    remaining -= take;
-                    bin.stock[line.ItemCode] = available - take;
-                }
-
-                if (remaining <= 0 && allocations.Count > 0)
-                {
-                    for (int b = 0; b < allocations.Count; b++)
+                    warnings.Add(new InvoiceWarning
                     {
+                        Code = "BIN_SHORTFALL",
+                        ItemCode = line.ItemCode,
+                        LineNum = i,
+                        WarehouseCode = linePlan.WhsCode,
+                        Required = line.Quantity,
+                        Allocated = line.Quantity - linePlan.Shortfall,
+                        Message =
+                            $"Item {line.ItemCode} (line {i}): required {line.Quantity:0.##}, "
+                            + $"allocated {(line.Quantity - linePlan.Shortfall):0.##} across "
+                            + $"{linePlan.Picks.Count} bin(s) in warehouse {linePlan.WhsCode}. "
+                            + "Invoice line posted; warehouse must reconcile bins manually."
+                    });
+                }
+                else
+                {
+                    for (int b = 0; b < linePlan.Picks.Count; b++)
+                    {
+                        var pick = linePlan.Picks[b];
                         if (b > 0) invoice.Lines.BinAllocations.Add();
-                        invoice.Lines.BinAllocations.BinAbsEntry = allocations[b].binAbsEntry;
-                        invoice.Lines.BinAllocations.Quantity = allocations[b].allocQty;
+                        invoice.Lines.BinAllocations.BinAbsEntry = pick.AbsEntry;
+                        invoice.Lines.BinAllocations.Quantity = pick.Qty;
                         invoice.Lines.BinAllocations.SerialAndBatchNumbersBaseLine = i;
 
                         _logger.LogInformation(
-                            "  Invoice line[{Index}] item {ItemCode}: bin {BinCode} (AbsEntry={AbsEntry}) → {Qty}",
-                            i, line.ItemCode, allocations[b].binCode,
-                            allocations[b].binAbsEntry, allocations[b].allocQty);
+                            "  Invoice line[{Index}] item {ItemCode}: bin {BinCode} " +
+                            "(AbsEntry={AbsEntry}, Whs={Whs}) → {Qty}{Tag}",
+                            i, line.ItemCode, pick.BinCode,
+                            pick.AbsEntry, pick.WhsCode, pick.Qty,
+                            pick.IsFallback ? " [fallback]" : "");
                     }
-                }
-                else if (remaining > 0)
-                {
-                    _logger.LogWarning(
-                        "Invoice line[{Index}] item {ItemCode}: insufficient bin stock " +
-                        "(need {Required}, have {Available}) — letting SAP resolve",
-                        i, line.ItemCode, line.Quantity, line.Quantity - remaining);
                 }
             }
 
             _logger.LogDebug(
-                "Manual Invoice Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Discount={Discount}",
-                i, line.ItemCode, line.Quantity, line.Price, line.DiscountPercent);
+                "Manual Invoice Line[{Index}]: ItemCode={ItemCode}, Qty={Qty}, Price={Price}, Discount={Discount}, Whs={Whs}",
+                i, line.ItemCode, line.Quantity, line.Price, line.DiscountPercent,
+                resolvedWhs ?? "(SAP default)");
         }
 
         int result = invoice.Add();
@@ -1182,7 +1977,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             DocNum = invoiceDocNum,
             ExternalInvoiceId = request.ExternalInvoiceId,
             BaseSalesOrderDocEntry = request.SapSalesOrderDocEntry,
-            Lines = lineResponses
+            Lines = lineResponses,
+            Warnings = warnings,
         };
     }
 
@@ -2098,6 +2894,12 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     public async Task<SapDeliveryStatusResponse?> FindDeliveryByOrderAsync(int soDocEntry)
+    /// <summary>
+    /// Reads a SAP Delivery Note and returns all unique Odoo SO
+    /// references from the base documents (one per line's BaseEntry).
+    /// Used for multi-SO delivery callback handling.
+    /// </summary>
+    public async Task<List<string>> ReadDeliveryBaseSoRefsAsync(int docEntry)
     {
         await _lock.WaitAsync();
         try
@@ -2142,6 +2944,59 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 DocNum = docNum,
                 Status = status,
             };
+            var delivery = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDeliveryNotes);
+
+            try
+            {
+                if (!delivery.GetByKey(docEntry))
+                {
+                    Marshal.ReleaseComObject(delivery);
+                    return [];
+                }
+
+                var soDocEntries = new HashSet<int>();
+                int lineCount = delivery.Lines.Count;
+                for (int i = 0; i < lineCount; i++)
+                {
+                    delivery.Lines.SetCurrentLine(i);
+                    if (delivery.Lines.BaseType == (int)BoObjectTypes.oOrders
+                        && delivery.Lines.BaseEntry > 0)
+                    {
+                        soDocEntries.Add(delivery.Lines.BaseEntry);
+                    }
+                }
+
+                var soRefs = new List<string>();
+                foreach (int soDocEntry in soDocEntries)
+                {
+                    var so = (Documents)_company.GetBusinessObject(BoObjectTypes.oOrders);
+                    try
+                    {
+                        if (so.GetByKey(soDocEntry))
+                        {
+                            string odooRef = "";
+                            try { odooRef = so.UserFields.Fields.Item("U_Odoo_SO_ID").Value?.ToString() ?? ""; }
+                            catch { /* UDF not found */ }
+                            if (!string.IsNullOrEmpty(odooRef))
+                                soRefs.Add(odooRef);
+                        }
+                    }
+                    finally { Marshal.ReleaseComObject(so); }
+                }
+
+                Marshal.ReleaseComObject(delivery);
+
+                _logger.LogInformation(
+                    "Delivery DocEntry={DocEntry}: found {Count} base SO refs: [{Refs}]",
+                    docEntry, soRefs.Count, string.Join(", ", soRefs));
+
+                return soRefs;
+            }
+            catch
+            {
+                Marshal.ReleaseComObject(delivery);
+                throw;
+            }
         }
         finally
         {
@@ -2462,6 +3317,161 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    public async Task<List<(string ItemCode, double Quantity)>> ReadDeliveryLinesAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var delivery = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oDeliveryNotes);
+
+            try
+            {
+                if (!delivery.GetByKey(docEntry))
+                {
+                    Marshal.ReleaseComObject(delivery);
+                    return [];
+                }
+
+                var lines = new List<(string, double)>();
+                int lineCount = delivery.Lines.Count;
+                for (int i = 0; i < lineCount; i++)
+                {
+                    delivery.Lines.SetCurrentLine(i);
+                    double qty = delivery.Lines.Quantity;
+                    if (qty > 0)
+                    {
+                        lines.Add((delivery.Lines.ItemCode, qty));
+                    }
+                }
+
+                Marshal.ReleaseComObject(delivery);
+
+                _logger.LogInformation(
+                    "Read {Count} delivered lines from SAP delivery DocEntry={DocEntry}",
+                    lines.Count, docEntry);
+
+                return lines;
+            }
+            catch
+            {
+                Marshal.ReleaseComObject(delivery);
+                throw;
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task CancelGoodsReturnAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Cancelling SAP Goods Return — DocEntry={DocEntry}",
+                docEntry);
+
+            var goodsReturn = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oReturns);
+
+            if (!goodsReturn.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(goodsReturn);
+                throw new InvalidOperationException(
+                    $"SAP Goods Return DocEntry={docEntry} not found.");
+            }
+
+            // If already closed/cancelled, skip
+            if (goodsReturn.DocumentStatus != BoStatus.bost_Open)
+            {
+                Marshal.ReleaseComObject(goodsReturn);
+                _logger.LogInformation(
+                    "SAP Goods Return DocEntry={DocEntry} is already "
+                    + "closed — no cancellation needed.", docEntry);
+                return;
+            }
+
+            int result = goodsReturn.Cancel();
+
+            if (result != 0)
+            {
+                _company!.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(goodsReturn);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            Marshal.ReleaseComObject(goodsReturn);
+
+            _logger.LogInformation(
+                "✅ SAP Goods Return cancelled: DocEntry={DocEntry}",
+                docEntry);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task CancelCreditMemoAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Cancelling SAP Credit Memo — DocEntry={DocEntry}",
+                docEntry);
+
+            var creditMemo = (Documents)_company!.GetBusinessObject(
+                BoObjectTypes.oCreditNotes);
+
+            if (!creditMemo.GetByKey(docEntry))
+            {
+                Marshal.ReleaseComObject(creditMemo);
+                throw new InvalidOperationException(
+                    $"SAP Credit Memo DocEntry={docEntry} not found.");
+            }
+
+            if (creditMemo.DocumentStatus != BoStatus.bost_Open)
+            {
+                Marshal.ReleaseComObject(creditMemo);
+                _logger.LogInformation(
+                    "SAP Credit Memo DocEntry={DocEntry} is already "
+                    + "closed — no cancellation needed.", docEntry);
+                return;
+            }
+
+            int result = creditMemo.Cancel();
+
+            if (result != 0)
+            {
+                _company!.GetLastError(out int errCode, out string errMsg);
+                Marshal.ReleaseComObject(creditMemo);
+                throw new InvalidOperationException(
+                    $"SAP DI API error {errCode}: {errMsg}");
+            }
+
+            Marshal.ReleaseComObject(creditMemo);
+
+            _logger.LogInformation(
+                "✅ SAP Credit Memo cancelled: DocEntry={DocEntry}",
+                docEntry);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <summary>
     /// Returns the warehouse code to use for a Sales Order line.
     /// Uses <paramref name="requestedCode"/> when non-empty; otherwise falls back to
@@ -2519,6 +3529,15 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             _logger.LogInformation(
                 "Looking up SAP document — type={DocumentType}, odooRef={OdooRef}",
                 documentType, odooRef);
+
+            // Customer lookup is structurally different — Business Partners
+            // are keyed by CardCode (not DocEntry/DocNum), so OCRD doesn't
+            // have those columns.  Handled in its own branch below to keep
+            // the document-table query path unchanged.
+            if (documentType == "customer")
+            {
+                return LookupCustomerByOdooId(odooRef);
+            }
 
             // Determine SAP table and UDF based on document type
             var (table, udfColumn, statusColumn) = documentType switch
@@ -2605,6 +3624,54 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    /// <summary>
+    /// Looks up a SAP Business Partner (Customer) by its Odoo Customer
+    /// Id stamped on the OCRD UDF <c>U_OdooCustomerId</c>.  Returns the
+    /// SAP CardCode so the ICC SAP Field Sync wizard can stamp it on
+    /// the matching <c>res.partner</c> record.  Business Partners are
+    /// keyed by CardCode, not DocEntry/DocNum — those are returned as
+    /// 0 in the response shape (the wizard's customer flow keys off
+    /// CardCode instead).
+    /// </summary>
+    private SapDocumentLookupResponse? LookupCustomerByOdooId(string odooRef)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            // Filter to Customer cards only (CardType='C') — exclude
+            // Vendors (S) and Leads (L) that may share a UDF value.
+            string sql = $"SELECT T0.\"CardCode\" " +
+                         $"FROM \"OCRD\" T0 " +
+                         $"WHERE T0.\"U_OdooCustomerId\" = '{odooRef.Replace("'", "''")}' " +
+                         $"AND T0.\"CardType\" = 'C'";
+            rs.DoQuery(sql);
+
+            if (rs.EoF)
+            {
+                _logger.LogInformation(
+                    "No SAP Customer found for OdooCustomerId={OdooRef}", odooRef);
+                return null;
+            }
+
+            string cardCode = (string)rs.Fields.Item("CardCode").Value;
+
+            _logger.LogInformation(
+                "SAP Customer found — OdooCustomerId={OdooRef} → CardCode={CardCode}",
+                odooRef, cardCode);
+
+            return new SapDocumentLookupResponse
+            {
+                DocEntry = 0,
+                DocNum = 0,
+                Status = "active",
+                CardCode = cardCode,
+                OdooRef = odooRef,
+                PickListEntry = null,
+            };
+        }
+        finally { Marshal.ReleaseComObject(rs); }
+    }
+
     // ================================
     // READ INVOICE COSTS (for COGS retry)
     // ================================
@@ -2656,11 +3723,22 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             var rs = (Recordset)_company!.GetBusinessObject(
                 BoObjectTypes.BoRecordset);
 
+            // Return the MOST RECENT pick list for this SO.  Multiple pick
+            // lists can exist for one SO (e.g. the original got Closed
+            // without full delivery and a follow-up was issued).  The
+            // refresh / writeback logic in _RefreshPickListForSO routes
+            // based on the STATUS of the active pick list, so we must
+            // return the newest AbsEntry — otherwise we'd see an old
+            // Closed pick list and mistakenly try to create a follow-up
+            // while an active Released pick list already holds those
+            // items (causing SAP error -10 "Released quantity exceeds
+            // open quantity").
             rs.DoQuery(
-                $"SELECT DISTINCT T0.\"AbsEntry\" " +
+                $"SELECT TOP 1 T0.\"AbsEntry\" " +
                 $"FROM \"PKL1\" T0 " +
                 $"WHERE T0.\"OrderEntry\" = {soDocEntry} " +
-                $"AND T0.\"BaseObject\" = '17'");
+                $"AND T0.\"BaseObject\" = '17' " +
+                $"ORDER BY T0.\"AbsEntry\" DESC");
 
             if (rs.EoF)
             {
@@ -2679,6 +3757,83 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 soDocEntry);
             return null;
         }
+    }
+
+    /// <summary>
+    /// Reads the OPKL header status for a pick list AbsEntry.  Returns
+    /// "R" (Released), "P" (Picked), "C" (Closed), or "N" if the pick
+    /// list cannot be found / status cannot be read.
+    /// </summary>
+    private string GetPickListStatus(int absEntry)
+    {
+        try
+        {
+            var rs = (Recordset)_company!.GetBusinessObject(
+                BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(
+                    $"SELECT \"Status\" FROM \"OPKL\" WHERE \"AbsEntry\" = {absEntry}");
+                if (rs.EoF) return "N";
+                return rs.Fields.Item("Status").Value?.ToString() ?? "N";
+            }
+            finally { Marshal.ReleaseComObject(rs); }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to read pick list status for AbsEntry={AbsEntry}",
+                absEntry);
+            return "N";
+        }
+    }
+
+    /// <summary>
+    /// Returns a map of <c>SO line number → total released quantity</c>
+    /// across all currently-active pick lists (status R or P) for the
+    /// given Sales Order DocEntry.  Used by the pick-list refresh path
+    /// to compute "available to release" = <c>RemainingOpenQuantity − Σ
+    /// active released qty</c>, so we never try to release a quantity
+    /// that is still claimed by another active pick list.  Without this
+    /// guard the second pick list <c>Add()</c> would be rejected by SAP
+    /// with error <c>-10 "Released quantity exceeds open quantity"</c>.
+    /// </summary>
+    private Dictionary<int, double> GetActivelyReleasedQuantitiesBySOLine(int soDocEntry)
+    {
+        var dict = new Dictionary<int, double>();
+        try
+        {
+            var rs = (Recordset)_company!.GetBusinessObject(
+                BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(
+                    $"SELECT PKL1.\"OrderLine\" AS line, SUM(PKL1.\"RelQtty\") AS qty " +
+                    $"FROM PKL1 " +
+                    $"INNER JOIN OPKL ON PKL1.\"AbsEntry\" = OPKL.\"AbsEntry\" " +
+                    $"WHERE PKL1.\"OrderEntry\" = {soDocEntry} " +
+                    $"AND PKL1.\"BaseObject\" = 17 " +
+                    $"AND OPKL.\"Status\" IN ('R','P') " +
+                    $"AND PKL1.\"PickStatus\" IN ('R','P') " +
+                    $"GROUP BY PKL1.\"OrderLine\"");
+                while (!rs.EoF)
+                {
+                    int line = Convert.ToInt32(rs.Fields.Item("line").Value);
+                    double qty = Convert.ToDouble(rs.Fields.Item("qty").Value);
+                    dict[line] = qty;
+                    rs.MoveNext();
+                }
+            }
+            finally { Marshal.ReleaseComObject(rs); }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Failed to read active released quantities for SO DocEntry={DocEntry} — "
+                + "returning empty map; pick-list refresh may over-claim and be rejected by SAP",
+                soDocEntry);
+        }
+        return dict;
     }
 
     private int? LookupPickListForDelivery(int deliveryDocEntry)
@@ -2726,6 +3881,337 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// Logs a warning (instead of throwing) when the field does not exist in the SAP B1 schema.
     /// </summary>
     /// <returns><c>true</c> if the field was set successfully; <c>false</c> otherwise.</returns>
+    // ================================
+    // ITEM PROVISIONING (Lubes)
+    // ================================
+
+    public async Task<bool> ItemExistsAsync(string itemCode)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                return items.GetByKey(itemCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task CreateLubesItemAsync(SapLubesItemRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                items.ItemCode       = request.ItemCode;
+                items.ItemName       = Truncate(request.ItemName, 200);
+                items.ItemType       = ItemTypeEnum.itItems;
+                items.InventoryItem  = BoYesNoEnum.tYES;
+                items.SalesItem      = BoYesNoEnum.tYES;
+                items.PurchaseItem   = BoYesNoEnum.tYES;
+                items.ItemsGroupCode = request.ItemsGroupCode;
+
+                // UoM — match the working catalogue (e.g. reference item 21380): the "Packing Units" UoM
+                // group (UgpEntry = 1) with "Unit" as inventory/purchase/sales UoM and 1:1 ratios. Setting
+                // the UoM codes to a valid member of the group ("Unit") populates OITM.IUoMEntry = 1 (Unit)
+                // instead of leaving it NULL. The old Manual UoM (UgpEntry = -1) left items with no
+                // inventory UoM entry, which SAP rejects on purchase documents (PO -5002 "specify a UoM
+                // code"). NOTE: verify a freshly-created item matches 21380 (UgpEntry 1 / IUoMEntry 1).
+                items.UoMGroupEntry        = 1;        // "Packing Units"
+                items.InventoryUOM         = "Unit";   // OITM.InvntryUom
+                items.PurchaseUnit         = "Unit";   // OITM.BuyUnitMsr
+                items.SalesUnit            = "Unit";   // OITM.SalUnitMsr
+                items.PurchaseItemsPerUnit = 1;        // OITM.NumInBuy
+                items.SalesItemsPerUnit    = 1;        // OITM.NumInSale
+
+                items.SalesVATGroup    = "O1";
+                items.PurchaseVATGroup = "I1";
+
+                // Price lists — DI API pre-populates one row per PriceList in OPLN.
+                // Navigate by index (0 = PriceList 1, etc.) and set Price + Currency.
+                items.PriceList.SetCurrentLine(0);
+                items.PriceList.Price    = (double)request.RetailNetPrice;
+                items.PriceList.Currency = "TZS";
+
+                items.PriceList.SetCurrentLine(1);
+                items.PriceList.Price    = (double)request.DealerNetPrice;
+                items.PriceList.Currency = "TZS";
+
+                items.PriceList.SetCurrentLine(2);
+                items.PriceList.Price    = (double)request.SuperDealerNetPrice;
+                items.PriceList.Currency = "TZS";
+
+                // UDF — set the Odoo category name; the worker stamps U_Odoo_Product_ID later.
+                TrySetUserField(items.UserFields, "U_Odoo_Category",
+                    request.OdooCategoryName ?? string.Empty, $"item {request.ItemCode}");
+
+                int result = items.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Add failed for {request.ItemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP item created: ItemCode={ItemCode}, ItemName={ItemName}, Group={Group}",
+                    request.ItemCode, items.ItemName, request.ItemsGroupCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task CreateAutohubItemAsync(SapAutohubItemRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                items.ItemCode       = request.ItemCode;
+                items.ItemName       = Truncate(request.ItemName, 200);
+                items.ItemType       = ItemTypeEnum.itItems;
+                items.InventoryItem  = BoYesNoEnum.tYES;
+                items.SalesItem      = BoYesNoEnum.tYES;
+                items.PurchaseItem   = BoYesNoEnum.tYES;
+                items.ItemsGroupCode = request.ItemsGroupCode;
+
+                // UoM group: the Autohub company (MOLAS_Live_2021) only has the built-in "Manual" group
+                // (entry -1) — its existing items all use it — so use -1 here. (Lubes has a "Packing
+                // Units" group at entry 1; setting entry 1 here fails with -2028 "no matching records".)
+                items.UoMGroupEntry  = -1;
+
+                // VAT groups for the Autohub company (MOLAS_Live_2021): TZ (sales) / TZS (purchase).
+                items.SalesVATGroup    = "TZ";
+                items.PurchaseVATGroup = "TZS";
+
+                // Autohub price lists: PL01=Cost (idx 0), PL03=Retail (idx 2), PL05=Wholesale (idx 4).
+                items.PriceList.SetCurrentLine(0);
+                items.PriceList.Price    = (double)request.CostPrice;
+                items.PriceList.Currency = "TZS";
+
+                items.PriceList.SetCurrentLine(2);
+                items.PriceList.Price    = (double)request.RetailPrice;
+                items.PriceList.Currency = "TZS";
+
+                items.PriceList.SetCurrentLine(4);
+                items.PriceList.Price    = (double)request.WholesalePrice;
+                items.PriceList.Currency = "TZS";
+
+                // UDFs — the actual MOLAS_Live_2021 OITM fields. ItemName (standard) already holds the
+                // OEM/article list. U_Article_No is also the Tier-2 match key. U_Engine_Code mirrors the
+                // article and U_MdlTEST mirrors the manufacturer per the company's data convention.
+                var ctx = $"item {request.ItemCode}";
+                var article = request.ArticleNumber ?? string.Empty;
+                var manufacturer = request.Manufacturer ?? string.Empty;
+                TrySetUserField(items.UserFields, "U_Item_Name",        request.PartName ?? string.Empty, ctx);
+                TrySetUserField(items.UserFields, "U_Article_No",       article, ctx);
+                TrySetUserField(items.UserFields, "U_Engine_Code",      article, ctx);
+                TrySetUserField(items.UserFields, "U_ItemManufacturer", manufacturer, ctx);
+                TrySetUserField(items.UserFields, "U_MdlTEST",          manufacturer, ctx);
+
+                int result = items.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Add failed for {request.ItemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP Autohub item created: ItemCode={ItemCode}, ItemName={ItemName}, Group={Group}",
+                    request.ItemCode, items.ItemName, request.ItemsGroupCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task UpdateOdooProductIdAsync(string itemCode, string odooProductId)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException(
+                        $"SAP item {itemCode} not found for Odoo backref.");
+
+                TrySetUserField(items.UserFields, "U_Odoo_Product_ID",
+                    odooProductId ?? string.Empty, $"item {itemCode}");
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed for {itemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP item {ItemCode} stamped with Odoo product id {OdooProductId}.",
+                    itemCode, odooProductId);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<SapItemSnapshot?> GetItemSnapshotAsync(string itemCode, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    return null;
+
+                string? cat = null;
+                try { cat = items.UserFields.Fields.Item("U_Odoo_Category").Value?.ToString(); }
+                catch { /* UDF may not exist on this schema */ }
+
+                items.PriceList.SetCurrentLine(0);
+                var retail = (decimal)items.PriceList.Price;
+                items.PriceList.SetCurrentLine(1);
+                var dealer = (decimal)items.PriceList.Price;
+                items.PriceList.SetCurrentLine(2);
+                var superDealer = (decimal)items.PriceList.Price;
+
+                return new SapItemSnapshot(cat, retail, dealer, superDealer);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task UpdateBlankFieldsAsync(string itemCode, SapLubesItemRequest desired, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException(
+                        $"SAP item {itemCode} not found for recovery update.");
+
+                bool changed = false;
+
+                // Fill the Odoo category UDF only if currently blank.
+                string? currentCat = null;
+                try { currentCat = items.UserFields.Fields.Item("U_Odoo_Category").Value?.ToString(); }
+                catch { /* UDF may not exist on this schema */ }
+
+                if (string.IsNullOrWhiteSpace(currentCat)
+                    && !string.IsNullOrWhiteSpace(desired.OdooCategoryName)
+                    && TrySetUserField(items.UserFields, "U_Odoo_Category", desired.OdooCategoryName, $"item {itemCode}"))
+                {
+                    changed = true;
+                }
+
+                // Fill each price-list price only if currently 0.
+                changed |= FillBlankPrice(items, 0, desired.RetailNetPrice);
+                changed |= FillBlankPrice(items, 1, desired.DealerNetPrice);
+                changed |= FillBlankPrice(items, 2, desired.SuperDealerNetPrice);
+
+                if (!changed)
+                {
+                    _logger.LogInformation(
+                        "SAP item {ItemCode} recovery: no blank fields to fill; leaving as-is.", itemCode);
+                    return;
+                }
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed for {itemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation("SAP item {ItemCode} recovery: blank fields filled.", itemCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>Sets price-list line <paramref name="line"/> only when its current price is 0.</summary>
+    private static bool FillBlankPrice(Items items, int line, decimal desired)
+    {
+        items.PriceList.SetCurrentLine(line);
+        if (items.PriceList.Price == 0d && desired > 0m)
+        {
+            items.PriceList.Price    = (double)desired;
+            items.PriceList.Currency = "TZS";
+            return true;
+        }
+        return false;
+    }
+
+    private static string Truncate(string s, int max) =>
+        string.IsNullOrEmpty(s) || s.Length <= max ? s : s.Substring(0, max);
+
     private bool TrySetUserField(UserFields userFields, string fieldName, object value, string context)
     {
         try
@@ -3091,5 +4577,376 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
         _lock.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    // ================================
+    // PURCHASE ORDERS
+    // ================================
+
+    /// <inheritdoc/>
+    public async Task<SapPurchaseOrderResponse> CreatePurchaseOrderAsync(SapPurchaseOrderRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var po = (Documents)_company!.GetBusinessObject(BoObjectTypes.oPurchaseOrders);
+            try
+            {
+                po.CardCode = request.CardCode;
+                if (!string.IsNullOrWhiteSpace(request.Currency))
+                    po.DocCurrency = request.Currency;
+                if (!string.IsNullOrWhiteSpace(request.NumAtCard))
+                    po.NumAtCard = request.NumAtCard;
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    po.Comments = request.Comments;
+                po.DocDate    = request.DocDate ?? DateTime.Today;
+                po.DocDueDate = request.DocDate ?? DateTime.Today;
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0) po.Lines.Add();
+                    var line = request.Lines[i];
+
+                    po.Lines.ItemCode       = line.ItemCode;
+
+                    // Set the line UoM explicitly to the item's base (inventory) UoM for grouped-UoM items.
+                    // SAP doesn't reliably auto-fill it for them and otherwise rejects with -5002 "specify a
+                    // UoM code". Manual-UoM items (group -1) return null and need no line UoM. The item must
+                    // be in a UoM group with a valid base UoM (e.g. "Packing Units" + Unit); a still-Manual
+                    // item will be named in the log below and must be corrected in SAP.
+                    var uomEntry = GetBaseUoMEntry(line.ItemCode);
+                    if (uomEntry is > 0)
+                        po.Lines.UoMEntry = uomEntry.Value;
+
+                    po.Lines.Quantity       = line.Quantity;
+                    po.Lines.UnitPrice      = line.UnitPrice;
+                    po.Lines.DiscountPercent = line.DiscountPercent;   // 100 on a free-bonus line → line total 0
+                    if (!string.IsNullOrWhiteSpace(line.WarehouseCode))
+                        po.Lines.WarehouseCode = line.WarehouseCode;
+                    // VAT is left to the vendor BP's tax group (exempt vendors → no VAT).
+
+                    _logger.LogInformation(
+                        "PO line[{Index}] ItemCode={ItemCode}, Qty={Qty}, UnitPrice={Price}, Disc={Disc}, UoMEntry={Uom}",
+                        i, line.ItemCode, line.Quantity, line.UnitPrice, line.DiscountPercent,
+                        uomEntry?.ToString() ?? "(none/manual)");
+                }
+
+                int result = po.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    Marshal.ReleaseComObject(po);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                po.GetByKey(docEntry);
+                int docNum = po.DocNum;
+                Marshal.ReleaseComObject(po);
+
+                _logger.LogInformation(
+                    "SAP Purchase Order created: DocEntry={DocEntry}, DocNum={DocNum}, CardCode={CardCode}, NumAtCard={NumAtCard}, Lines={Lines}",
+                    docEntry, docNum, request.CardCode, request.NumAtCard, request.Lines.Count);
+
+                return new SapPurchaseOrderResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = docNum,
+                    NumAtCard = request.NumAtCard
+                };
+            }
+            catch
+            {
+                try { Marshal.ReleaseComObject(po); } catch { /* already released */ }
+                throw;
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// The item's base (inventory) UoM AbsEntry from OITM, or null for Manual-UoM items (UgpEntry = -1)
+    /// which have no inventory UoM entry. Read via DoQuery using the documented OITM columns (UgpEntry /
+    /// IUoMEntry) — no COM UoM-entry property (those vary by DI-API build). Used to set the PO line UoM
+    /// for grouped items; the base UoM (e.g. "Unit" = 1) keeps qty/price per-piece, matching the invoice.
+    /// Caller already holds <see cref="_lock"/>.
+    /// </summary>
+    private int? GetBaseUoMEntry(string itemCode)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery(
+                "SELECT T0.\"UgpEntry\", T0.\"IUoMEntry\" FROM OITM T0 " +
+                $"WHERE T0.\"ItemCode\" = '{itemCode.Replace("'", "''")}'");
+            if (rs.EoF) return null;
+
+            var ugp = Convert.ToInt32(rs.Fields.Item("UgpEntry").Value);
+            if (ugp == -1) return null;                        // manual UoM → no line UoM required
+
+            var iuom = Convert.ToInt32(rs.Fields.Item("IUoMEntry").Value);
+            return iuom > 0 ? iuom : null;
+        }
+        catch
+        {
+            return null;   // never block PO creation on a UoM lookup
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<(int DocEntry, int DocNum)?> FindPurchaseOrderByNumAtCardAsync(string cardCode, string numAtCard)
+    {
+        if (string.IsNullOrWhiteSpace(cardCode) || string.IsNullOrWhiteSpace(numAtCard))
+            return null;
+
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            // Recordset.DoQuery() has no parameterization; escape single quotes (defence-in-depth).
+            string cc = cardCode.Replace("'", "''");
+            string nac = numAtCard.Replace("'", "''");
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(
+                    $"SELECT TOP 1 \"DocEntry\", \"DocNum\" FROM OPOR "
+                    + $"WHERE \"CardCode\" = '{cc}' AND \"NumAtCard\" = '{nac}' "
+                    + $"ORDER BY \"DocEntry\" DESC");
+
+                if (rs.EoF) return null;
+                int docEntry = Convert.ToInt32(rs.Fields.Item("DocEntry").Value);
+                int docNum   = Convert.ToInt32(rs.Fields.Item("DocNum").Value);
+                return (docEntry, docNum);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ================================
+    // INVENTORY VALUATION
+    // ================================
+
+    /// <inheritdoc/>
+    public async Task<decimal> GetInventoryValuationTotalAsync(DateOnly? asOfDate)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var effectiveDate = asOfDate ?? DateOnly.FromDateTime(DateTime.Now);
+            string asOfDateSql = effectiveDate.ToString("yyyy-MM-dd");
+
+            // DateOnly.ToString("yyyy-MM-dd") always produces exactly "YYYY-MM-DD".
+            // Validate the format as a defence-in-depth measure before interpolating
+            // into SQL, since Recordset.DoQuery() does not support parameterized queries.
+            if (asOfDateSql.Length != 10
+                || asOfDateSql[4] != '-' || asOfDateSql[7] != '-'
+                || !asOfDateSql.All(c => char.IsDigit(c) || c == '-'))
+            {
+                throw new InvalidOperationException(
+                    $"Invalid as_of_date format '{asOfDateSql}'. Expected YYYY-MM-DD.");
+            }
+
+            _logger.LogInformation(
+                "Executing inventory valuation query for as_of_date={AsOfDate}",
+                asOfDateSql);
+
+            // Build the inventory valuation SQL using the provided as_of_date
+            // instead of GETDATE() so the result is reproducible for any date.
+            string sql = $@"
+WITH LatestPurchase AS
+(
+    SELECT
+        X.ItemCode,
+        X.Price,
+        X.Currency,
+        X.DocDate,
+        ROW_NUMBER() OVER (
+            PARTITION BY X.ItemCode
+            ORDER BY X.DocDate DESC, X.DocEntry DESC, X.LineNum DESC
+        ) AS RN
+    FROM
+    (
+        SELECT
+            T1.ItemCode,
+            T1.Price AS Price,
+            ISNULL(T1.Currency, T0.DocCur) AS Currency,
+            T0.DocDate,
+            T1.DocEntry,
+            T1.LineNum
+        FROM OPCH T0
+        INNER JOIN PCH1 T1 ON T0.DocEntry = T1.DocEntry
+        WHERE
+            T0.CANCELED = 'N'
+            AND T1.Quantity <> 0
+            AND T1.Price > 0
+            AND T0.DocDate <= '{asOfDateSql}'
+
+        UNION ALL
+
+        SELECT
+            T1.ItemCode,
+            T1.Price AS Price,
+            ISNULL(T1.Currency, T0.DocCur) AS Currency,
+            T0.DocDate,
+            T1.DocEntry,
+            T1.LineNum
+        FROM OPDN T0
+        INNER JOIN PDN1 T1 ON T0.DocEntry = T1.DocEntry
+        WHERE
+            T0.CANCELED = 'N'
+            AND T1.Quantity <> 0
+            AND T1.Price > 0
+            AND T0.DocDate <= '{asOfDateSql}'
+    ) X
+),
+
+ItemWarehouse AS
+(
+    SELECT
+        T0.ItemCode,
+        T1.WhsCode,
+        T1.OnHand,
+        T0.LastPurPrc,
+        T0.LastPurCur,
+        T0.LastPurDat,
+        T1.AvgPrice AS WarehouseCost,
+        T0.AvgPrice AS ItemCost,
+        LP.Price AS LatestPurchasePrice,
+        LP.Currency AS LatestPurchaseCurrency,
+        LP.DocDate AS LatestPurchaseDate
+    FROM OITM T0
+    INNER JOIN OITW T1 ON T0.ItemCode = T1.ItemCode
+    LEFT JOIN LatestPurchase LP ON T0.ItemCode = LP.ItemCode AND LP.RN = 1
+    WHERE T1.OnHand <> 0
+),
+
+Valuation AS
+(
+    SELECT
+        IW.ItemCode,
+        IW.WhsCode,
+        IW.OnHand,
+
+        CASE
+            WHEN ISNULL(IW.LastPurPrc, 0) > 0 THEN
+                CASE
+                    WHEN ISNULL(IW.LastPurCur, 'TZS') = 'TZS' THEN IW.LastPurPrc
+                    ELSE IW.LastPurPrc * ISNULL(R1.Rate, 0)
+                END
+
+            WHEN ISNULL(IW.LatestPurchasePrice, 0) > 0 THEN
+                CASE
+                    WHEN ISNULL(IW.LatestPurchaseCurrency, 'TZS') = 'TZS' THEN IW.LatestPurchasePrice
+                    ELSE IW.LatestPurchasePrice * ISNULL(R2.Rate, 0)
+                END
+
+            WHEN ISNULL(IW.WarehouseCost, 0) > 0 THEN IW.WarehouseCost
+
+            WHEN ISNULL(IW.ItemCost, 0) > 0 THEN IW.ItemCost
+
+            ELSE 0
+        END AS ValuationPriceTZS
+
+    FROM ItemWarehouse IW
+
+    OUTER APPLY
+    (
+        SELECT TOP 1 Rate
+        FROM ORTT
+        WHERE
+            Currency = IW.LastPurCur
+            AND RateDate <= ISNULL(IW.LastPurDat, '{asOfDateSql}')
+        ORDER BY RateDate DESC
+    ) R1
+
+    OUTER APPLY
+    (
+        SELECT TOP 1 Rate
+        FROM ORTT
+        WHERE
+            Currency = IW.LatestPurchaseCurrency
+            AND RateDate <= ISNULL(IW.LatestPurchaseDate, '{asOfDateSql}')
+        ORDER BY RateDate DESC
+    ) R2
+)
+
+SELECT SUM(OnHand * ValuationPriceTZS) AS TotalValue FROM Valuation";
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(sql);
+
+                if (rs.EoF)
+                {
+                    _logger.LogWarning(
+                        "Inventory valuation query returned no rows for as_of_date={AsOfDate}",
+                        asOfDateSql);
+                    return 0m;
+                }
+
+                object rawValue = rs.Fields.Item("TotalValue").Value;
+
+                if (rawValue == null || rawValue is DBNull)
+                {
+                    _logger.LogWarning(
+                        "Inventory valuation query returned NULL total for as_of_date={AsOfDate}",
+                        asOfDateSql);
+                    return 0m;
+                }
+
+                decimal total = Convert.ToDecimal(rawValue);
+
+                _logger.LogInformation(
+                    "Inventory valuation for as_of_date={AsOfDate}: {Total} TZS",
+                    asOfDateSql, total);
+
+                return total;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+}
+
+/// <summary>
+/// SAP B1 DI-API service bound to the <b>Autohub</b> company (<c>Companies:Autohub:SapB1</c>) — a
+/// second, independent persistent connection to a separate company (e.g. "Molas Live 2021"). Behaves
+/// exactly like <see cref="SapB1DiApiService"/>; only the configured company differs. Autohub
+/// item provisioning resolves this via <see cref="IAutohubSapB1Service"/>.
+/// </summary>
+[System.Runtime.Versioning.SupportedOSPlatform("windows")]
+public sealed class AutohubSapB1DiApiService : SapB1DiApiService, IAutohubSapB1Service
+{
+    public AutohubSapB1DiApiService(IOptions<SapB1Settings> settings, ILogger<SapB1DiApiService> logger)
+        : base(settings, logger)
+    {
     }
 }

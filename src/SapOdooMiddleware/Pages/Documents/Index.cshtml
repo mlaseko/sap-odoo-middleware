@@ -1,0 +1,75 @@
+@page "/documents"
+@model SapOdooMiddleware.Pages.Documents.IndexModel
+@functions {
+    static string StatusPill(string? s) => s switch
+    {
+        "reviewed" or "completed" or "extracted" => "pill-green",
+        "extracting" or "uploaded" => "pill-yellow",
+        "failed" or "error" => "pill-red",
+        _ => "pill-grey",
+    };
+    static string ValPill(string? s) => s switch
+    {
+        "passed" or "ok" or "valid" => "pill-green",
+        "warning" or "review" => "pill-yellow",
+        "failed" or "invalid" => "pill-red",
+        _ => "pill-grey",
+    };
+}
+
+<div class="page-head">
+    <div>
+        <h2>Recent documents</h2>
+        <div class="sub">Liqui Moly / Meguin invoices — latest @Model.Docs.Count</div>
+    </div>
+    <a class="btn btn-primary" href="/documents/upload">＋ Upload new</a>
+</div>
+
+@if (TempData["Notice"] is string notice)
+{
+    <div class="notice">@notice</div>
+}
+
+@if (Model.Docs.Count == 0)
+{
+    <div class="empty">No documents uploaded yet. <a href="/documents/upload">Upload an invoice</a> to get started.</div>
+}
+else
+{
+    <table>
+        <thead>
+            <tr>
+                <th>Uploaded</th>
+                <th>File</th>
+                <th>Invoice #</th>
+                <th>Invoice date</th>
+                <th>Supplier</th>
+                <th class="num">Pages</th>
+                <th>Status</th>
+                <th>Validation</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var d in Model.Docs)
+        {
+            <tr>
+                <td>@d.UploadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                <td>@d.OriginalFilename</td>
+                <td>@d.InvoiceNumber</td>
+                <td>@(d.InvoiceDate?.ToString("yyyy-MM-dd"))</td>
+                <td>@d.Supplier</td>
+                <td class="num">@d.PageCount</td>
+                <td><span class="pill @StatusPill(d.Status)">@d.Status</span></td>
+                <td>
+                    @if (!string.IsNullOrWhiteSpace(d.ValidationStatus))
+                    {
+                        <span class="pill @ValPill(d.ValidationStatus)">@d.ValidationStatus</span>
+                    }
+                </td>
+                <td class="num"><a class="btn btn-sm" href="/documents/@d.Id">View →</a></td>
+            </tr>
+        }
+        </tbody>
+    </table>
+}
