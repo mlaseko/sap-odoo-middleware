@@ -102,7 +102,6 @@ internal class SapB1DiApiServiceStub : ISapB1Service
     public Task<SapDeliveryStatusResponse?> FindDeliveryByOrderAsync(int soDocEntry) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
-
     public Task<List<(string ItemCode, double Quantity)>> ReadDeliveryLinesAsync(int docEntry) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
