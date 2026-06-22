@@ -221,9 +221,22 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         }
         else
         {
-            _logger.LogWarning(
-                "SAP item {ItemCode} created but enrichment returned no neon_oitm_id; cannot link the Neon mirror.",
-                itemCode);
+            // No donor oitm to stamp (e.g. germax_local / fresh enrichment with no parts_catalog match):
+            // mint a fresh own-identity Neon row so the new SAP item lands in oitm too and future invoices
+            // for this (supplier, article) auto-match. Best-effort, mirroring ProvisionManualAsync — the SAP
+            // item already exists, so a mirror failure must NOT fail the line (a retry would mint a
+            // duplicate). The line OEMs (reference_type='oem' equivalents) seed the cross-references.
+            try
+            {
+                var supplier = string.IsNullOrWhiteSpace(line.Brand) ? null : line.Brand;
+                await _bridge.CreateFreshRowAsync(itemCode, article!, supplier, filtered, "enrichment_no_donor", ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "SAP item {ItemCode} created but the no-donor Neon mirror insert failed; reconcile required.",
+                    itemCode);
+            }
         }
 
         await _review.RecordCreatedAsync(line.Id, itemCode, prices.Cost, prices.Retail, prices.Wholesale, rate, ct);
