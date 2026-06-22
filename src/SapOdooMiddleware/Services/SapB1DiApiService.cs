@@ -2097,6 +2097,58 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         }
     }
 
+    public async Task<SapDeliveryStatusResponse?> FindDeliveryByOrderAsync(int soDocEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation(
+                "Finding Delivery Note by SO DocEntry={SoDocEntry}", soDocEntry);
+
+            var rs = (Recordset)_company!.GetBusinessObject(
+                BoObjectTypes.BoRecordset);
+
+            rs.DoQuery(
+                $"SELECT DISTINCT T0.\"DocEntry\", T0.\"DocNum\", T0.\"DocStatus\" " +
+                $"FROM \"ODLN\" T0 " +
+                $"INNER JOIN \"DLN1\" T1 ON T1.\"DocEntry\" = T0.\"DocEntry\" " +
+                $"WHERE T1.\"BaseType\" = 17 AND T1.\"BaseEntry\" = {soDocEntry} " +
+                $"ORDER BY T0.\"DocEntry\" DESC");
+
+            if (rs.EoF)
+            {
+                Marshal.ReleaseComObject(rs);
+                _logger.LogInformation(
+                    "No Delivery Note found for SO DocEntry={SoDocEntry}", soDocEntry);
+                return null;
+            }
+
+            int docEntry = (int)rs.Fields.Item("DocEntry").Value;
+            int docNum = (int)rs.Fields.Item("DocNum").Value;
+            string docStatus = (string)rs.Fields.Item("DocStatus").Value;
+            string status = docStatus == "O" ? "open" : "closed";
+
+            Marshal.ReleaseComObject(rs);
+
+            _logger.LogInformation(
+                "Delivery found for SO {SoDocEntry}: DocEntry={DocEntry}, DocNum={DocNum}, Status={Status}",
+                soDocEntry, docEntry, docNum, status);
+
+            return new SapDeliveryStatusResponse
+            {
+                DocEntry = docEntry,
+                DocNum = docNum,
+                Status = status,
+            };
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     // ================================
     // RETURN REQUEST (ORRR)
     // ================================

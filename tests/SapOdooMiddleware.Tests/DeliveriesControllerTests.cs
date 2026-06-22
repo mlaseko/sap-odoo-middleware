@@ -4,6 +4,7 @@ using Moq;
 using SapOdooMiddleware.Controllers;
 using SapOdooMiddleware.Models.Api;
 using SapOdooMiddleware.Models.Odoo;
+using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services;
 
 namespace SapOdooMiddleware.Tests;
@@ -112,5 +113,47 @@ public class DeliveriesControllerTests
         var response = Assert.IsType<ApiResponse<DeliveryUpdateResponse>>(objectResult.Value);
         Assert.False(response.Success);
         Assert.Contains("not found in Odoo", response.Errors!.First());
+    }
+
+    [Fact]
+    public async Task FindByOrder_Found_ReturnsOkWithDeliveryDocEntry()
+    {
+        // Arrange
+        _sapServiceMock
+            .Setup(s => s.FindDeliveryByOrderAsync(1919))
+            .ReturnsAsync(new SapDeliveryStatusResponse
+            {
+                DocEntry = 2001,
+                DocNum = 2001,
+                Status = "closed"
+            });
+
+        // Act
+        var result = await _controller.FindByOrder(1919);
+
+        // Assert
+        var okResult = Assert.IsType<OkObjectResult>(result);
+        var response = Assert.IsType<ApiResponse<SapDeliveryStatusResponse>>(okResult.Value);
+        Assert.True(response.Success);
+        Assert.Equal(2001, response.Data!.DocEntry);
+        Assert.Equal("closed", response.Data.Status);
+    }
+
+    [Fact]
+    public async Task FindByOrder_NotFound_Returns404()
+    {
+        // Arrange
+        _sapServiceMock
+            .Setup(s => s.FindDeliveryByOrderAsync(9999))
+            .ReturnsAsync((SapDeliveryStatusResponse?)null);
+
+        // Act
+        var result = await _controller.FindByOrder(9999);
+
+        // Assert
+        var objectResult = Assert.IsType<NotFoundObjectResult>(result);
+        var response = Assert.IsType<ApiResponse<SapDeliveryStatusResponse>>(objectResult.Value);
+        Assert.False(response.Success);
+        Assert.Contains("DocEntry=9999", response.Errors!.First());
     }
 }

@@ -59,6 +59,46 @@ public class DeliveriesController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/deliveries/by-order/{soDocEntry}
+    /// Finds the Delivery Note (ODLN) created from a given Sales Order DocEntry.
+    /// Used by the SAP Field Sync wizard when the delivery is missing its SAP
+    /// DocEntry but the related SO already has one.
+    ///
+    /// Traces: DLN1.BaseEntry = soDocEntry WHERE BaseType = 17 (Sales Order).
+    /// Returns the delivery's DocEntry, DocNum, and status.
+    /// </summary>
+    [HttpGet("by-order/{soDocEntry:int}")]
+    public async Task<IActionResult> FindByOrder(int soDocEntry)
+    {
+        _logger.LogInformation(
+            "Find Delivery by SO DocEntry — soDocEntry={SoDocEntry}", soDocEntry);
+
+        try
+        {
+            var result = await _sapService.FindDeliveryByOrderAsync(soDocEntry);
+
+            if (result == null)
+            {
+                return NotFound(ApiResponse<SapDeliveryStatusResponse>.Fail(
+                    $"No delivery note found for Sales Order DocEntry={soDocEntry}."));
+            }
+
+            _logger.LogInformation(
+                "Delivery found for SO {SoDocEntry}: DocEntry={DocEntry}, DocNum={DocNum}, Status={Status}",
+                soDocEntry, result.DocEntry, result.DocNum, result.Status);
+
+            return Ok(ApiResponse<SapDeliveryStatusResponse>.Ok(result));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to find delivery for SO DocEntry={SoDocEntry}", soDocEntry);
+
+            return StatusCode(500, ApiResponse<SapDeliveryStatusResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/deliveries
     /// Confirms a delivery in Odoo after SAP Delivery Note is posted.
     /// Header-only payload: {odoo_so_ref, sap_delivery_no, delivery_date, status}.
