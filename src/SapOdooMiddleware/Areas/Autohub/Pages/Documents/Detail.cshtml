@@ -651,7 +651,7 @@
             '<p id="bc-progress">Starting…</p>' +
             '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden;margin:8px 0;">' +
             '<div id="bc-bar" style="height:100%;width:0%;background:var(--accent,#11827a);transition:width .3s;"></div></div>' +
-            '<p class="hint">Each item is written to SAP. Please keep this page open.</p>';
+            '<p class="hint">Runs in the background — it continues even if you close this page or the connection drops.</p>';
         mActions.innerHTML = '';
 
         // Baseline: how many were already created, and how many this run is attempting.
@@ -671,35 +671,50 @@
         };
         renderProgress(0);
 
-        // The server commits each line as 'created' as it goes, so poll review-summary for live progress
-        // while the (blocking) bulk-create call runs.
+        const finish = (html) => {
+            mBody.innerHTML = html;
+            const close = document.createElement('button'); close.className = 'btn btn-primary'; close.textContent = 'Close';
+            close.onclick = () => location.reload(); mActions.innerHTML = ''; mActions.appendChild(close);
+        };
+
+        // Start a BACKGROUND job (survives the proxy/client timeout), then poll: review-summary for the
+        // live created-count, and the job for the final result. The create keeps running server-side even
+        // if this page is closed.
+        let jobId;
+        try {
+            const r = await api('POST', '/bulk-create-async');
+            jobId = r.job_id;
+        } catch (e) {
+            finish('<h3>Bulk create failed to start</h3><p>' + esc(e.message) + '</p>');
+            return;
+        }
+
         const poll = setInterval(async () => {
             try {
                 const s = await api('GET', '/review-summary');
                 const b = s.by_status || {};
                 renderProgress(Math.max(0, (b.created || 0) - baseCreated));
             } catch (e) { /* ignore transient poll errors */ }
-        }, 2000);
 
-        try {
-            const r = await api('POST', '/bulk-create');
+            let job;
+            try { job = await api('GET', '/bulk-create-job/' + jobId); }
+            catch (e) { return; }   // transient — keep polling
+            if (job.status === 'running') return;
+
             clearInterval(poll);
-            let html = '<h3>Bulk create complete</h3><p>Created ' + r.created + ' of ' + r.attempted + '. Needs confirmation: ' + (r.needs_confirmation || 0) + '. Failed: ' + r.failed + '.</p>';
-            if (r.needs_confirmation > 0) html += '<p class="hint">Needs-confirmation lines are cross-supplier borrowed enrichments — review them, or use “Confirm all &amp; Create” to sign off and create them.</p>';
-            if (r.failures && r.failures.length) {
+            if (job.status === 'failed') {
+                finish('<h3>Bulk create failed</h3><p>' + esc(job.error || 'unknown error') + '</p>');
+                return;
+            }
+            let html = '<h3>Bulk create complete</h3><p>Created ' + job.created + ' of ' + job.attempted + '. Needs confirmation: ' + (job.needs_confirmation || 0) + '. Failed: ' + job.failed + '.</p>';
+            if (job.needs_confirmation > 0) html += '<p class="hint">Needs-confirmation lines are cross-supplier borrowed enrichments — review them, or use “Confirm all &amp; Create” to sign off and create them.</p>';
+            if (job.failures && job.failures.length) {
                 html += '<ul class="failure-list">';
-                r.failures.forEach(f => { html += '<li><strong>' + esc(f.article_number || '?') + '</strong>: ' + esc(f.error) + '</li>'; });
+                job.failures.forEach(f => { html += '<li><strong>' + esc(f.article_number || '?') + '</strong>: ' + esc(f.error) + '</li>'; });
                 html += '</ul>';
             }
-            mBody.innerHTML = html;
-            const close = document.createElement('button'); close.className = 'btn btn-primary'; close.textContent = 'Close';
-            close.onclick = () => location.reload(); mActions.innerHTML = ''; mActions.appendChild(close);
-        } catch (e) {
-            clearInterval(poll);
-            mBody.innerHTML = '<h3>Bulk create failed</h3><p>' + esc(e.message) + '</p>';
-            const close = document.createElement('button'); close.className = 'btn'; close.textContent = 'Close'; close.onclick = () => location.reload();
-            mActions.innerHTML = ''; mActions.appendChild(close);
-        }
+            finish(html);
+        }, 2000);
     }
 
     document.getElementById('btn-complete').addEventListener('click', () => {
