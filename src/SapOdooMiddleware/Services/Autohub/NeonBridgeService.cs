@@ -50,6 +50,12 @@ public interface INeonBridgeService
     /// </summary>
     Task<long?> CreateFreshRowAsync(string sapItemCode, string articleNumber, string? supplierName,
         IReadOnlyList<string> oemNumbers, string source, CancellationToken ct);
+
+    /// <summary>
+    /// The donor row's true OEM cross-references (<c>reference_type = 'oem'</c> ONLY — never the
+    /// <c>iam_equivalent</c> aftermarket rows), used to populate the SAP ItemName. Empty if none.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetOemCrossReferencesAsync(long oitmId, CancellationToken ct);
 }
 
 /// <summary>
@@ -249,5 +255,26 @@ public sealed class NeonBridgeService : INeonBridgeService
             "Manual create: minted fresh oitm {NewId} (supplier {Supplier}, ItemCode {Code}, {OemCount} OEM ref(s)).",
             newId, supplierName, sapItemCode, oemNumbers.Count);
         return newId;
+    }
+
+    public async Task<IReadOnlyList<string>> GetOemCrossReferencesAsync(long oitmId, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        // OEM cross-references ONLY — never the 'iam_equivalent' aftermarket rows.
+        const string sql = """
+            SELECT oem_number FROM oitm_cross_reference
+            WHERE oitm_id = @id AND reference_type = 'oem' AND oem_number IS NOT NULL
+            ORDER BY oem_number;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", oitmId);
+
+        var list = new List<string>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            if (!r.IsDBNull(0)) list.Add(r.GetString(0));
+        return list;
     }
 }
