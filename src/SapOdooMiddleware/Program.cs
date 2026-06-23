@@ -15,6 +15,7 @@ using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
 using SapOdooMiddleware.Services.Autohub;
 using SapOdooMiddleware.Services.Autohub.Excel;
+using SapOdooMiddleware.Services.Reports;
 using SapOdooMiddleware.Services.Vision;
 using SapOdooMiddleware.Workers;
 
@@ -247,6 +248,9 @@ builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningS
 builder.Services.AddScoped<PartsItemCreationService>();
 builder.Services.AddSingleton<AutohubSapSetupVerifier>();   // read-only SAP pre-flight (MSSQL)
 builder.Services.AddSingleton<AutohubBulkCreateJobService>();   // async Bulk Create (background, survives proxy timeout)
+
+// Read-only Lubes inventory coverage/forecast report (direct SQL over the default Lubes SAP company).
+builder.Services.AddScoped<ILubesInventoryForecastService, LubesInventoryForecastService>();
 
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
