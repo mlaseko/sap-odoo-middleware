@@ -263,6 +263,9 @@ sudo systemctl restart inventory-classifier
   cross-references.** This is a DGX-side data change, not a middleware change.
 - **Germax scrape (Path B)** — deferred to Slice 2.
 - **Image vision verification** — off (Q5); HEAD-only check in place.
+- **Deep enrichment worker** — decision recorded in `deploy/dgx/ADR_deep_enrichment.md`: build it as a
+  **DGX-side Python service** (not a .NET middleware worker) that deepens `oitm` rows in place (full OE
+  supersession chains + fitment + categories) while `/enrich_item` stays fast/local. Not yet built.
 ```
 ```
 ```
