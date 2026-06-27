@@ -194,3 +194,48 @@ The ADR described the deep worker as a middleware (.NET) EnrichmentBackgroundWor
 
 ### Net
 DGX-side Python is the smaller, lower-risk build: it reuses proven code, requires no middleware changes, and removes the HTTP-dedupe risks — at the cost of one explicit responsibility (assert the Autohub Neon target at startup) and self-managed logging.
+
+---
+
+## Worker selection logic & filters (resolved 2026-06-27)
+
+The first-pass enrichment was built incrementally (multiple patches/methods), so provenance markers and
+`source` labels are inconsistent and cannot be trusted for selection. The worker is therefore
+**depth-driven, never marker-driven**. Diagnostic snapshot that drove this (Parts_Catalog Neon):
+
+| Bucket | Count |
+|---|---|
+| Truly shallow (≤1 OE-type cross-ref, no fitment, no cats) | **545** (228 with article, 317 without) |
+| Already rich (>1 OE **or** has fitment/cats) | **8,609** |
+| Rich **but `pass_3` marker unset** (the marker trap) | **522** |
+
+The 522 rich-but-unmarked rows are why selection must measure actual depth: a marker-based worker would
+reprocess 545 + 522 ≈ 1,067 rows (≈2× RapidAPI volume) and re-touch already-rich rows. Depth-based
+selection targets exactly 545.
+
+### Selection
+- **Select** rows WHERE: **OE-type cross-refs (`reference_type='oem'`) ≤ 1 AND no `compatible_vehicle` AND
+  no `category`.** Measured from the live rows — **never** off the `pass_3` (or any) completion marker.
+- **Mark done by re-measuring depth**, not by writing/trusting a marker. The marker is advisory only.
+
+### Routing
+- **Has article →** deepen **direct** (TecDoc lookup by article → write OE chain + fitment + cats).
+- **No article →** **discover-first** (kit-detect / OEM-bridge / rediscover), then verify. **Fail-soft:** a
+  part that can't be discovered/verified is marked **attempted-not-found** so the next pass skips it — never
+  an infinite retry loop (expect misses on `non_tecdoc` rows especially).
+
+### Write discipline (protects the SAP ItemName downstream)
+- **OE / supersession numbers → `reference_type='oem'`; aftermarket equivalents → `reference_type='iam_equivalent'`.**
+  The middleware ItemName and `GetOemCrossReferencesAsync` read **only `'oem'`** — writing IAM numbers as
+  `'oem'` pollutes the ItemName with aftermarket part numbers.
+- **Option-C OEM noise filter** applied **before any cross-ref write** (strip position/engine tokens —
+  FRONT/REAR, `2.0L`, V6… — so junk never reaches `oitm_cross_reference`).
+- **Idempotent upsert on `(oitm_id, oem_number, reference_type)`** so a re-run (or a stray reprocess of one
+  of the 522) can never duplicate cross-refs.
+- `canonical_oem_number` must be a real OE, not the article or a noise token.
+
+### Open verification questions (confirm before/while building)
+1. **Inverse trap:** are there rows that are *shallow* but have the marker *set*? Depth-based selection
+   handles them by construction, but count them to confirm scale.
+2. **Depth definition in storage:** exactly which of the 5 Neon tables/columns define "has fitment" / "has
+   cats", so the worker's measured-depth check matches the diagnostic's 545 and the two don't drift.
