@@ -239,4 +239,12 @@ public interface ISapB1Service
     /// vendor reference (OPOR.CardCode + OPOR.NumAtCard), or null if none — used to prevent duplicate POs.
     /// </summary>
     Task<(int DocEntry, int DocNum)?> FindPurchaseOrderByNumAtCardAsync(string cardCode, string numAtCard);
+
+    /// <summary>
+    /// Executes the Movement Clock stock-classification query against SAP B1 via DI API
+    /// Recordset.DoQuery(). Classifies every active item by sales velocity, recency, and
+    /// age into categories (OBSOLETE, DEAD, YEARLY, QUARTERLY, MONTHLY, NEW variants, etc.)
+    /// with recommended actions, holding cost estimates, and priority scores.
+    /// </summary>
+    Task<List<MovementClockItem>> GetMovementClockAsync();
 }
