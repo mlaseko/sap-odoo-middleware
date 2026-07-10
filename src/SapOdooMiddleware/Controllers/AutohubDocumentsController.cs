@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Ingestion;
+using SapOdooMiddleware.Models.Api;
+using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Services;
 using SapOdooMiddleware.Services.Autohub;
@@ -466,6 +468,31 @@ public class AutohubDocumentsController : ControllerBase
             && counts.GetValueOrDefault("needs_confirmation") == 0;
 
         return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, awaitingEnrichment, canComplete, status = doc.Status });
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // Inventory analytics
+    // ----------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// GET /api/autohub/documents/movement-clock
+    /// Runs the Movement Clock stock-classification query against the Autohub SAP B1 database.
+    /// Classifies every active item by sales velocity, recency, and age (OBSOLETE, DEAD, YEARLY,
+    /// QUARTERLY, MONTHLY, NEW variants) with recommended actions, holding-cost estimates, and
+    /// priority scores. Read-only — does not modify SAP data.
+    /// </summary>
+    [HttpGet("movement-clock")]
+    public async Task<IActionResult> GetMovementClock()
+    {
+        try
+        {
+            var items = await _sap.GetMovementClockAsync();
+            return Ok(ApiResponse<List<MovementClockItem>>.Ok(items));
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, ApiResponse<List<MovementClockItem>>.Fail(ex.Message));
+        }
     }
 }
 

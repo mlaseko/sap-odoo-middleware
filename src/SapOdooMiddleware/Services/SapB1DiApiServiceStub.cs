@@ -153,6 +153,10 @@ internal class SapB1DiApiServiceStub : ISapB1Service
     public Task UpdateBlankFieldsAsync(string itemCode, SapLubesItemRequest desired, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<List<MovementClockItem>> GetMovementClockAsync() =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 }
 
 /// <summary>Non-Windows stub for the Autohub-company SAP connection (<see cref="IAutohubSapB1Service"/>).</summary>

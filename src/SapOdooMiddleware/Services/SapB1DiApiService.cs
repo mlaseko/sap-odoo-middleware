@@ -4949,6 +4949,183 @@ SELECT SUM(OnHand * ValuationPriceTZS) AS TotalValue FROM Valuation";
     }
 }
 
+    // ================================
+    // MOVEMENT CLOCK CLASSIFICATION
+    // ================================
+
+    /// <inheritdoc/>
+    public async Task<List<MovementClockItem>> GetMovementClockAsync()
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            _logger.LogInformation("Executing Movement Clock stock classification query");
+
+            const string sql = @"
+WITH SalesAggregated AS (
+    SELECT
+        T0.ItemCode,
+        DATEDIFF(DAY, MAX(T1.DocDate), GETDATE()) AS Days_Since_Last_Sale,
+        COUNT(DISTINCT CONCAT(YEAR(T1.DocDate), '-', MONTH(T1.DocDate))) AS Months_With_Sales_Last_12Mo,
+        ISNULL(SUM(T0.Quantity) / 12.0, 0) AS Avg_Monthly_Consumption,
+        ISNULL(SUM(CASE
+            WHEN T1.DocDate >= DATEADD(MONTH, -36, GETDATE())
+            THEN T0.Quantity ELSE 0
+        END) / 36.0, 0) AS Avg_36Month_Consumption,
+        ISNULL(SUM(CASE
+            WHEN T1.DocDate >= DATEADD(MONTH, -12, GETDATE())
+            THEN T0.Quantity ELSE 0
+        END), 0) AS Total_Qty_Last_12Mo
+    FROM INV1 T0
+    INNER JOIN OINV T1 ON T0.DocEntry = T1.DocEntry
+    WHERE T1.DocDate >= DATEADD(MONTH, -36, GETDATE())
+      AND T1.CANCELED = 'N'
+      AND T0.Quantity > 0
+    GROUP BY T0.ItemCode
+),
+ItemMaster AS (
+    SELECT
+        ItemCode, ItemName,
+        ISNULL(OnHand, 0) AS Current_Stock,
+        ISNULL(AvgPrice, 0) AS Average_Cost,
+        CreateDate AS Item_Creation_Date,
+        DATEDIFF(DAY, ISNULL(CreateDate, GETDATE()), GETDATE()) AS Item_Age_Days,
+        validFor
+    FROM OITM
+    WHERE validFor = 'Y'
+      AND ItemCode NOT LIKE '%[SERVICE]%'
+),
+ClassifiedItems AS (
+    SELECT
+        IM.ItemCode, IM.ItemName, IM.Current_Stock, IM.Average_Cost,
+        IM.Item_Creation_Date, IM.Item_Age_Days,
+        ISNULL(SA.Days_Since_Last_Sale, 9999) AS Days_Since_Last_Sale,
+        ISNULL(SA.Months_With_Sales_Last_12Mo, 0) AS Months_With_Sales_Last_12Mo,
+        ISNULL(SA.Avg_Monthly_Consumption, 0) AS Avg_Monthly_Consumption,
+        ISNULL(SA.Total_Qty_Last_12Mo, 0) AS Total_Qty_Last_12Mo,
+        ISNULL(SA.Avg_36Month_Consumption, 0) AS Avg_36Month_Consumption,
+        CASE
+            WHEN IM.Item_Age_Days <= 90 AND SA.ItemCode IS NULL
+                 THEN 'NEW (No Sales Yet - Monitor)'
+            WHEN IM.Item_Age_Days <= 90 AND ISNULL(SA.Days_Since_Last_Sale, 9999) > 30
+                 THEN 'NEW (Slow Start - Under Review)'
+            WHEN IM.Item_Age_Days <= 180
+                 AND ISNULL(SA.Days_Since_Last_Sale, 9999) <= 30
+                 AND ISNULL(SA.Avg_Monthly_Consumption, 0) >= 1
+                 THEN 'NEW (Promising - Monthly)'
+            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) > 730
+                 AND IM.Item_Age_Days > 730
+                 THEN 'OBSOLETE (2Y+)'
+            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) > 365
+                 AND IM.Item_Age_Days > 365
+                 THEN 'DEAD (Yearly+)'
+            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) > 90
+                 AND ISNULL(SA.Avg_36Month_Consumption, 0) >= 0.5
+                 AND ISNULL(SA.Months_With_Sales_Last_12Mo, 0) <= 2
+                 AND IM.Item_Age_Days > 180
+                 THEN 'SLOW (Yearly - Bulk)'
+            WHEN (ISNULL(SA.Days_Since_Last_Sale, 9999) BETWEEN 91 AND 365
+                  OR ISNULL(SA.Months_With_Sales_Last_12Mo, 0) <= 2)
+                 AND IM.Item_Age_Days > 180
+                 THEN 'YEARLY'
+            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) BETWEEN 31 AND 90
+                 AND ISNULL(SA.Months_With_Sales_Last_12Mo, 0) >= 3
+                 AND IM.Item_Age_Days > 180
+                 THEN 'QUARTERLY'
+            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) <= 30
+                 AND ISNULL(SA.Avg_Monthly_Consumption, 0) >= 1
+                 AND IM.Item_Age_Days > 180
+                 THEN 'MONTHLY'
+            WHEN SA.ItemCode IS NULL AND IM.Item_Age_Days > 180
+                 THEN 'NO SALES (Investigate)'
+            ELSE 'UNCLASSIFIED'
+        END AS Movement_Clock_Classification
+    FROM ItemMaster IM
+    LEFT JOIN SalesAggregated SA ON IM.ItemCode = SA.ItemCode
+)
+SELECT
+    ItemCode, ItemName, Current_Stock, Average_Cost,
+    Item_Creation_Date, Item_Age_Days, Days_Since_Last_Sale,
+    Months_With_Sales_Last_12Mo, Avg_Monthly_Consumption, Total_Qty_Last_12Mo,
+    Movement_Clock_Classification,
+    CASE
+        WHEN Movement_Clock_Classification LIKE 'NEW%' THEN 'Monitor closely - Build demand forecast'
+        WHEN Movement_Clock_Classification = 'OBSOLETE (2Y+)' THEN 'IMMEDIATE: Purge / Deep discount / Write-off'
+        WHEN Movement_Clock_Classification = 'DEAD (Yearly+)' THEN 'URGENT: Review with sales team - Consider discount'
+        WHEN Movement_Clock_Classification = 'YEARLY' THEN 'Keep minimal stock (1-2 units) - Review annually'
+        WHEN Movement_Clock_Classification = 'QUARTERLY' THEN 'Maintain 1 quarter supply - Review quarterly'
+        WHEN Movement_Clock_Classification = 'MONTHLY' THEN 'Auto-reorder - Maintain safety stock'
+        WHEN Movement_Clock_Classification = 'NO SALES (Investigate)' THEN 'Check if item is still needed - Consider delisting'
+        ELSE 'Regular review'
+    END AS Recommended_Action,
+    CASE
+        WHEN Days_Since_Last_Sale > 365
+             AND Item_Age_Days > 365
+             AND Current_Stock > 0
+             AND Average_Cost > 0
+        THEN ROUND(Current_Stock * Average_Cost * 0.15 * (Days_Since_Last_Sale / 365.0), 2)
+        ELSE 0
+    END AS Estimated_Holding_Cost_TZS,
+    CASE Movement_Clock_Classification
+        WHEN 'OBSOLETE (2Y+)' THEN 1
+        WHEN 'DEAD (Yearly+)' THEN 2
+        WHEN 'NO SALES (Investigate)' THEN 3
+        WHEN 'YEARLY' THEN 4
+        WHEN 'NEW (No Sales Yet - Monitor)' THEN 5
+        WHEN 'NEW (Slow Start - Under Review)' THEN 6
+        WHEN 'QUARTERLY' THEN 7
+        WHEN 'MONTHLY' THEN 8
+        WHEN 'NEW (Promising - Monthly)' THEN 9
+        ELSE 10
+    END AS Priority_Score
+FROM ClassifiedItems
+ORDER BY Priority_Score, Days_Since_Last_Sale DESC";
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(sql);
+
+                var items = new List<MovementClockItem>();
+                while (!rs.EoF)
+                {
+                    items.Add(new MovementClockItem
+                    {
+                        ItemCode = Convert.ToString(rs.Fields.Item("ItemCode").Value) ?? "",
+                        ItemName = Convert.ToString(rs.Fields.Item("ItemName").Value) ?? "",
+                        CurrentStock = Convert.ToDecimal(rs.Fields.Item("Current_Stock").Value),
+                        AverageCost = Convert.ToDecimal(rs.Fields.Item("Average_Cost").Value),
+                        ItemCreationDate = Convert.ToDateTime(rs.Fields.Item("Item_Creation_Date").Value),
+                        ItemAgeDays = Convert.ToInt32(rs.Fields.Item("Item_Age_Days").Value),
+                        DaysSinceLastSale = Convert.ToInt32(rs.Fields.Item("Days_Since_Last_Sale").Value),
+                        MonthsWithSalesLast12Mo = Convert.ToInt32(rs.Fields.Item("Months_With_Sales_Last_12Mo").Value),
+                        AvgMonthlyConsumption = Convert.ToDecimal(rs.Fields.Item("Avg_Monthly_Consumption").Value),
+                        TotalQtyLast12Mo = Convert.ToDecimal(rs.Fields.Item("Total_Qty_Last_12Mo").Value),
+                        MovementClockClassification = Convert.ToString(rs.Fields.Item("Movement_Clock_Classification").Value) ?? "",
+                        RecommendedAction = Convert.ToString(rs.Fields.Item("Recommended_Action").Value) ?? "",
+                        EstimatedHoldingCostTzs = Convert.ToDecimal(rs.Fields.Item("Estimated_Holding_Cost_TZS").Value),
+                        PriorityScore = Convert.ToInt32(rs.Fields.Item("Priority_Score").Value),
+                    });
+                    rs.MoveNext();
+                }
+
+                _logger.LogInformation("Movement Clock query returned {Count} items", items.Count);
+                return items;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+}
+
 /// <summary>
 /// SAP B1 DI-API service bound to the <b>Autohub</b> company (<c>Companies:Autohub:SapB1</c>) — a
 /// second, independent persistent connection to a separate company (e.g. "Molas Live 2021"). Behaves
