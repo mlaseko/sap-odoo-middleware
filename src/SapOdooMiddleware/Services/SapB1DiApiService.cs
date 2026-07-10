@@ -4947,7 +4947,6 @@ SELECT SUM(OnHand * ValuationPriceTZS) AS TotalValue FROM Valuation";
             _lock.Release();
         }
     }
-}
 
     // ================================
     // MOVEMENT CLOCK CLASSIFICATION
