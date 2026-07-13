@@ -51,11 +51,28 @@ create-new, never `matched`).
    are untouched; the next invoice for these `GL####` auto-matches via Tier-2 (exact article).
 
 ## Follow-ups (Part B — staged, tracked separately)
-Confirmed during diagnosis but out of scope for this change:
-- **Internal SKUs leaked into `oitm_cross_reference` as `reference_type='oem'`** (our `LR100xxx` PKs sitting
-  in the OEM namespace; `LR` prefix collides with real `LR######` OE numbers). Add a write-guard (never
-  persist an OEM equal to an existing `item_code`) + staged cleanup (safe: self-references where
-  `oem_number = the row's own item_code`; review: cross-row collisions, which may be coincidental real OEs).
+Confirmed during diagnosis but out of scope for this change. Part A already neutralises the *matching*
+harm of the contamination below (a leaked-SKU bridge hit can no longer auto-match, because the donor's
+article won't equal the line's); Part B is about ItemName/cross-ref purity and stopping the leak at source.
+
+**Contamination review — `oitm_cross_reference` rows whose `oem_number` equals an existing `item_code`
+(33 rows reviewed):**
+- **22 `iam_equivalent` rows — legitimate, leave alone.** Real aftermarket part numbers that coincidentally
+  also serve as some other item's internal SKU; the cross-ref itself is correct (right part family) and the
+  bridge already excludes `iam_equivalent`, so they cannot cause the collapse. Deleting them would remove
+  valid cross-references.
+- **11 `oem` rows — genuine contamination, cleanable (unambiguous).** Internal `LR1xxxxx` SKUs leaked into
+  `reference_type='oem'` on unrelated items (e.g. a gasket's SKU spread across four air-suspension struts, a
+  brake-pad SKU on a mounting). The part-type mismatch plus the `LR1xxxxx` internal range confirms these are
+  leaked SKUs, not coincidental real OEs — so no per-row review is needed. These are bridge-visible and are
+  what can pollute a borrowed item's ItemName/cross-refs.
+
+**Planned Part B work:**
+- **Clean the 11 `oem` rows**: delete `oitm_cross_reference` where `reference_type='oem'` AND `oem_number`
+  equals an existing `oitm.item_code`. (Scope to `reference_type='oem'` only — never touch `iam_equivalent`.)
+- **Write-guard**: when copying/writing `oem` cross-refs (`NeonBridgeService.CreateOwnIdentityRowAsync` /
+  `CreateFreshRowAsync`) and reading them for ItemName (`GetOemCrossReferencesAsync`), exclude any token that
+  equals an existing `item_code`, so a leaked SKU can never propagate into a new item.
 - **DGX-side source fix**: stop the `non_tecdoc`/germax import & `_upsert_oitm` from writing `item_code`
-  into cross-references.
-- `neon_germax_products` code-existence validation against SAP; `iam_equivalent` junk cleanup.
+  into cross-references (the origin of the leak).
+- `neon_germax_products` code-existence validation against SAP.
