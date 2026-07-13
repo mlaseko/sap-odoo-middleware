@@ -224,7 +224,7 @@ public class AutohubDocumentsController : ControllerBase
         // Persist + route: failed/partial → needs_manual; donor already a SAP item → auto-match (C1);
         // otherwise ready for the operator to confirm + create (C2). The modal/review page read the
         // persisted result without re-calling DGX.
-        var routing = await _router.ApplyAsync(lineId, line.Brand, enr, ct);
+        var routing = await _router.ApplyAsync(lineId, line.Brand, line.SupplierArticleNumber, enr, ct);
         var routingLabel = routing.Routing switch
         {
             LineEnrichmentRouting.AutoMatched      => "auto_matched",
