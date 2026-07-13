@@ -39,11 +39,16 @@ create-new, never `matched`).
 ## Deploy + remediate (Part C — ordered)
 1. **Merge & build on the Windows box**, run `dotnet test`, then `Restart-Service SapOdooMiddleware`.
    (No CI — the Windows publish is the build gate.)
-2. **Audit the blast radius** (read-only): `migrations/2026-07-13__audit_oem_bridge_article_mismatch.sql`
-   lists every currently-`matched` line whose matched item's article ≠ the line's article.
-3. **Remediate** with `migrations/2026-07-13__remediate_oem_bridge_article_mismatch.sql` — resets those
-   lines to `pending` with enrichment cleared so the **fixed** worker re-routes them to create-new.
-   Default scope is the reported document `5f34d0cf-…`; broaden after reviewing the audit.
+2. **Audit the blast radius** — use the **categorized v2**:
+   `migrations/2026-07-13__audit_oem_bridge_article_mismatch_categorized.sql`.
+   - ⚠️ The original article-only audit **over-flags Germax**: Germax `oitm` rows are keyed by the OE
+     number in `article_number` (e.g. `0 986 494 440`), not the `GL####` SKU — that mapping lives in
+     `neon_germax_products`. So `donor.article ≠ line article` is *always* true for Germax, even for a
+     **legitimate** `tier2_article` catalog match. The v2 audit classifies by `MatchStrategy`:
+     `tier2_article` = **LEGIT (leave)**; `tier1_oem` / `*_auto_match` / create-new-but-`matched` = **WRONG (reset)**.
+3. **Remediate** with **v2**: `migrations/2026-07-13__remediate_oem_bridge_article_mismatch_v2.sql` — resets
+   only the WRONG-strategy lines to `pending` (enrichment cleared) so the **fixed** worker re-resolves them;
+   catalogued `GL####` re-match via Tier-2, uncatalogued route to create-new. `tier2_article` is never reset.
    - ⚠️ Do **not** flip `matched` → `create_new` directly: the stale `*_auto_match` strategy would make
      `ProvisionAsync` write the new SKU onto the donor row and corrupt a different part.
 4. In the review UI: **Confirm all & Create**, then **Bulk Create**.
@@ -67,12 +72,21 @@ article won't equal the line's); Part B is about ItemName/cross-ref purity and s
   leaked SKUs, not coincidental real OEs — so no per-row review is needed. These are bridge-visible and are
   what can pollute a borrowed item's ItemName/cross-refs.
 
-**Planned Part B work:**
-- **Clean the 11 `oem` rows**: delete `oitm_cross_reference` where `reference_type='oem'` AND `oem_number`
-  equals an existing `oitm.item_code`. (Scope to `reference_type='oem'` only — never touch `iam_equivalent`.)
-- **Write-guard**: when copying/writing `oem` cross-refs (`NeonBridgeService.CreateOwnIdentityRowAsync` /
-  `CreateFreshRowAsync`) and reading them for ItemName (`GetOemCrossReferencesAsync`), exclude any token that
-  equals an existing `item_code`, so a leaked SKU can never propagate into a new item.
-- **DGX-side source fix**: stop the `non_tecdoc`/germax import & `_upsert_oitm` from writing `item_code`
-  into cross-references (the origin of the leak).
-- `neon_germax_products` code-existence validation against SAP.
+**Part B work:**
+- **[done — this branch] Clean the 11 `oem` rows**: `migrations/2026-07-13__cleanup_internal_sku_leaked_as_oem.sql`
+  deletes `oitm_cross_reference` where `reference_type='oem'` AND `oem_number` equals an existing
+  `oitm.item_code`. Strictly `reference_type='oem'` — the 22 legit `iam_equivalent` rows are never touched.
+- **[done — this branch] Write-guard**: `NeonBridgeService.CreateOwnIdentityRowAsync` / `CreateFreshRowAsync`
+  (copy/write) and `GetOemCrossReferencesAsync` (ItemName read) now exclude any token equal to an existing
+  `item_code`, so a leaked SKU can never propagate into a new item's cross-refs / ItemName.
+- **[DGX-side — not in this repo] Source fix**: the DGX writes `parts_catalog` directly, bypassing the
+  middleware guard, so the leak must also be stopped at source. On `spark-09cc`, in the `_upsert_oitm`
+  cross-reference write inside `~/Inventory_Management_Tool/classifier_service.py`, skip any OEM token that
+  equals an existing `oitm.item_code` before inserting it as `reference_type='oem'`. Find it with:
+  `grep -n "oitm_cross_reference\|reference_type\|_upsert_oitm" ~/Inventory_Management_Tool/classifier_service.py`
+- `neon_germax_products` code-existence validation against SAP (separate, tracked).
+
+> Trade-off noted: the guard/cleanup key on "equals an existing `item_code`". A real OE number that
+> coincidentally equals one of our SKUs in the shared `LR` range would also be dropped from an ItemName —
+> a cosmetic loss, preferred over keeping a leaked internal SKU. The reviewed 11 rows are confirmed leaks
+> (part-type mismatch), not coincidental OEs.

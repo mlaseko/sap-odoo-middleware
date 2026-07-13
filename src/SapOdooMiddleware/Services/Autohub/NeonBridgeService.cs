@@ -141,10 +141,15 @@ public sealed class NeonBridgeService : INeonBridgeService
         }
 
         // Carry the donor's OEM cross-references onto the new row (new id → no conflicts possible).
+        // Namespace guard: never copy a token that is actually one of our internal SKUs (an item_code) —
+        // those are leaked-SKU contamination in the OEM space (the LR100xxx-in-'oem' rows) and must not
+        // propagate into a new item's cross-refs / ItemName.
         const string copy = """
             INSERT INTO oitm_cross_reference (oitm_id, oem_number, reference_type)
-            SELECT @to, oem_number, reference_type
-            FROM oitm_cross_reference WHERE oitm_id = @from AND reference_type = 'oem';
+            SELECT @to, x.oem_number, x.reference_type
+            FROM oitm_cross_reference x
+            WHERE x.oitm_id = @from AND x.reference_type = 'oem'
+              AND NOT EXISTS (SELECT 1 FROM oitm o WHERE o.item_code = x.oem_number);
             """;
         await using (var cmd = new NpgsqlCommand(copy, conn))
         {
@@ -238,9 +243,12 @@ public sealed class NeonBridgeService : INeonBridgeService
         // Carry the line's OEM numbers as cross-references so Tier-1 OEM auto-match finds the item later.
         if (oemNumbers.Count > 0)
         {
+            // Namespace guard: skip any line OEM that collides with an existing internal SKU (item_code) —
+            // keeps our primary keys out of the OEM namespace.
             const string xref = """
                 INSERT INTO oitm_cross_reference (oitm_id, oem_number, reference_type)
-                VALUES (@id, @oem, 'oem');
+                SELECT @id, @oem, 'oem'
+                WHERE NOT EXISTS (SELECT 1 FROM oitm o WHERE o.item_code = @oem);
                 """;
             foreach (var oem in oemNumbers)
             {
@@ -262,11 +270,14 @@ public sealed class NeonBridgeService : INeonBridgeService
         await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync(ct);
 
-        // OEM cross-references ONLY — never the 'iam_equivalent' aftermarket rows.
+        // OEM cross-references ONLY — never the 'iam_equivalent' aftermarket rows. Namespace guard:
+        // exclude any token that is actually one of our internal SKUs (an item_code), so a leaked-SKU
+        // cross-reference can't pollute the SAP ItemName with our own primary key.
         const string sql = """
-            SELECT oem_number FROM oitm_cross_reference
-            WHERE oitm_id = @id AND reference_type = 'oem' AND oem_number IS NOT NULL
-            ORDER BY oem_number;
+            SELECT x.oem_number FROM oitm_cross_reference x
+            WHERE x.oitm_id = @id AND x.reference_type = 'oem' AND x.oem_number IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM oitm o WHERE o.item_code = x.oem_number)
+            ORDER BY x.oem_number;
             """;
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("id", oitmId);
