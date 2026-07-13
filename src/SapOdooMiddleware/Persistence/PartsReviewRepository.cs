@@ -13,7 +13,10 @@ public sealed record PartsReviewLineRow(
     bool IsPromotional, string ReviewStatus, string? MatchedItemCode, string? GeneratedItemCode,
     string? EnrichmentSource, string? BorrowedFromArticle, DateTime? EnrichmentConfirmedAt, string? CreateErrorMessage,
     string? MatchStrategy, string? BorrowedFromSupplier,
-    string? SuggestedDonorItemCode, long? SuggestedDonorOitmId, string? SuggestedDonorSupplier);
+    string? SuggestedDonorItemCode, long? SuggestedDonorOitmId, string? SuggestedDonorSupplier,
+    // Donor-scoring review flags, computed from EnrichmentPayloadJson->audit (null/absent → no review).
+    bool NeedsReview, string? SelectedComponentVerdict, string? SelectedName, string? SelectedSupplier,
+    bool HasDonorCandidates);
 
 /// <summary>A 'create_new' line reduced to what provisioning needs (incl. the persisted enrichment).</summary>
 public sealed record PartsProvisioningLine(
@@ -60,6 +63,9 @@ public interface IPartsReviewRepository
 
     /// <summary>Repoint a line at a different parts_catalog row (after a cross-supplier own-identity row is minted).</summary>
     Task UpdateNeonOitmIdAsync(Guid lineId, long neonOitmId, CancellationToken ct);
+
+    /// <summary>Stamp EditedBy/EditedAt on a line (e.g. after an operator donor-swap).</summary>
+    Task MarkEditedAsync(Guid lineId, string editedBy, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
 
     /// <summary>Count of lines still awaiting background enrichment (pending, not-yet-enriched, non-promotional) for one document.</summary>
@@ -97,7 +103,13 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         "\"LineTotalForeign\",\"IsPromotional\",\"ReviewStatus\",\"MatchedItemCode\",\"GeneratedItemCode\"," +
         "\"EnrichmentSource\",\"BorrowedFromArticle\",\"EnrichmentConfirmedAt\",\"CreateErrorMessage\"," +
         "\"MatchStrategy\",\"BorrowedFromSupplier\"," +
-        "\"SuggestedDonorItemCode\",\"SuggestedDonorOitmId\",\"SuggestedDonorSupplier\"";
+        "\"SuggestedDonorItemCode\",\"SuggestedDonorOitmId\",\"SuggestedDonorSupplier\"," +
+        // Computed donor-scoring flags from the enrichment audit block (null-tolerant: absent → false/null).
+        "COALESCE((\"EnrichmentPayloadJson\"#>>'{audit,selection,needs_review}')::boolean, false)," +
+        "\"EnrichmentPayloadJson\"#>>'{audit,selection,selected_component_verdict}'," +
+        "\"EnrichmentPayloadJson\"#>>'{audit,selection,selected_name}'," +
+        "\"EnrichmentPayloadJson\"#>>'{audit,selection,selected_supplier}'," +
+        "COALESCE(jsonb_array_length(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}'), 0) > 0";
 
     private readonly ICompanyContext _company;
     public PartsReviewRepository(ICompanyContext company) => _company = company;
@@ -282,6 +294,16 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         cmd.Parameters.AddWithValue("id", lineId);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is null or DBNull ? null : (string)result;
+    }
+
+    public async Task MarkEditedAsync(Guid lineId, string editedBy, CancellationToken ct)
+    {
+        const string sql = "UPDATE public.\"staging_document_line\" SET \"EditedBy\" = @by, \"EditedAt\" = NOW() WHERE \"Id\" = @id;";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("by", editedBy);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task UpdateNeonOitmIdAsync(Guid lineId, long neonOitmId, CancellationToken ct)
@@ -547,7 +569,12 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         BorrowedFromSupplier:   r.IsDBNull(22) ? null : r.GetString(22),
         SuggestedDonorItemCode: r.IsDBNull(23) ? null : r.GetString(23),
         SuggestedDonorOitmId:   r.IsDBNull(24) ? null : r.GetInt64(24),
-        SuggestedDonorSupplier: r.IsDBNull(25) ? null : r.GetString(25));
+        SuggestedDonorSupplier: r.IsDBNull(25) ? null : r.GetString(25),
+        NeedsReview:             !r.IsDBNull(26) && r.GetBoolean(26),
+        SelectedComponentVerdict: r.IsDBNull(27) ? null : r.GetString(27),
+        SelectedName:            r.IsDBNull(28) ? null : r.GetString(28),
+        SelectedSupplier:        r.IsDBNull(29) ? null : r.GetString(29),
+        HasDonorCandidates:      !r.IsDBNull(30) && r.GetBoolean(30));
 
     private static List<string> ParseOems(NpgsqlDataReader r, int ordinal)
     {

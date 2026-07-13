@@ -165,6 +165,11 @@
                 {
                     <span class="pill @sb.Css" title="@l.MatchStrategy" style="margin-left:4px;">@sb.Label</span>
                 }
+                @if (l.NeedsReview)
+                {
+                    <span class="pill pill-orange" style="margin-left:4px;"
+                          title="Borrowed part type unverified (@l.SelectedComponentVerdict) — review/choose the donor">⚠ review</span>
+                }
             </td>
             @if (Model.IsEditable)
             {
@@ -179,6 +184,10 @@
                             }
                             <button type="button" data-action="match">Manual match…</button>
                             <button type="button" data-action="create_new">Create New (SAP)</button>
+                            @if (l.HasDonorCandidates && l.ReviewStatus != "created")
+                            {
+                                <button type="button" data-action="swap_donor">Choose donor…</button>
+                            }
                             <button type="button" data-action="reenrich">Re-enrich…</button>
                             @if (l.ReviewStatus != "needs_manual")
                             {
@@ -358,6 +367,61 @@
         return html;
     }
 
+    // ---- operator "choose borrowed donor" (swap) ----
+    function verdictPill(v) {
+        const cls = v === 'MATCH' ? 'pill-green' : (v === 'DIFFERENT' ? 'pill-red' : 'pill-yellow');
+        return '<span class="pill ' + cls + '">' + esc(v || '?') + '</span>';
+    }
+
+    async function openDonorSwapModal(row, lineId) {
+        let enr;
+        try {
+            const r = await fetch(base + '/lines/' + lineId + '/enrichment', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} });
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            enr = await r.json();
+        } catch (e) { alert('Could not load donor candidates: ' + e.message); return; }
+
+        const cands = ((enr.audit || {}).bridge_candidates_ranked) || [];
+        if (!cands.length) { alert('No donor candidates available for this line.'); return; }
+
+        let html = '<h3>Choose borrowed donor</h3>';
+        html += '<p>Pick the article whose part best matches this line. The new SAP item still gets its own ' +
+                'freshly-minted code — only the borrowed specs/OEMs change.</p>';
+        html += '<table class="kv" style="width:100%"><tr><th></th><th>Article</th><th>Name</th><th>Supplier</th><th>Type</th></tr>';
+        cands.forEach((c, i) => {
+            const wrongType = c.auto_pick_eligible === false;
+            html += '<tr>' +
+                '<td><input type="radio" name="donor-pick" value="' + i + '"' + (c.is_default ? ' checked' : '') + '></td>' +
+                '<td>' + esc(c.article_number) + (c.is_default ? ' <em>(current)</em>' : '') + '</td>' +
+                '<td>' + esc(c.name) + '</td>' +
+                '<td>' + esc(c.supplier) + '</td>' +
+                '<td>' + verdictPill(c.verdict) + (wrongType ? ' <span title="different part type — override only">✋</span>' : '') + '</td>' +
+                '</tr>';
+        });
+        html += '</table>';
+
+        openModal(html, [
+            { label: 'Cancel', onClick: closeModal },
+            { label: 'Use selected donor', primary: true, onClick: async () => {
+                const sel = mBody.querySelector('input[name="donor-pick"]:checked');
+                if (!sel) { alert('Select a donor first.'); return; }
+                const c = cands[parseInt(sel.value, 10)];
+                if (c.auto_pick_eligible === false &&
+                    !confirm('This candidate is a different part type (' + (c.verdict || '') + '). Borrow from it anyway?')) return;
+                try {
+                    const res = await api('POST', '/lines/' + lineId + '/swap-donor',
+                        { article_number: c.article_number, supplier: c.supplier });
+                    closeModal();
+                    if (res && res.review_status) setRowPill(row, res.review_status);
+                    // Force the expanded enrichment panel to reload with the new donor.
+                    const detail = detailRowFor(lineId);
+                    if (detail) { const box = detail.querySelector('.ld-enrichment'); if (box) box.dataset.loaded = 'false'; }
+                    await refreshSummary();
+                } catch (e) { alert('Swap failed: ' + e.message); }
+            } }
+        ]);
+    }
+
     // ---- per-line actions (Match / Create New+enrich / Skip) ----
     document.querySelectorAll('#lines-table .actions-menu .menu button').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -387,6 +451,8 @@
                     // creation (no re-enrichment). The explicit choice also confirms it for the gate.
                     const updated = await api('POST', '/lines/' + lineId + '/create-new', { confirmed: true });
                     if (updated) setRowPill(row, updated.review_status);
+                } else if (action === 'swap_donor') {
+                    await openDonorSwapModal(row, lineId);
                 } else if (action === 'reenrich') {
                     await createNewFlow(row, lineId);   // explicit re-enrichment (rarely needed)
                 } else if (action === 'needs_manual') {

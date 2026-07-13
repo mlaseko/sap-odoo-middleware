@@ -26,6 +26,10 @@ public sealed record EnrichmentResponse
     [JsonPropertyName("item_data")]             public EnrichmentItemData? ItemData           { get; init; }
     [JsonPropertyName("error")]                 public EnrichmentError?   Error               { get; init; }
     [JsonPropertyName("noise_filtered_tokens")] public List<string>?      NoiseFilteredTokens { get; init; }
+    /// <summary>DGX candidate-scoring block (bridge borrows): selection verdict + ranked alternatives for the operator swap UI.</summary>
+    [JsonPropertyName("audit")]                 public EnrichmentAudit?   Audit               { get; init; }
+    /// <summary>Preserve any other DGX fields verbatim through the deserialize→reserialize round-trip into EnrichmentPayloadJson (future-proofing).</summary>
+    [JsonExtensionData]                         public Dictionary<string, JsonElement>? Extra { get; init; }
 
     /// <summary>Canonical source label, tolerating either the spec ('source') or legacy ('enrichment_source') key.</summary>
     [JsonIgnore] public string? SourceLabel => EnrichmentSource ?? Source;
@@ -48,6 +52,41 @@ public sealed record BorrowedFrom
     [JsonPropertyName("supplier_name")]   public string?  SupplierName    { get; init; }
     [JsonPropertyName("match_via_oem")]   public string?  MatchViaOem     { get; init; }
     [JsonPropertyName("match_confidence")]public decimal? MatchConfidence { get; init; }
+}
+
+/// <summary>DGX donor-scoring audit for a bridge borrow (spec: DGX_ROLE scoring update).</summary>
+public sealed record EnrichmentAudit
+{
+    [JsonPropertyName("selection")]                public DonorSelection?      Selection             { get; init; }
+    [JsonPropertyName("bridge_candidates_ranked")] public List<DonorCandidate>? BridgeCandidatesRanked { get; init; }
+}
+
+/// <summary>What DGX actually borrowed and whether the operator should review it.</summary>
+public sealed record DonorSelection
+{
+    /// <summary>MATCH | UNCERTAIN | DIFFERENT.</summary>
+    [JsonPropertyName("selected_component_verdict")] public string? SelectedComponentVerdict { get; init; }
+    /// <summary>True when the verdict is not MATCH — the UI shows a ⚠ flag.</summary>
+    [JsonPropertyName("needs_review")]               public bool    NeedsReview              { get; init; }
+    [JsonPropertyName("selected_name")]              public string? SelectedName             { get; init; }
+    [JsonPropertyName("selected_supplier")]          public string? SelectedSupplier         { get; init; }
+    [JsonPropertyName("source_path")]                public string? SourcePath               { get; init; }
+}
+
+/// <summary>One ranked donor alternative the operator can swap the borrow to (keyed by article_number).</summary>
+public sealed record DonorCandidate
+{
+    [JsonPropertyName("name")]              public string?  Name            { get; init; }
+    [JsonPropertyName("supplier")]          public string?  Supplier        { get; init; }
+    /// <summary>MATCH | UNCERTAIN | DIFFERENT.</summary>
+    [JsonPropertyName("verdict")]           public string?  Verdict         { get; init; }
+    [JsonPropertyName("score")]             public decimal? Score           { get; init; }
+    /// <summary>False for DIFFERENT candidates — never auto-selected; operator override only.</summary>
+    [JsonPropertyName("auto_pick_eligible")] public bool    AutoPickEligible { get; init; }
+    /// <summary>The donor's article number — the key used to re-point a swap.</summary>
+    [JsonPropertyName("article_number")]    public string?  ArticleNumber   { get; init; }
+    /// <summary>True for the candidate that was actually borrowed.</summary>
+    [JsonPropertyName("is_default")]        public bool     IsDefault       { get; init; }
 }
 
 public sealed record EnrichmentItemData
