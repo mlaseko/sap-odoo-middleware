@@ -8,7 +8,10 @@ public sealed record OitmMatch(
     string ItemCode,
     long? OitmId,
     string? SupplierName,
-    string MatchedField);   // "cross_ref_oem" | "article_number" | "febi_article_no" | "germax_article_number"
+    string MatchedField,      // "cross_ref_oem" | "article_number" | "febi_article_no" | "germax_article_number"
+    string? ArticleNumber = null);   // the donor's own article — the identity key; lets Tier 1 reject a
+                                     // shared-OEM hit on a DIFFERENT article (identity is (supplier, article),
+                                     // never the item_code — item_code is our generated primary key).
 
 public interface IOitmMatchRepository
 {
@@ -49,7 +52,7 @@ public sealed class OitmMatchRepository : IOitmMatchRepository
         if (oemNumbers is null || oemNumbers.Count == 0) return null;
 
         const string sql = """
-            SELECT o.item_code, o.id AS oitm_id, o.supplier_name, 'cross_ref_oem' AS matched_field
+            SELECT o.item_code, o.id AS oitm_id, o.supplier_name, 'cross_ref_oem' AS matched_field, o.article_number
             FROM oitm_cross_reference xref
             JOIN oitm o ON o.id = xref.oitm_id
             WHERE xref.oem_number = ANY(@oems)
@@ -78,16 +81,18 @@ public sealed class OitmMatchRepository : IOitmMatchRepository
             WITH article_match AS (
                 SELECT o.item_code, o.id AS oitm_id, o.supplier_name,
                        CASE WHEN o.article_number = @article THEN 'article_number' ELSE 'febi_article_no' END AS matched_field,
+                       o.article_number AS article_number,
                        1 AS priority
                 FROM oitm o
                 WHERE (o.article_number = @article OR (@includeFebi AND o.febi_article_no = @article))
                   AND o.item_code IS NOT NULL
                 UNION ALL
-                SELECT g.item_code, NULL::bigint, NULL::text, 'germax_article_number' AS matched_field, 2 AS priority
+                SELECT g.item_code, NULL::bigint, NULL::text, 'germax_article_number' AS matched_field,
+                       g.germax_article_number AS article_number, 2 AS priority
                 FROM neon_germax_products g
                 WHERE g.germax_article_number = @article AND g.is_active = true
             )
-            SELECT item_code, oitm_id, supplier_name, matched_field
+            SELECT item_code, oitm_id, supplier_name, matched_field, article_number
             FROM article_match ORDER BY priority LIMIT 1;
             """;
         await using var conn = new NpgsqlConnection(ConnectionString);
@@ -104,8 +109,9 @@ public sealed class OitmMatchRepository : IOitmMatchRepository
         !string.IsNullOrWhiteSpace(supplier) && supplier.Contains("FEBI", StringComparison.OrdinalIgnoreCase);
 
     private static OitmMatch Map(NpgsqlDataReader r) => new(
-        ItemCode:     r.GetString(0),
-        OitmId:       r.IsDBNull(1) ? null : r.GetInt64(1),
-        SupplierName: r.IsDBNull(2) ? null : r.GetString(2),
-        MatchedField: r.GetString(3));
+        ItemCode:      r.GetString(0),
+        OitmId:        r.IsDBNull(1) ? null : r.GetInt64(1),
+        SupplierName:  r.IsDBNull(2) ? null : r.GetString(2),
+        MatchedField:  r.GetString(3),
+        ArticleNumber: r.IsDBNull(4) ? null : r.GetString(4));
 }

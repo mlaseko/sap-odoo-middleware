@@ -10,7 +10,7 @@ public sealed record EnrichmentApplyResult(LineEnrichmentRouting Routing, string
 
 public interface IEnrichmentResultRouter
 {
-    Task<EnrichmentApplyResult> ApplyAsync(Guid lineId, string? invoiceBrand, EnrichmentResponse enr, CancellationToken ct);
+    Task<EnrichmentApplyResult> ApplyAsync(Guid lineId, string? invoiceBrand, string? lineArticle, EnrichmentResponse enr, CancellationToken ct);
 }
 
 /// <summary>
@@ -41,7 +41,7 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
         _logger = logger;
     }
 
-    public async Task<EnrichmentApplyResult> ApplyAsync(Guid lineId, string? invoiceBrand, EnrichmentResponse enr, CancellationToken ct)
+    public async Task<EnrichmentApplyResult> ApplyAsync(Guid lineId, string? invoiceBrand, string? lineArticle, EnrichmentResponse enr, CancellationToken ct)
     {
         var source = enr.SourceLabel;
         var status = enr.Status ?? (enr.ItemData is null ? "partial" : "success");
@@ -75,7 +75,27 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
         if (donor is not null)
         {
             var donorHasItemCode = !string.IsNullOrWhiteSpace(donor.ItemCode);
-            switch (BrandClassifier.Classify(invoiceBrand, donor.SupplierName))
+            var kind = BrandClassifier.Classify(invoiceBrand, donor.SupplierName);
+
+            // Identity is (supplier, article) — never the item_code (that is our generated primary key).
+            // A borrowed_oem_bridge / rapidapi donor is reached via a shared OEM, so it is a DIFFERENT
+            // article. Even when it is the SAME supplier, a different article is a different part: it must
+            // create a NEW own-identity item (borrowing the donor's enrichment), NOT reuse the donor's
+            // item_code (C1) nor write our code onto the donor row (C2). Without this gate, distinct Germax
+            // GL#### SKUs sharing an LR OEM collapsed onto one existing item. (Cross-supplier and
+            // vehicle-group/no-brand are handled by the switch below and already never reuse the donor.)
+            if (kind == BrandClassifier.MatchKind.SameSupplier &&
+                !ArticleEquals(donor.ArticleNumber, lineArticle))
+            {
+                var strategy = EnrichmentStrategies.ResolveSourceCrossSupplier(source);
+                await Record(confirmationRequired: false, strategy);
+                _logger.LogInformation(
+                    "Line {LineId} same supplier '{Supplier}' but different article (line '{LineArticle}' vs donor '{DonorArticle}') → create-new own-identity via {Strategy}.",
+                    lineId, donor.SupplierName, lineArticle, donor.ArticleNumber, strategy);
+                return new EnrichmentApplyResult(LineEnrichmentRouting.ReadyForReview, null, strategy);
+            }
+
+            switch (kind)
             {
                 // Same brand as the donor → the donor IS our row.
                 case BrandClassifier.MatchKind.SameSupplier when donorHasItemCode:
@@ -131,4 +151,13 @@ public sealed class EnrichmentResultRouter : IEnrichmentResultRouter
         await Record(enr.ConfirmationRequired, createStrategy);
         return new EnrichmentApplyResult(LineEnrichmentRouting.ReadyForReview, null, createStrategy);
     }
+
+    /// <summary>
+    /// Same supplier article, case- and whitespace-insensitive. A blank on either side is treated as
+    /// "not the same article" (conservative — we never reuse a donor's item_code, nor write our code onto
+    /// a donor row, without a positive article match).
+    /// </summary>
+    private static bool ArticleEquals(string? a, string? b) =>
+        !string.IsNullOrWhiteSpace(a) && !string.IsNullOrWhiteSpace(b) &&
+        string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
 }

@@ -61,7 +61,14 @@ public sealed class AutoMatchService : IAutoMatchService
                 switch (BrandClassifier.Classify(effectiveBrand, oem.SupplierName))
                 {
                     case BrandClassifier.MatchKind.SameSupplier:
-                        return new MatchDecision("matched", oem.ItemCode, "tier1_oem");
+                        // Identity is (supplier, article) — a shared OEM alone is NOT identity. Only
+                        // auto-match when the donor's article equals the line's article; a same-supplier
+                        // item that merely shares an OEM is a DIFFERENT part (e.g. a Germax GL#### line
+                        // sharing an LR OEM with another GL#### item) and must fall through to create-new
+                        // rather than steal the donor's item_code (our generated primary key).
+                        if (ArticleEquals(oem.ArticleNumber, line.SupplierArticleNumber))
+                            return new MatchDecision("matched", oem.ItemCode, "tier1_oem");
+                        break;   // different article → fall through to Tier 2 / pending
                     case BrandClassifier.MatchKind.VehicleGroupBrand:
                     case BrandClassifier.MatchKind.NoBrandOnInvoice:
                         return new MatchDecision("needs_confirmation", null, "vehicle_group_brand_needs_confirmation", oem);
@@ -95,4 +102,13 @@ public sealed class AutoMatchService : IAutoMatchService
 
         return new MatchDecision("pending", null);
     }
+
+    /// <summary>
+    /// Same supplier article, case- and whitespace-insensitive. A blank on either side is treated as
+    /// "not the same article" (conservative — we never reuse an existing item_code without a positive
+    /// article match).
+    /// </summary>
+    private static bool ArticleEquals(string? a, string? b) =>
+        !string.IsNullOrWhiteSpace(a) && !string.IsNullOrWhiteSpace(b) &&
+        string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
 }

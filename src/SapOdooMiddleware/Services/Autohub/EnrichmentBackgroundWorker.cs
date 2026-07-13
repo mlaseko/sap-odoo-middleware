@@ -81,7 +81,7 @@ public sealed class EnrichmentBackgroundWorker : BackgroundService
 
                 // Persist + route (failed/partial → needs_manual; donor already a SAP item → auto-match
                 // when same supplier, needs_confirmation for vehicle-group brands, create-new cross-supplier).
-                var result = await router.ApplyAsync(line.Id, line.Brand, enr, ct);
+                var result = await router.ApplyAsync(line.Id, line.Brand, line.SupplierArticleNumber, enr, ct);
                 switch (result.Routing)
                 {
                     case LineEnrichmentRouting.AutoMatched:      autoMatched++; break;

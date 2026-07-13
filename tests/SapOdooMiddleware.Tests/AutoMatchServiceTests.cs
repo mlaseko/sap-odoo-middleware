@@ -27,8 +27,8 @@ public class AutoMatchServiceTests
         }
     }
 
-    private static OitmMatch Oem(string code, string? supplier) => new(code, 1, supplier, "cross_ref_oem");
-    private static OitmMatch Art(string code, string? supplier) => new(code, 2, supplier, "article_number");
+    private static OitmMatch Oem(string code, string? supplier, string? article = null) => new(code, 1, supplier, "cross_ref_oem", article);
+    private static OitmMatch Art(string code, string? supplier, string? article = null) => new(code, 2, supplier, "article_number", article);
 
     private static PartsLineMatchCandidate Line(
         IEnumerable<string>? oems = null, string? article = null, bool promo = false, string? brand = null,
@@ -45,15 +45,30 @@ public class AutoMatchServiceTests
     }
 
     [Fact]
-    public async Task Tier1_OemHit_SameSupplier_Matches()
+    public async Task Tier1_OemHit_SameSupplier_SameArticle_Matches()
     {
-        var oitm = new FakeOitm { ByOem = Oem("LR100126", "vika") };
+        // OEM hit whose donor is the SAME (supplier, article) → authoritative → matched.
+        var oitm = new FakeOitm { ByOem = Oem("LR100126", "vika", "GL0569") };
         var d = await Build(oitm).DecideAsync(Line(oems: new[] { "LR029078", "Front Right" }, article: "GL0569", brand: "vika"), CancellationToken.None);
 
         Assert.Equal("matched", d.Status);
         Assert.Equal("LR100126", d.ItemCode);
         Assert.Equal("tier1_oem", d.MatchStrategy);
         Assert.Equal(new[] { "LR029078" }, oitm.LastOems);   // noise filtered before lookup
+    }
+
+    [Fact]
+    public async Task Tier1_OemHit_SameSupplier_DifferentArticle_FallsThrough()
+    {
+        // Shared OEM under the SAME supplier but a DIFFERENT article (the Germax collapse): identity is
+        // (supplier, article), so a shared OEM alone must NOT auto-match. With no Tier-2 article hit it
+        // stays pending for enrichment/create-new, never stealing the donor's internal SKU.
+        var oitm = new FakeOitm { ByOem = Oem("LR100387", "GERMAX", "13-00574-SX") };
+        var d = await Build(oitm).DecideAsync(
+            Line(oems: new[] { "LR003160" }, article: "GL0722", brand: "GERMAX"), CancellationToken.None);
+
+        Assert.Equal("pending", d.Status);
+        Assert.Null(d.ItemCode);
     }
 
     [Fact]
@@ -145,7 +160,7 @@ public class AutoMatchServiceTests
     public async Task NonEmptyBrand_StillWins_Tier1SameSupplier_NoRegression()
     {
         // Explicit line.Brand takes precedence; the document supplier is ignored.
-        var oitm = new FakeOitm { ByOem = Oem("X100", "BOSCH") };
+        var oitm = new FakeOitm { ByOem = Oem("X100", "BOSCH", "A1") };
         var d = await Build(oitm).DecideAsync(
             Line(oems: new[] { "0986452041" }, article: "A1", brand: "BOSCH", docSupplier: "Germax"),
             CancellationToken.None);

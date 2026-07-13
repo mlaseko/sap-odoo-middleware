@@ -6,12 +6,18 @@ using SapOdooMiddleware.Services.Autohub;
 namespace SapOdooMiddleware.Tests;
 
 /// <summary>
-/// Routing with supplier identity (Slice 1.6): a donor that is already a SAP item only auto-matches
-/// when its supplier equals the invoice brand; vehicle-group brands → needs_confirmation; a different
-/// specific supplier → create-new (borrowed cross-supplier); no usable data → needs_manual.
+/// Routing with (supplier, article) identity: a donor that is already a SAP item only auto-matches when
+/// its supplier AND article equal the line's; a shared-OEM donor of a DIFFERENT article (borrowed /
+/// rapidapi) — even under the same supplier — creates a new own-identity item and never reuses the
+/// donor's item_code (our generated primary key). Vehicle-group brands → needs_confirmation; a different
+/// specific supplier → create-new (cross-supplier); no usable data → needs_manual.
 /// </summary>
 public class EnrichmentResultRouterTests
 {
+    // The line's article defaults to the donor's article ("B19124"), so same-supplier tests exercise the
+    // same-article auto-match/C2 paths unchanged; the different-article tests pass an explicit mismatch.
+    private const string DonorArticle = "B19124";
+
     private static EnrichmentResponse Success(int? oitm, string source) => new()
     {
         Status = "success",
@@ -33,23 +39,58 @@ public class EnrichmentResultRouterTests
         return (router, review, bridge);
     }
 
-    private static void Donor(Mock<INeonBridgeService> bridge, long id, string? itemCode, string? supplier) =>
+    private static void Donor(Mock<INeonBridgeService> bridge, long id, string? itemCode, string? supplier, string? article = DonorArticle) =>
         bridge.Setup(b => b.GetOitmRowAsync(id, It.IsAny<CancellationToken>()))
-              .ReturnsAsync(new OitmRow(id, itemCode, "B19124", supplier));
+              .ReturnsAsync(new OitmRow(id, itemCode, article, supplier));
 
     [Fact]
-    public async Task SameSupplier_DonorWithItemCode_AutoMatches()
+    public async Task SameSupplier_SameArticle_DonorWithItemCode_AutoMatches()
     {
         var (router, review, bridge) = Build();
         var lineId = Guid.NewGuid();
         Donor(bridge, 1959, "VAG11941", "Borsehung");
 
-        var r = await router.ApplyAsync(lineId, "Borsehung", Success(1959, "borrowed_oem_bridge"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "Borsehung", DonorArticle, Success(1959, "borrowed_oem_bridge"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.AutoMatched, r.Routing);
         Assert.Equal("VAG11941", r.MatchedItemCode);
         Assert.Equal("borrowed_oem_bridge_auto_match", r.MatchStrategy);
         review.Verify(x => x.SetReviewStatusAsync(lineId, "matched", "VAG11941", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task SameSupplier_DifferentArticle_DonorWithItemCode_RoutesCreateNew_NeverAutoMatches()
+    {
+        // The Germax production bug: the donor is a DIFFERENT Germax article reached via a shared OEM that
+        // already carries an item_code. Same supplier, different part → own-identity create-new; the
+        // donor's internal SKU must NOT become this line's identity.
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 8208, "LR100387", "GERMAX", article: "13-00574-SX");
+
+        var r = await router.ApplyAsync(lineId, "GERMAX", "GL0722", Success(8208, "borrowed_oem_bridge"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
+        Assert.Null(r.MatchedItemCode);
+        Assert.Equal("borrowed_cross_supplier_create_new", r.MatchStrategy);
+        Assert.True(EnrichmentStrategies.IsCrossSupplierStrategy(r.MatchStrategy));   // → own-identity row at Bulk Create
+        review.Verify(x => x.SetReviewStatusAsync(It.IsAny<Guid>(), "matched", It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task SameSupplier_DifferentArticle_DonorNoItemCode_RoutesOwnIdentity_NotWriteToDonor()
+    {
+        // Same supplier, donor has NO code yet, but a different article → still own-identity create-new,
+        // NOT "write our code onto the donor row" (C2) — that donor is a different part.
+        var (router, review, bridge) = Build();
+        var lineId = Guid.NewGuid();
+        Donor(bridge, 9000, null, "GERMAX", article: "13-00574-SX");
+
+        var r = await router.ApplyAsync(lineId, "GERMAX", "GL0722", Success(9000, "borrowed_oem_bridge"), CancellationToken.None);
+
+        Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
+        Assert.Equal("borrowed_cross_supplier_create_new", r.MatchStrategy);
+        Assert.True(EnrichmentStrategies.IsCrossSupplierStrategy(r.MatchStrategy));
     }
 
     [Fact]
@@ -59,7 +100,7 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         Donor(bridge, 805, "BM12850", "DPA");   // donor is DPA, invoice brand is vika
 
-        var r = await router.ApplyAsync(lineId, "vika", Success(805, "borrowed_oem_bridge"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "vika", DonorArticle, Success(805, "borrowed_oem_bridge"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
         Assert.Null(r.MatchedItemCode);
@@ -74,7 +115,7 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         Donor(bridge, 1959, "VAG11941", "Borsehung");
 
-        var r = await router.ApplyAsync(lineId, "VAG", Success(1959, "borrowed_oem_bridge"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "VAG", DonorArticle, Success(1959, "borrowed_oem_bridge"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.NeedsConfirmation, r.Routing);
         Assert.Equal("borrowed_oem_bridge_needs_confirmation", r.MatchStrategy);
@@ -89,7 +130,7 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         Donor(bridge, 1959, "VAG11941", "Borsehung");
 
-        var r = await router.ApplyAsync(lineId, null, Success(1959, "borrowed_oem_bridge"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, null, DonorArticle, Success(1959, "borrowed_oem_bridge"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.NeedsConfirmation, r.Routing);
     }
@@ -103,7 +144,7 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         Donor(bridge, 2000, null, "Borsehung");
 
-        var r = await router.ApplyAsync(lineId, "vika", Success(2000, "borrowed_oem_bridge"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "vika", DonorArticle, Success(2000, "borrowed_oem_bridge"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
         Assert.Equal("borrowed_cross_supplier_create_new", r.MatchStrategy);
@@ -111,13 +152,13 @@ public class EnrichmentResultRouterTests
     }
 
     [Fact]
-    public async Task GermaxLocal_SameSupplier_AutoMatches()
+    public async Task GermaxLocal_SameSupplier_SameArticle_AutoMatches()
     {
         var (router, review, bridge) = Build();
         var lineId = Guid.NewGuid();
         Donor(bridge, 3001, "LR15000", "GERMAX");
 
-        var r = await router.ApplyAsync(lineId, "GERMAX", Success(3001, "germax_local"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "GERMAX", DonorArticle, Success(3001, "germax_local"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.AutoMatched, r.Routing);
         Assert.Equal("germax_local_auto_match", r.MatchStrategy);
@@ -130,20 +171,20 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         Donor(bridge, 3002, "LR15001", "GERMAX");
 
-        var r = await router.ApplyAsync(lineId, "Borsehung", Success(3002, "germax_local"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "Borsehung", DonorArticle, Success(3002, "germax_local"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
         Assert.Equal("germax_cross_supplier_create_new", r.MatchStrategy);
     }
 
     [Fact]
-    public async Task RapidApi_DonorWithoutItemCode_RoutesToCreateNew()
+    public async Task RapidApi_SameArticle_DonorWithoutItemCode_RoutesToCreateNew()
     {
         var (router, review, bridge) = Build();
         var lineId = Guid.NewGuid();
         Donor(bridge, 4001, null, "BREMBO");   // RapidAPI minted a row with no SAP code yet
 
-        var r = await router.ApplyAsync(lineId, "BREMBO", Success(4001, "rapidapi_tecdoc_live"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "BREMBO", DonorArticle, Success(4001, "rapidapi_tecdoc_live"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
         Assert.Equal("rapidapi_tecdoc_live_create_new", r.MatchStrategy);
@@ -156,7 +197,7 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         Donor(bridge, 4002, "BM33000", "BREMBO");
 
-        var r = await router.ApplyAsync(lineId, "MEYLE", Success(4002, "rapidapi_tecdoc_live"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "MEYLE", DonorArticle, Success(4002, "rapidapi_tecdoc_live"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
         Assert.Equal("rapidapi_cross_supplier_create_new", r.MatchStrategy);
@@ -165,14 +206,14 @@ public class EnrichmentResultRouterTests
     // ── Slice 2.1: classify supplier identity even when the donor has item_code=NULL (fresh Path E). ──
 
     [Fact]
-    public async Task PathE_DonorNullItemCode_SameSupplier_RoutesC2_WritesToDonor()
+    public async Task PathE_DonorNullItemCode_SameSupplier_SameArticle_RoutesC2_WritesToDonor()
     {
-        // Donor: supplier=VAICO, item_code=NULL (fresh RapidAPI row); invoice brand=VAICO.
+        // Donor: supplier=VAICO, item_code=NULL (fresh RapidAPI row); invoice brand=VAICO, same article.
         var (router, review, bridge) = Build();
         var lineId = Guid.NewGuid();
         Donor(bridge, 10186, null, "VAICO");
 
-        var r = await router.ApplyAsync(lineId, "VAICO", Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "VAICO", DonorArticle, Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
         Assert.Equal("rapidapi_tecdoc_live_create_new", r.MatchStrategy);   // NOT cross-supplier → writes to donor
@@ -188,7 +229,7 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         Donor(bridge, 10186, null, "VAICO");
 
-        var r = await router.ApplyAsync(lineId, "vika", Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "vika", DonorArticle, Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.ReadyForReview, r.Routing);
         Assert.Equal("rapidapi_cross_supplier_create_new", r.MatchStrategy);
@@ -203,7 +244,7 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         Donor(bridge, 10186, null, "VAICO");
 
-        var r = await router.ApplyAsync(lineId, "VAG", Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "VAG", DonorArticle, Success(10186, "rapidapi_tecdoc_live"), CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.NeedsConfirmation, r.Routing);
         Assert.Equal("rapidapi_needs_confirmation", r.MatchStrategy);
@@ -218,7 +259,7 @@ public class EnrichmentResultRouterTests
         var lineId = Guid.NewGuid();
         var enr = new EnrichmentResponse { Status = "partial", Source = "unmatched", EnrichmentSource = "unmatched", ItemData = null };
 
-        var r = await router.ApplyAsync(lineId, "vika", enr, CancellationToken.None);
+        var r = await router.ApplyAsync(lineId, "vika", "GL0722", enr, CancellationToken.None);
 
         Assert.Equal(LineEnrichmentRouting.NeedsManual, r.Routing);
         review.Verify(x => x.SetReviewStatusAsync(lineId, "needs_manual", null, It.IsAny<CancellationToken>()), Times.Once);
