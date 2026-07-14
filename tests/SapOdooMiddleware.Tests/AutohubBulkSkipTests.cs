@@ -17,7 +17,7 @@ public class AutohubBulkSkipTests
     // Only _docs and _review are exercised by bulk-skip; the rest (incl. the Autohub SAP service and the
     // Neon bridge) are not invoked.
     private static AutohubDocumentsController Build(Mock<IStagingPartsDocumentRepository> docs, Mock<IPartsReviewRepository> review)
-        => new(docs.Object, review.Object, null!, null!, null!, null!, null!, null!, null!, null!);
+        => new(docs.Object, review.Object, null!, null!, null!, null!, null!, null!, null!, null!, null!);
 
     [Fact]
     public async Task BulkSkipPending_DocExists_SkipsAndReturnsCount()

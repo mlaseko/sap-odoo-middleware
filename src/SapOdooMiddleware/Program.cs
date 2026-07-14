@@ -232,6 +232,12 @@ builder.Services.AddHttpClient<IEnrichmentClient, HttpEnrichmentClient>((sp, htt
     var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
     http.Timeout = TimeSpan.FromSeconds(vs.TimeoutSeconds);
 });
+// DGX "find more candidates" endpoints (broad TecDoc pool + lazy OEMs + materialize) — operator-triggered.
+builder.Services.AddHttpClient<IDonorSearchClient, DonorSearchClient>((sp, http) =>
+{
+    var vs = sp.GetRequiredService<IOptions<VisionExtractorSettings>>().Value;
+    http.Timeout = TimeSpan.FromSeconds(vs.TimeoutSeconds);
+});
 // Background enricher (Q1): auto-enriches pending lines after extraction so review loads ready.
 builder.Services.AddHostedService<EnrichmentBackgroundWorker>();
 // Startup schema probe: validates the auto-match SQL shapes + status constraints against the live
