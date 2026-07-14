@@ -14,6 +14,14 @@ public sealed record NeonBridgeLinkResult(NeonBridgeLinkStatus Status, string? E
 /// <summary>A donor parts_catalog row with the fields needed to gate a supplier-identity match.</summary>
 public sealed record OitmRow(long Id, string? ItemCode, string? ArticleNumber, string? SupplierName);
 
+/// <summary>A donor candidate's local detail for the operator swap modal: its parts_catalog identity, image,
+/// part type, kit flag, richness counts and its true OEM cross-references (reference_type='oem' only) — all
+/// mirrored locally in <c>oitm</c>, so no TecDoc/DGX fetch is needed.</summary>
+public sealed record DonorDetail(
+    long OitmId, string? ItemCode, IReadOnlyList<string> Oems,
+    string? Name, string? ImageUrl, string? PartComponent, bool IsKit,
+    int SpecCount, int CompatibleVehiclesCount, int CategoriesCount);
+
 public interface INeonBridgeService
 {
     /// <summary>
@@ -33,6 +41,12 @@ public interface INeonBridgeService
     /// Returns null if no such row exists.
     /// </summary>
     Task<long?> FindOitmIdByArticleSupplierAsync(string articleNumber, string? supplierName, CancellationToken ct);
+
+    /// <summary>
+    /// Load a donor candidate's local detail (parts_catalog row id + item_code + its 'oem' cross-references)
+    /// by (article, supplier) — for the operator swap modal's per-candidate OEM list. Null if not found.
+    /// </summary>
+    Task<DonorDetail?> GetDonorDetailAsync(string articleNumber, string? supplierName, CancellationToken ct);
 
     /// <summary>
     /// Cross-supplier create-new: mint a NEW own-identity oitm row for the freshly-created SAP item (under
@@ -117,6 +131,62 @@ public sealed class NeonBridgeService : INeonBridgeService
         cmd.Parameters.AddWithValue("sup", (object?)supplierName ?? DBNull.Value);
         var res = await cmd.ExecuteScalarAsync(ct);
         return res is null or DBNull ? null : Convert.ToInt64(res);
+    }
+
+    public async Task<DonorDetail?> GetDonorDetailAsync(string articleNumber, string? supplierName, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        long id;
+        string? itemCode, name, imageUrl, partComponent;
+        bool isKit;
+        int specCount, vehiclesCount, categoriesCount;
+        const string rowSql = """
+            SELECT id, item_code, name, image_url, part_component,
+                   COALESCE(is_kit, false),
+                   COALESCE(spec_count, 0), COALESCE(compatible_vehicles_count, 0), COALESCE(categories_count, 0)
+            FROM oitm
+            WHERE lower(btrim(article_number)) = lower(btrim(@art))
+              AND (@sup IS NULL OR lower(btrim(supplier_name)) = lower(btrim(@sup)))
+            ORDER BY id
+            LIMIT 1;
+            """;
+        await using (var cmd = new NpgsqlCommand(rowSql, conn))
+        {
+            cmd.Parameters.AddWithValue("art", articleNumber);
+            cmd.Parameters.AddWithValue("sup", (object?)supplierName ?? DBNull.Value);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            if (!await r.ReadAsync(ct)) return null;
+            id              = r.GetInt64(0);
+            itemCode        = r.IsDBNull(1) ? null : r.GetString(1);
+            name            = r.IsDBNull(2) ? null : r.GetString(2);
+            imageUrl        = r.IsDBNull(3) ? null : r.GetString(3);
+            partComponent   = r.IsDBNull(4) ? null : r.GetString(4);
+            isKit           = !r.IsDBNull(5) && r.GetBoolean(5);
+            specCount       = r.GetInt32(6);
+            vehiclesCount   = r.GetInt32(7);
+            categoriesCount = r.GetInt32(8);
+        }
+
+        // The donor's true OEM cross-references (reference_type='oem' only — never 'iam_equivalent'),
+        // excluding any leaked internal SKU (a value equal to an existing item_code).
+        const string oemSql = """
+            SELECT x.oem_number FROM oitm_cross_reference x
+            WHERE x.oitm_id = @id AND x.reference_type = 'oem' AND x.oem_number IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM oitm o WHERE o.item_code = x.oem_number)
+            ORDER BY x.oem_number;
+            """;
+        var oems = new List<string>();
+        await using (var cmd = new NpgsqlCommand(oemSql, conn))
+        {
+            cmd.Parameters.AddWithValue("id", id);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                if (!r.IsDBNull(0)) oems.Add(r.GetString(0));
+        }
+
+        return new DonorDetail(id, itemCode, oems, name, imageUrl, partComponent, isKit, specCount, vehiclesCount, categoriesCount);
     }
 
     public async Task<OitmRow?> GetOitmRowAsync(long neonOitmId, CancellationToken ct)

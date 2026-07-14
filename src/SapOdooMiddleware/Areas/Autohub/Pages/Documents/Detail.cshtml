@@ -374,28 +374,41 @@
     }
 
     async function openDonorSwapModal(row, lineId) {
-        let enr;
+        let cands;
         try {
-            const r = await fetch(base + '/lines/' + lineId + '/enrichment', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} });
+            const r = await fetch(base + '/lines/' + lineId + '/donor-candidates', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} });
             if (!r.ok) throw new Error('HTTP ' + r.status);
-            enr = await r.json();
+            cands = await r.json();
         } catch (e) { alert('Could not load donor candidates: ' + e.message); return; }
 
-        const cands = ((enr.audit || {}).bridge_candidates_ranked) || [];
-        if (!cands.length) { alert('No donor candidates available for this line.'); return; }
+        if (!cands || !cands.length) { alert('No donor candidates available for this line.'); return; }
 
         let html = '<h3>Choose borrowed donor</h3>';
         html += '<p>Pick the article whose part best matches this line. The new SAP item still gets its own ' +
                 'freshly-minted code — only the borrowed specs/OEMs change.</p>';
-        html += '<table class="kv" style="width:100%"><tr><th></th><th>Article</th><th>Name</th><th>Supplier</th><th>Type</th></tr>';
+        html += '<table class="kv" style="width:100%"><tr><th></th><th></th><th>Article</th><th>Name / details</th><th>Supplier</th><th>Type</th><th>OEMs</th></tr>';
         cands.forEach((c, i) => {
             const wrongType = c.auto_pick_eligible === false;
+            const oems = (c.oems && c.oems.length) ? c.oems.join(', ') : '—';
+            const already = c.item_code ? ' <span class="pill pill-grey" title="donor is already a SAP item">' + esc(c.item_code) + '</span>' : '';
+            const img = c.image_url
+                ? '<img src="' + esc(c.image_url) + '" alt="" style="width:44px;height:44px;object-fit:contain;border-radius:4px;background:#fff;" onerror="this.style.display=\'none\'"/>'
+                : '';
+            const kit = c.is_kit ? ' <span class="pill pill-blue" title="kit">KIT</span>' : '';
+            const bits = [];
+            if (c.spec_count) bits.push(c.spec_count + ' specs');
+            if (c.compatible_vehicles_count) bits.push(c.compatible_vehicles_count + ' veh');
+            if (c.categories_count) bits.push(c.categories_count + ' cat');
+            const pc = c.part_component ? '<div style="font-size:11px;opacity:.7;">' + esc(c.part_component) + '</div>' : '';
+            const rich = bits.length ? '<div style="font-size:11px;opacity:.7;">' + esc(bits.join(' · ')) + '</div>' : '';
             html += '<tr>' +
                 '<td><input type="radio" name="donor-pick" value="' + i + '"' + (c.is_default ? ' checked' : '') + '></td>' +
-                '<td>' + esc(c.article_number) + (c.is_default ? ' <em>(current)</em>' : '') + '</td>' +
-                '<td>' + esc(c.name) + '</td>' +
+                '<td>' + img + '</td>' +
+                '<td>' + esc(c.article_number) + (c.is_default ? ' <em>(current)</em>' : '') + already + '</td>' +
+                '<td>' + esc(c.name) + kit + pc + rich + '</td>' +
                 '<td>' + esc(c.supplier) + '</td>' +
                 '<td>' + verdictPill(c.verdict) + (wrongType ? ' <span title="different part type — override only">✋</span>' : '') + '</td>' +
+                '<td style="max-width:220px;font-size:12px;line-height:1.35;" title="' + esc(oems) + '">' + esc(oems) + '</td>' +
                 '</tr>';
         });
         html += '</table>';

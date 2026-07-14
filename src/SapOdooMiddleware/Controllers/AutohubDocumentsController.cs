@@ -289,6 +289,55 @@ public class AutohubDocumentsController : ControllerBase
     }
 
     /// <summary>
+    /// Ranked donor candidates for a borrowed line, each enriched with its local detail (parts_catalog
+    /// id + item_code + true OEM cross-references) so the swap modal can show what each donor contributes.
+    /// Image/specs are not included (not guaranteed to be mirrored locally). Empty list if not a borrow.
+    /// </summary>
+    [HttpGet("{documentId:guid}/lines/{lineId:guid}/donor-candidates")]
+    public async Task<IActionResult> DonorCandidates(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+
+        var payload = await _review.GetEnrichmentPayloadAsync(lineId, ct);
+        if (string.IsNullOrWhiteSpace(payload)) return Ok(Array.Empty<object>());
+
+        EnrichmentResponse enr;
+        try { enr = JsonSerializer.Deserialize<EnrichmentResponse>(payload, EnrichmentJson)!; }
+        catch { return Ok(Array.Empty<object>()); }
+
+        var cands = enr.Audit?.BridgeCandidatesRanked;
+        if (cands is null || cands.Count == 0) return Ok(Array.Empty<object>());
+
+        var outList = new List<object>(cands.Count);
+        foreach (var c in cands)
+        {
+            var detail = string.IsNullOrWhiteSpace(c.ArticleNumber)
+                ? null
+                : await _bridge.GetDonorDetailAsync(c.ArticleNumber!, c.Supplier, ct);
+            outList.Add(new
+            {
+                article_number           = c.ArticleNumber,
+                supplier                 = c.Supplier,
+                name                     = detail?.Name ?? c.Name,
+                verdict                  = c.Verdict,
+                score                    = c.Score,
+                auto_pick_eligible       = c.AutoPickEligible,
+                is_default               = c.IsDefault,
+                oitm_id                  = detail?.OitmId,
+                item_code                = detail?.ItemCode,
+                image_url                = detail?.ImageUrl,
+                part_component           = detail?.PartComponent,
+                is_kit                   = detail?.IsKit ?? false,
+                spec_count               = detail?.SpecCount ?? 0,
+                compatible_vehicles_count = detail?.CompatibleVehiclesCount ?? 0,
+                categories_count         = detail?.CategoriesCount ?? 0,
+                oems                     = detail?.Oems ?? (IReadOnlyList<string>)Array.Empty<string>(),
+            });
+        }
+        return Ok(outList);
+    }
+
+    /// <summary>
     /// Swap the borrowed donor for a pending, borrowed line to another ranked candidate (operator override).
     /// Option-1 local re-point: resolves the chosen candidate's parts_catalog row and re-points the line's
     /// NeonOitmId to it (no DGX call), then re-runs the router so identity/supplier gating still applies.
