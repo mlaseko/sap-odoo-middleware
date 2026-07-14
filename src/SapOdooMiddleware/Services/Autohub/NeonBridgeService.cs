@@ -27,6 +27,14 @@ public interface INeonBridgeService
     Task<OitmRow?> GetOitmRowAsync(long neonOitmId, CancellationToken ct);
 
     /// <summary>
+    /// Resolve the parts_catalog <c>oitm</c> id for a donor by its (article_number, supplier_name) — the
+    /// operator-swap key. Used by the "swap borrowed article" action to re-point a line to a chosen local
+    /// donor without a DGX round-trip. Case/whitespace-insensitive; supplier null matches on article only.
+    /// Returns null if no such row exists.
+    /// </summary>
+    Task<long?> FindOitmIdByArticleSupplierAsync(string articleNumber, string? supplierName, CancellationToken ct);
+
+    /// <summary>
     /// Cross-supplier create-new: mint a NEW own-identity oitm row for the freshly-created SAP item (under
     /// our supplier), copying the donor's canonical OEM + OEM cross-references so future invoices auto-match
     /// it — WITHOUT touching the donor. Returns the new oitm id, or null if the donor row was not found.
@@ -90,6 +98,25 @@ public sealed class NeonBridgeService : INeonBridgeService
         if (result is null or DBNull) return null;
         var code = (string)result;
         return string.IsNullOrWhiteSpace(code) ? null : code;
+    }
+
+    public async Task<long?> FindOitmIdByArticleSupplierAsync(string articleNumber, string? supplierName, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            SELECT id FROM oitm
+            WHERE lower(btrim(article_number)) = lower(btrim(@art))
+              AND (@sup IS NULL OR lower(btrim(supplier_name)) = lower(btrim(@sup)))
+            ORDER BY id
+            LIMIT 1;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("art", articleNumber);
+        cmd.Parameters.AddWithValue("sup", (object?)supplierName ?? DBNull.Value);
+        var res = await cmd.ExecuteScalarAsync(ct);
+        return res is null or DBNull ? null : Convert.ToInt64(res);
     }
 
     public async Task<OitmRow?> GetOitmRowAsync(long neonOitmId, CancellationToken ct)

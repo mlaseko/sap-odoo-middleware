@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Ingestion;
 using SapOdooMiddleware.Models.Api;
@@ -26,6 +28,7 @@ public class AutohubDocumentsController : ControllerBase
     private readonly IOemFilterService _oemFilter;
     private readonly PartsItemCreationService _itemCreation;
     private readonly IAutohubSapB1Service _sap;   // Autohub company (Molas Live 2021) connection
+    private readonly INeonBridgeService _bridge;   // resolve donor oitm rows for the operator swap
 
     public AutohubDocumentsController(
         IStagingPartsDocumentRepository docs,
@@ -36,7 +39,8 @@ public class AutohubDocumentsController : ControllerBase
         IEnrichmentResultRouter router,
         IOemFilterService oemFilter,
         PartsItemCreationService itemCreation,
-        IAutohubSapB1Service sap)
+        IAutohubSapB1Service sap,
+        INeonBridgeService bridge)
     {
         _docs = docs;
         _review = review;
@@ -47,7 +51,14 @@ public class AutohubDocumentsController : ControllerBase
         _oemFilter = oemFilter;
         _itemCreation = itemCreation;
         _sap = sap;
+        _bridge = bridge;
     }
+
+    private static readonly JsonSerializerOptions EnrichmentJson = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,
+    };
 
     private string CurrentUser => HttpContext.User?.Identity?.Name is { Length: > 0 } n ? n : "operator";
 
@@ -277,6 +288,87 @@ public class AutohubDocumentsController : ControllerBase
         return string.IsNullOrWhiteSpace(json) ? NoContent() : Content(json, "application/json");
     }
 
+    /// <summary>
+    /// Swap the borrowed donor for a pending, borrowed line to another ranked candidate (operator override).
+    /// Option-1 local re-point: resolves the chosen candidate's parts_catalog row and re-points the line's
+    /// NeonOitmId to it (no DGX call), then re-runs the router so identity/supplier gating still applies.
+    /// The new SAP item is still created with a freshly-minted SKU — only the enrichment SOURCE changes
+    /// (the created item's ItemName then carries the chosen donor's OEM chain). Not allowed once created.
+    /// </summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/swap-donor")]
+    public async Task<IActionResult> SwapDonor(Guid documentId, Guid lineId, [FromBody] SwapDonorRequest body, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        if (string.IsNullOrWhiteSpace(body?.ArticleNumber))
+            return BadRequest(new { error = "article_number is required." });
+
+        var line = await _review.GetByIdAsync(lineId, ct);
+        if (line is null) return NotFound();
+        if (line.ReviewStatus is "created")
+            return Conflict(new { error = "Line already created; cannot swap donor." });
+
+        var payload = await _review.GetEnrichmentPayloadAsync(lineId, ct);
+        if (string.IsNullOrWhiteSpace(payload))
+            return BadRequest(new { error = "Line has no enrichment to swap." });
+
+        EnrichmentResponse enr;
+        try { enr = JsonSerializer.Deserialize<EnrichmentResponse>(payload, EnrichmentJson)!; }
+        catch (Exception ex) { return BadRequest(new { error = $"Stored enrichment unreadable: {ex.Message}" }); }
+
+        var candidates = enr.Audit?.BridgeCandidatesRanked;
+        if (candidates is null || candidates.Count == 0)
+            return BadRequest(new { error = "No donor candidates available for this line." });
+
+        var chosen = candidates.FirstOrDefault(c =>
+            string.Equals(c.ArticleNumber?.Trim(), body.ArticleNumber.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (chosen is null)
+            return BadRequest(new { error = $"Article '{body.ArticleNumber}' is not among this line's donor candidates." });
+
+        // Resolve the chosen donor's local parts_catalog row (Option 1 — no DGX round-trip).
+        var donorId = await _bridge.FindOitmIdByArticleSupplierAsync(chosen.ArticleNumber!, chosen.Supplier ?? body.Supplier, ct);
+        if (donorId is null)
+            return UnprocessableEntity(new { error = $"Donor '{chosen.ArticleNumber}' not found in parts_catalog." });
+
+        // Re-point the borrow: keep group/prefix (brand-driven), refresh the description + selection metadata,
+        // mark the chosen candidate as the default. The router re-serializes this into EnrichmentPayloadJson.
+        var newSelection = (enr.Audit?.Selection ?? new DonorSelection()) with
+        {
+            SelectedComponentVerdict = chosen.Verdict,
+            NeedsReview              = !string.Equals(chosen.Verdict, "MATCH", StringComparison.OrdinalIgnoreCase),
+            SelectedName             = chosen.Name,
+            SelectedSupplier         = chosen.Supplier,
+        };
+        var reranked = candidates.Select(c => c with { IsDefault = ReferenceEquals(c, chosen) }).ToList();
+        var swapped = enr with
+        {
+            NeonOitmId   = (int)donorId.Value,
+            ItemData     = enr.ItemData is null ? null : enr.ItemData with { PrimaryDescription = chosen.Name ?? enr.ItemData.PrimaryDescription },
+            BorrowedFrom = new BorrowedFrom { ArticleNumber = chosen.ArticleNumber, SupplierName = chosen.Supplier },
+            Audit        = new EnrichmentAudit { Selection = newSelection, BridgeCandidatesRanked = reranked },
+        };
+
+        var routing = await _router.ApplyAsync(lineId, line.Brand, line.SupplierArticleNumber, swapped, ct);
+        await _review.MarkEditedAsync(lineId, CurrentUser, ct);
+
+        var reviewStatus = routing.Routing switch
+        {
+            LineEnrichmentRouting.AutoMatched      => "matched",
+            LineEnrichmentRouting.NeedsConfirmation => "needs_confirmation",
+            LineEnrichmentRouting.NeedsManual      => "needs_manual",
+            _                                      => "pending",
+        };
+
+        return Ok(new
+        {
+            swapped_to     = chosen.ArticleNumber,
+            supplier       = chosen.Supplier,
+            verdict        = chosen.Verdict,
+            needs_review   = newSelection.NeedsReview,
+            review_status  = reviewStatus,
+            match_strategy = routing.MatchStrategy,
+        });
+    }
+
     /// <summary>Operator edits to an extracted line before creation (qty / unit price / description).</summary>
     [HttpPatch("{documentId:guid}/lines/{lineId:guid}")]
     public async Task<IActionResult> UpdateLine(Guid documentId, Guid lineId, [FromBody] UpdateLineRequest body, CancellationToken ct)
@@ -501,3 +593,4 @@ public sealed record BulkCreateManualRequest(
     List<Guid> LineIds, int ItemsGroupCode, string SkuPrefix, string? Description, string? FitForAuto, string? ImageUrl);
 public sealed record CreateNewRequest(bool Confirmed);
 public sealed record UpdateLineRequest(decimal? Quantity, decimal? UnitPriceForeign, string? Description);
+public sealed record SwapDonorRequest(string ArticleNumber, string? Supplier);
