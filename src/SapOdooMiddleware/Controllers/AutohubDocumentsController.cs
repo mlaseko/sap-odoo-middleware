@@ -316,16 +316,22 @@ public class AutohubDocumentsController : ControllerBase
                 : await _bridge.GetDonorDetailAsync(c.ArticleNumber!, c.Supplier, ct);
             outList.Add(new
             {
-                article_number     = c.ArticleNumber,
-                supplier           = c.Supplier,
-                name               = c.Name,
-                verdict            = c.Verdict,
-                score              = c.Score,
-                auto_pick_eligible = c.AutoPickEligible,
-                is_default         = c.IsDefault,
-                oitm_id            = detail?.OitmId,
-                item_code          = detail?.ItemCode,
-                oems               = detail?.Oems ?? (IReadOnlyList<string>)Array.Empty<string>(),
+                article_number           = c.ArticleNumber,
+                supplier                 = c.Supplier,
+                name                     = detail?.Name ?? c.Name,
+                verdict                  = c.Verdict,
+                score                    = c.Score,
+                auto_pick_eligible       = c.AutoPickEligible,
+                is_default               = c.IsDefault,
+                oitm_id                  = detail?.OitmId,
+                item_code                = detail?.ItemCode,
+                image_url                = detail?.ImageUrl,
+                part_component           = detail?.PartComponent,
+                is_kit                   = detail?.IsKit ?? false,
+                spec_count               = detail?.SpecCount ?? 0,
+                compatible_vehicles_count = detail?.CompatibleVehiclesCount ?? 0,
+                categories_count         = detail?.CategoriesCount ?? 0,
+                oems                     = detail?.Oems ?? (IReadOnlyList<string>)Array.Empty<string>(),
             });
         }
         return Ok(outList);

@@ -14,10 +14,13 @@ public sealed record NeonBridgeLinkResult(NeonBridgeLinkStatus Status, string? E
 /// <summary>A donor parts_catalog row with the fields needed to gate a supplier-identity match.</summary>
 public sealed record OitmRow(long Id, string? ItemCode, string? ArticleNumber, string? SupplierName);
 
-/// <summary>A donor candidate's local detail for the operator swap modal: its parts_catalog identity plus
-/// its true OEM cross-references (reference_type='oem' only). Image/specs are NOT included — those aren't
-/// guaranteed to be mirrored locally and would need a TecDoc/DGX fetch.</summary>
-public sealed record DonorDetail(long OitmId, string? ItemCode, IReadOnlyList<string> Oems);
+/// <summary>A donor candidate's local detail for the operator swap modal: its parts_catalog identity, image,
+/// part type, kit flag, richness counts and its true OEM cross-references (reference_type='oem' only) — all
+/// mirrored locally in <c>oitm</c>, so no TecDoc/DGX fetch is needed.</summary>
+public sealed record DonorDetail(
+    long OitmId, string? ItemCode, IReadOnlyList<string> Oems,
+    string? Name, string? ImageUrl, string? PartComponent, bool IsKit,
+    int SpecCount, int CompatibleVehiclesCount, int CategoriesCount);
 
 public interface INeonBridgeService
 {
@@ -136,9 +139,14 @@ public sealed class NeonBridgeService : INeonBridgeService
         await conn.OpenAsync(ct);
 
         long id;
-        string? itemCode;
+        string? itemCode, name, imageUrl, partComponent;
+        bool isKit;
+        int specCount, vehiclesCount, categoriesCount;
         const string rowSql = """
-            SELECT id, item_code FROM oitm
+            SELECT id, item_code, name, image_url, part_component,
+                   COALESCE(is_kit, false),
+                   COALESCE(spec_count, 0), COALESCE(compatible_vehicles_count, 0), COALESCE(categories_count, 0)
+            FROM oitm
             WHERE lower(btrim(article_number)) = lower(btrim(@art))
               AND (@sup IS NULL OR lower(btrim(supplier_name)) = lower(btrim(@sup)))
             ORDER BY id
@@ -150,8 +158,15 @@ public sealed class NeonBridgeService : INeonBridgeService
             cmd.Parameters.AddWithValue("sup", (object?)supplierName ?? DBNull.Value);
             await using var r = await cmd.ExecuteReaderAsync(ct);
             if (!await r.ReadAsync(ct)) return null;
-            id = r.GetInt64(0);
-            itemCode = r.IsDBNull(1) ? null : r.GetString(1);
+            id              = r.GetInt64(0);
+            itemCode        = r.IsDBNull(1) ? null : r.GetString(1);
+            name            = r.IsDBNull(2) ? null : r.GetString(2);
+            imageUrl        = r.IsDBNull(3) ? null : r.GetString(3);
+            partComponent   = r.IsDBNull(4) ? null : r.GetString(4);
+            isKit           = !r.IsDBNull(5) && r.GetBoolean(5);
+            specCount       = r.GetInt32(6);
+            vehiclesCount   = r.GetInt32(7);
+            categoriesCount = r.GetInt32(8);
         }
 
         // The donor's true OEM cross-references (reference_type='oem' only — never 'iam_equivalent'),
@@ -171,7 +186,7 @@ public sealed class NeonBridgeService : INeonBridgeService
                 if (!r.IsDBNull(0)) oems.Add(r.GetString(0));
         }
 
-        return new DonorDetail(id, itemCode, oems);
+        return new DonorDetail(id, itemCode, oems, name, imageUrl, partComponent, isKit, specCount, vehiclesCount, categoriesCount);
     }
 
     public async Task<OitmRow?> GetOitmRowAsync(long neonOitmId, CancellationToken ct)
