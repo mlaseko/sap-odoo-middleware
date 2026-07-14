@@ -85,6 +85,14 @@ public sealed record DonorCandidate
     [JsonPropertyName("auto_pick_eligible")] public bool    AutoPickEligible { get; init; }
     /// <summary>The donor's article number — the key used to re-point a swap.</summary>
     [JsonPropertyName("article_number")]    public string?  ArticleNumber   { get; init; }
+    /// <summary>TecDoc article id — precise borrow identity (prefer over article_number when present).</summary>
+    [JsonPropertyName("tecdoc_article_id")] public long?    TecdocArticleId { get; init; }
+    /// <summary>Manufacturer OEM numbers (the priority signal), capped at 40 by the DGX.</summary>
+    [JsonPropertyName("oem_numbers")]       public List<string>? OemNumbers { get; init; }
+    /// <summary>TOTAL genuine OEM count (may exceed the capped <see cref="OemNumbers"/> list → "+N more").</summary>
+    [JsonPropertyName("oem_count")]         public int?     OemCount        { get; init; }
+    /// <summary>Aftermarket (iam_equivalent) cross-reference count — a secondary confidence signal. Null ⇒ unknown ("—").</summary>
+    [JsonPropertyName("crossref_count")]    public long?    CrossrefCount   { get; init; }
     /// <summary>True for the candidate that was actually borrowed.</summary>
     [JsonPropertyName("is_default")]        public bool     IsDefault       { get; init; }
 }
