@@ -29,6 +29,7 @@ public class AutohubDocumentsController : ControllerBase
     private readonly PartsItemCreationService _itemCreation;
     private readonly IAutohubSapB1Service _sap;   // Autohub company (Molas Live 2021) connection
     private readonly INeonBridgeService _bridge;   // resolve donor oitm rows for the operator swap
+    private readonly IDonorSearchClient _donorSearch;   // DGX "find more candidates" (broad TecDoc pool)
 
     public AutohubDocumentsController(
         IStagingPartsDocumentRepository docs,
@@ -40,7 +41,8 @@ public class AutohubDocumentsController : ControllerBase
         IOemFilterService oemFilter,
         PartsItemCreationService itemCreation,
         IAutohubSapB1Service sap,
-        INeonBridgeService bridge)
+        INeonBridgeService bridge,
+        IDonorSearchClient donorSearch)
     {
         _docs = docs;
         _review = review;
@@ -52,6 +54,7 @@ public class AutohubDocumentsController : ControllerBase
         _itemCreation = itemCreation;
         _sap = sap;
         _bridge = bridge;
+        _donorSearch = donorSearch;
     }
 
     private static readonly JsonSerializerOptions EnrichmentJson = new()
@@ -429,6 +432,154 @@ public class AutohubDocumentsController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// "Find more candidates" — the broad DGX/TecDoc pool for this line's OEMs (on operator click only,
+    /// never on modal open). Returns { available, error?, candidates[] }; a 501/rapidapi-off DGX yields
+    /// available=false so the UI keeps the local list.
+    /// </summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/donor-candidates/search")]
+    public async Task<IActionResult> SearchDonorCandidates(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        var line = await _review.GetByIdAsync(lineId, ct);
+        if (line is null) return NotFound();
+
+        var oems = _oemFilter.Filter(line.OemNumbers, line.SupplierArticleNumber, line.Brand).CleanOems;
+        if (oems.Count == 0)
+            return Ok(new { available = false, error = "no_oems", candidates = Array.Empty<object>() });
+
+        DonorSearchResponse res;
+        try { res = await _donorSearch.CandidatesForLineAsync(oems, line.Description, ct); }
+        catch (Exception ex) { return Ok(new { available = false, error = ex.Message, candidates = Array.Empty<object>() }); }
+
+        if (!res.Found || res.Candidates is null)
+            return Ok(new { available = false, error = res.Error ?? "no_results", candidates = Array.Empty<object>() });
+
+        var cands = res.Candidates.Select(c => new
+        {
+            article_number     = c.ArticleNumber,
+            supplier           = c.Supplier,
+            name               = c.Name,
+            verdict            = c.Verdict,
+            score              = c.Score,
+            auto_pick_eligible = c.AutoPickEligible ?? !string.Equals(c.Verdict, "DIFFERENT", StringComparison.OrdinalIgnoreCase),
+            is_default         = c.IsDefault,
+            tecdoc_article_id  = c.TecdocArticleId,
+            supplier_id        = c.SupplierId,
+            matched_oem        = c.MatchedOem,
+            shared_oem_count   = c.SharedOemCount,
+            crossref_count     = c.CrossrefCount,
+            image_url          = c.ImageUrl,
+            source             = c.Source ?? "rapidapi_tecdoc",
+        });
+        return Ok(new { available = true, error = (string?)null, candidates = cands });
+    }
+
+    /// <summary>Lazy full OEM list for one API candidate (DGX /article_oems), on operator expand.</summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/donor-candidates/oems")]
+    public async Task<IActionResult> DonorCandidateOems(Guid documentId, Guid lineId, [FromBody] ArticleOemsBody body, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        if (body is null || body.TecdocArticleId <= 0)
+            return BadRequest(new { error = "tecdoc_article_id is required." });
+
+        ArticleOemsResponse res;
+        try { res = await _donorSearch.ArticleOemsAsync(body.TecdocArticleId, ct); }
+        catch (Exception ex) { return Ok(new { available = false, error = ex.Message, oem_numbers = Array.Empty<string>() }); }
+
+        if (!res.Found)
+            return Ok(new { available = false, error = res.Error ?? "not_found", oem_numbers = Array.Empty<string>() });
+
+        return Ok(new
+        {
+            available      = true,
+            oem_numbers    = res.OemNumbers ?? new List<string>(),
+            oem_count      = res.OemCount ?? (res.OemNumbers?.Count ?? 0),
+            crossref_count = res.CrossrefCount,
+        });
+    }
+
+    /// <summary>
+    /// Swap the borrow to a candidate from the broad DGX pool (not in the local list). Option 2: the DGX
+    /// materializes the chosen TecDoc article into oitm (item_code NULL) and returns a neon_oitm_id, which
+    /// we re-point the line's borrow to — then re-run the router (identity gating; still a fresh SKU).
+    /// </summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/swap-donor-api")]
+    public async Task<IActionResult> SwapDonorApi(Guid documentId, Guid lineId, [FromBody] SwapDonorApiRequest body, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+        if (body is null || (body.TecdocArticleId is null && string.IsNullOrWhiteSpace(body.ArticleNumber)))
+            return BadRequest(new { error = "tecdoc_article_id or article_number is required." });
+
+        var line = await _review.GetByIdAsync(lineId, ct);
+        if (line is null) return NotFound();
+        if (line.ReviewStatus is "created")
+            return Conflict(new { error = "Line already created; cannot swap donor." });
+
+        var payload = await _review.GetEnrichmentPayloadAsync(lineId, ct);
+        if (string.IsNullOrWhiteSpace(payload))
+            return BadRequest(new { error = "Line has no enrichment to swap." });
+
+        EnrichmentResponse enr;
+        try { enr = JsonSerializer.Deserialize<EnrichmentResponse>(payload, EnrichmentJson)!; }
+        catch (Exception ex) { return BadRequest(new { error = $"Stored enrichment unreadable: {ex.Message}" }); }
+
+        var lineOems = _oemFilter.Filter(line.OemNumbers, line.SupplierArticleNumber, line.Brand).CleanOems;
+
+        MaterializeResponse mat;
+        try
+        {
+            mat = await _donorSearch.MaterializeCandidateAsync(new MaterializeRequest(
+                body.TecdocArticleId, body.ArticleNumber, body.Supplier, body.SupplierId, line.Description, lineOems), ct);
+        }
+        catch (Exception ex) { return StatusCode(502, new { error = $"Materialize failed: {ex.Message}" }); }
+
+        if (!mat.Found || mat.NeonOitmId is null)
+            return UnprocessableEntity(new { error = mat.Error ?? "Could not add that donor (materialize returned no id)." });
+
+        var article  = mat.ArticleNumber ?? body.ArticleNumber;
+        var supplier = mat.Supplier ?? body.Supplier;
+        var name     = mat.Name ?? body.Name;
+        var verdict  = body.Verdict;
+
+        var newSelection = (enr.Audit?.Selection ?? new DonorSelection()) with
+        {
+            SelectedComponentVerdict = verdict,
+            NeedsReview              = !string.Equals(verdict, "MATCH", StringComparison.OrdinalIgnoreCase),
+            SelectedName             = name,
+            SelectedSupplier         = supplier,
+        };
+        var swapped = enr with
+        {
+            NeonOitmId   = (int)mat.NeonOitmId.Value,
+            ItemData     = enr.ItemData is null ? null : enr.ItemData with { PrimaryDescription = name ?? enr.ItemData.PrimaryDescription },
+            BorrowedFrom = new BorrowedFrom { ArticleNumber = article, SupplierName = supplier },
+            Audit        = (enr.Audit ?? new EnrichmentAudit()) with { Selection = newSelection },
+        };
+
+        var routing = await _router.ApplyAsync(lineId, line.Brand, line.SupplierArticleNumber, swapped, ct);
+        await _review.MarkEditedAsync(lineId, CurrentUser, ct);
+
+        var reviewStatus = routing.Routing switch
+        {
+            LineEnrichmentRouting.AutoMatched       => "matched",
+            LineEnrichmentRouting.NeedsConfirmation => "needs_confirmation",
+            LineEnrichmentRouting.NeedsManual       => "needs_manual",
+            _                                       => "pending",
+        };
+
+        return Ok(new
+        {
+            swapped_to     = article,
+            supplier,
+            verdict,
+            needs_review   = newSelection.NeedsReview,
+            review_status  = reviewStatus,
+            match_strategy = routing.MatchStrategy,
+            neon_oitm_id   = mat.NeonOitmId,
+        });
+    }
+
     /// <summary>Operator edits to an extracted line before creation (qty / unit price / description).</summary>
     [HttpPatch("{documentId:guid}/lines/{lineId:guid}")]
     public async Task<IActionResult> UpdateLine(Guid documentId, Guid lineId, [FromBody] UpdateLineRequest body, CancellationToken ct)
@@ -654,3 +805,5 @@ public sealed record BulkCreateManualRequest(
 public sealed record CreateNewRequest(bool Confirmed);
 public sealed record UpdateLineRequest(decimal? Quantity, decimal? UnitPriceForeign, string? Description);
 public sealed record SwapDonorRequest(string ArticleNumber, string? Supplier);
+public sealed record ArticleOemsBody(long TecdocArticleId);
+public sealed record SwapDonorApiRequest(long? TecdocArticleId, string? ArticleNumber, string? Supplier, long? SupplierId, string? Name, string? Verdict);
