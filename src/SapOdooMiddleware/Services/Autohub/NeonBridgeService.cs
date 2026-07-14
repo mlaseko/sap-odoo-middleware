@@ -78,6 +78,14 @@ public interface INeonBridgeService
     /// <c>iam_equivalent</c> aftermarket rows), used to populate the SAP ItemName. Empty if none.
     /// </summary>
     Task<IReadOnlyList<string>> GetOemCrossReferencesAsync(long oitmId, CancellationToken ct);
+
+    /// <summary>
+    /// The alternate Germax article numbers for a primary Germax SKU (<c>neon_germax_products
+    /// .alternate_article_numbers</c>, <c>" / "</c>-joined), split and de-duplicated against the primary.
+    /// Only Germax products live in that table, so a non-Germax article simply returns empty — the lookup
+    /// itself is the "is this Germax?" filter. Used to append the second Germax number to the SAP ItemName.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetGermaxAlternateArticleNumbersAsync(string article, CancellationToken ct);
 }
 
 /// <summary>
@@ -384,5 +392,39 @@ public sealed class NeonBridgeService : INeonBridgeService
         while (await r.ReadAsync(ct))
             if (!r.IsDBNull(0)) list.Add(r.GetString(0));
         return list;
+    }
+
+    public async Task<IReadOnlyList<string>> GetGermaxAlternateArticleNumbersAsync(string article, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(article)) return Array.Empty<string>();
+        var primary = article.Trim();
+
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        // Match on the PRIMARY germax_article_number (the supplier SKU, e.g. GL0911) — the freshly-minted
+        // item_code isn't in this table yet. Non-Germax articles return no row (behave exactly as before).
+        const string sql = """
+            SELECT alternate_article_numbers FROM neon_germax_products
+            WHERE germax_article_number = @article AND is_active = true
+            LIMIT 1;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("article", primary);
+        var result = await cmd.ExecuteScalarAsync(ct);
+
+        if (result is null or DBNull) return Array.Empty<string>();
+        var raw = (string)result;
+        if (string.IsNullOrWhiteSpace(raw)) return Array.Empty<string>();
+
+        // Stored as " / "-joined; split on '/', trim, drop empties and any repeat of the primary.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { primary };
+        var alternates = new List<string>();
+        foreach (var part in raw.Split('/'))
+        {
+            var t = part.Trim();
+            if (t.Length > 0 && seen.Add(t)) alternates.Add(t);
+        }
+        return alternates;
     }
 }
