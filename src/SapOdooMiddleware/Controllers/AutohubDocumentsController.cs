@@ -314,24 +314,35 @@ public class AutohubDocumentsController : ControllerBase
             var detail = string.IsNullOrWhiteSpace(c.ArticleNumber)
                 ? null
                 : await _bridge.GetDonorDetailAsync(c.ArticleNumber!, c.Supplier, ct);
+
+            // OEM split: prefer the DGX payload's list (capped, with a true total + aftermarket count);
+            // fall back to the locally-derived cross-refs for lines enriched before the split landed.
+            var oemList = c.OemNumbers is { Count: > 0 }
+                ? (IReadOnlyList<string>)c.OemNumbers
+                : (detail?.Oems ?? (IReadOnlyList<string>)Array.Empty<string>());
+            var oemTotal = c.OemCount ?? oemList.Count;
+
             outList.Add(new
             {
-                article_number           = c.ArticleNumber,
-                supplier                 = c.Supplier,
-                name                     = detail?.Name ?? c.Name,
-                verdict                  = c.Verdict,
-                score                    = c.Score,
-                auto_pick_eligible       = c.AutoPickEligible,
-                is_default               = c.IsDefault,
-                oitm_id                  = detail?.OitmId,
-                item_code                = detail?.ItemCode,
-                image_url                = detail?.ImageUrl,
-                part_component           = detail?.PartComponent,
-                is_kit                   = detail?.IsKit ?? false,
-                spec_count               = detail?.SpecCount ?? 0,
+                article_number            = c.ArticleNumber,
+                supplier                  = c.Supplier,
+                name                      = detail?.Name ?? c.Name,
+                verdict                   = c.Verdict,
+                score                     = c.Score,
+                auto_pick_eligible        = c.AutoPickEligible,
+                is_default                = c.IsDefault,
+                tecdoc_article_id         = c.TecdocArticleId,
+                oitm_id                   = detail?.OitmId,
+                item_code                 = detail?.ItemCode,
+                image_url                 = detail?.ImageUrl,
+                part_component            = detail?.PartComponent,
+                is_kit                    = detail?.IsKit ?? false,
+                spec_count                = detail?.SpecCount ?? 0,
                 compatible_vehicles_count = detail?.CompatibleVehiclesCount ?? 0,
-                categories_count         = detail?.CategoriesCount ?? 0,
-                oems                     = detail?.Oems ?? (IReadOnlyList<string>)Array.Empty<string>(),
+                categories_count          = detail?.CategoriesCount ?? 0,
+                oem_numbers               = oemList,
+                oem_count                 = oemTotal,
+                crossref_count            = c.CrossrefCount,
             });
         }
         return Ok(outList);
