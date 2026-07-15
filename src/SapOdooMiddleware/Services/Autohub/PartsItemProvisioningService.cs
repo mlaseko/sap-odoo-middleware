@@ -155,7 +155,9 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         var donorOems = enr.NeonOitmId is { } oemDonorId
             ? await _bridge.GetOemCrossReferencesAsync(oemDonorId, ct)
             : (IReadOnlyList<string>)Array.Empty<string>();
-        var itemName = BuildItemName(MergeOems(filtered, donorOems), article!);
+        // Germax parts carry a second in-house number; append it after the primary when present.
+        var altArticles = await _bridge.GetGermaxAlternateArticleNumbersAsync(article!, ct);
+        var itemName = BuildItemName(MergeOems(filtered, donorOems), article!, altArticles);
 
         var sapReq = new SapAutohubItemRequest(
             ItemCode: itemCode,
@@ -283,7 +285,8 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
 
         // Same atomic-counter caveat as ProvisionAsync: the number is burned even if the SAP write fails.
         var itemCode = await _sku.GenerateAsync(prefix, ct);
-        var itemName = BuildItemName(filtered, article!);
+        var altArticles = await _bridge.GetGermaxAlternateArticleNumbersAsync(article!, ct);
+        var itemName = BuildItemName(filtered, article!, altArticles);
 
         var sapReq = new SapAutohubItemRequest(
             ItemCode: itemCode,
@@ -326,13 +329,28 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         return new PartsProvisioningOutcome("created", itemCode, null);
     }
 
-    /// <summary>D5 ItemName: up to five OEMs then the supplier article, joined by '/'.</summary>
-    private static string BuildItemName(IReadOnlyList<string> oems, string article)
+    /// <summary>
+    /// D5 ItemName: up to five OEMs, then the supplier article, then any alternate Germax article numbers
+    /// that still fit — joined by '/'. The OEM chain + primary article are ALWAYS kept (hard-capped at 200);
+    /// alternates are appended only while the whole name stays within the cap, so a long OEM chain never
+    /// pushes out the primary. No alternates ⇒ identical to before.
+    /// </summary>
+    internal static string BuildItemName(IReadOnlyList<string> oems, string article, IReadOnlyList<string>? alternateArticles = null)
     {
+        const int maxLen = 200;
         var parts = oems.Take(5).ToList();
         parts.Add(article);
         var name = string.Join("/", parts);
-        return name.Length > 200 ? name[..200] : name;
+        if (name.Length > maxLen) return name[..maxLen];   // OEM chain + primary already at the cap
+
+        foreach (var alt in alternateArticles ?? Enumerable.Empty<string>())
+        {
+            if (string.IsNullOrWhiteSpace(alt)) continue;
+            var candidate = name + "/" + alt.Trim();
+            if (candidate.Length > maxLen) break;          // append alternates only while they fit
+            name = candidate;
+        }
+        return name;
     }
 
     /// <summary>
