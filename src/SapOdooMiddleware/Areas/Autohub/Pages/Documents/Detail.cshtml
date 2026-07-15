@@ -371,6 +371,11 @@
     const mBox = overlay.querySelector('.modal');
     const mBody = document.getElementById('modal-body');
     const mActions = document.getElementById('modal-actions');
+    // Set true by any user edit inside the modal (radio/select/text) so we can warn before an accidental close.
+    let modalDirty = false;
+    mBody.addEventListener('input',  () => { modalDirty = true; });
+    mBody.addEventListener('change', () => { modalDirty = true; });
+
     function openModal(html, actions) {
         if (mBox) mBox.classList.remove('modal-wide');   // reset; wide is opt-in per modal
         mBody.innerHTML = html;
@@ -382,9 +387,31 @@
             btn.onclick = a.onClick;
             mActions.appendChild(btn);
         });
+        modalDirty = false;                 // fresh dialog
         overlay.style.display = 'flex';
     }
-    function closeModal() { overlay.style.display = 'none'; }
+    function closeModal() { overlay.style.display = 'none'; modalDirty = false; }
+    // Close via a dismiss gesture (Escape / click-outside): confirm first if the selection was changed.
+    function requestCloseModal() {
+        if (overlay.style.display === 'none') return;
+        if (modalDirty && !confirm('You changed something in this dialog. Close without saving?')) return;
+        closeModal();
+    }
+    // Escape closes any open modal; a click on the backdrop (not the dialog) does too — both guarded.
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && overlay.style.display !== 'none') { e.preventDefault(); requestCloseModal(); }
+    });
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) requestCloseModal(); });
+
+    // Unsaved inline line-edits (qty / price / description): warn before the browser leaves the page
+    // (e.g. the Back button) so edits aren't silently lost. Cleared on a successful Save changes.
+    let inlineDirty = false;
+    document.getElementById('lines-table')?.addEventListener('input', (e) => {
+        if (e.target.closest('.line-detail')) inlineDirty = true;
+    });
+    window.addEventListener('beforeunload', (e) => {
+        if (modalDirty || inlineDirty) { e.preventDefault(); e.returnValue = ''; }
+    });
 
     // ---- enrichment package -> readable summary ----
     function enrichmentHtml(enr) {
@@ -728,6 +755,7 @@
                 }
                 const saved = detail.querySelector('.ld-saved');
                 if (saved) { saved.style.display = ''; setTimeout(() => { saved.style.display = 'none'; }, 2000); }
+                inlineDirty = false;   // edits persisted
             } catch (e) { alert('Save failed: ' + e.message); }
             finally { btn.disabled = false; }
         });
