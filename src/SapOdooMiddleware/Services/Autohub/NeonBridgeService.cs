@@ -404,9 +404,14 @@ public sealed class NeonBridgeService : INeonBridgeService
 
         // Match on the PRIMARY germax_article_number (the supplier SKU, e.g. GL0911) — the freshly-minted
         // item_code isn't in this table yet. Non-Germax articles return no row (behave exactly as before).
+        // No is_active filter: the alternate is an intrinsic property of the physical part, so naming
+        // completeness shouldn't hinge on catalog-availability (unlike auto-match, which gates on is_active).
+        // germax_article_number is not unique (variants share a number), but every row in a group carries
+        // the same alternate; ORDER BY item_code just makes the pick deterministic.
         const string sql = """
             SELECT alternate_article_numbers FROM neon_germax_products
-            WHERE germax_article_number = @article AND is_active = true
+            WHERE germax_article_number = @article
+            ORDER BY item_code
             LIMIT 1;
             """;
         await using var cmd = new NpgsqlCommand(sql, conn);
