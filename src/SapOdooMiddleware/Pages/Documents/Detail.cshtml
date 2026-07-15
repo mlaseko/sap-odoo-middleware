@@ -386,17 +386,30 @@
         });
     });
 
-    // Open the actions menu upward when there isn't room below (last rows), and keep only one open.
+    // The actions menu is position:fixed (escapes the table's clipping/overflow), so we place it against
+    // the viewport on open: right-aligned to the ⋮, dropping down or flipping up by available space, and
+    // clamped inside the window so it's never cut off — short table or last row. Keep only one open.
+    function placeActionsMenu(menu, sum) {
+        const r = sum.getBoundingClientRect();
+        const mh = menu.offsetHeight, mw = menu.offsetWidth;
+        const spaceBelow = window.innerHeight - r.bottom;
+        const openUp = (mh + 8 > spaceBelow) && (r.top - 8 > spaceBelow);
+        let left = Math.min(r.right - mw, window.innerWidth - mw - 8);
+        menu.style.left = Math.max(8, left) + 'px';
+        const top = openUp ? (r.top - mh - 4) : (r.bottom + 4);
+        menu.style.top = Math.max(8, Math.min(top, window.innerHeight - mh - 8)) + 'px';
+    }
     document.querySelectorAll('#lines-table .actions-menu').forEach(details => {
         details.addEventListener('toggle', () => {
-            if (!details.open) { details.classList.remove('up'); return; }
+            if (!details.open) return;
             document.querySelectorAll('#lines-table .actions-menu[open]').forEach(o => { if (o !== details) o.open = false; });
             const menu = details.querySelector('.menu'), sum = details.querySelector('summary');
-            if (!menu || !sum) return;
-            const spaceBelow = window.innerHeight - sum.getBoundingClientRect().bottom;
-            details.classList.toggle('up', menu.offsetHeight + 12 > spaceBelow);
+            if (menu && sum) placeActionsMenu(menu, sum);
         });
     });
+    ['scroll', 'resize'].forEach(evt => window.addEventListener(evt, () => {
+        document.querySelectorAll('#lines-table .actions-menu[open]').forEach(o => { o.open = false; });
+    }, true));
 
     // ---- banner buttons ----
     let lastAutoMatch = 0;
