@@ -18,7 +18,9 @@
 
 <style>
     .hint { font-weight: normal; color: var(--muted); font-size: 13px; }
-    #lines-table thead th { position: sticky; top: 58px; background: var(--surface-2); z-index: 2; }
+    /* Header scrolls with the table — NOT sticky. The .review-banner already pins at top:58px, and a
+       second sticky header at the same offset collided with it and floated over the first rows. */
+    #lines-table thead th { background: var(--surface-2); }
     #lines-table th.col-desc, #lines-table td.col-desc { min-width: 200px; }
     #lines-table th.col-oems, #lines-table td.col-oems { min-width: 170px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #lines-table th.col-art, #lines-table td.col-art { white-space: nowrap; }
@@ -652,6 +654,18 @@
             } catch (e) {
                 alert('Action failed: ' + e.message);
             }
+        });
+    });
+
+    // Open the actions menu upward when there isn't room below (last rows), and keep only one open.
+    document.querySelectorAll('#lines-table .actions-menu').forEach(details => {
+        details.addEventListener('toggle', () => {
+            if (!details.open) { details.classList.remove('up'); return; }
+            document.querySelectorAll('#lines-table .actions-menu[open]').forEach(o => { if (o !== details) o.open = false; });
+            const menu = details.querySelector('.menu'), sum = details.querySelector('summary');
+            if (!menu || !sum) return;
+            const spaceBelow = window.innerHeight - sum.getBoundingClientRect().bottom;
+            details.classList.toggle('up', menu.offsetHeight + 12 > spaceBelow);
         });
     });
 
