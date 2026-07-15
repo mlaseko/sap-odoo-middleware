@@ -264,10 +264,12 @@ select.cell-input { appearance: auto; }
 .actions-menu > summary:hover { background: rgba(255,255,255,.06); color: var(--text); }
 .actions-menu > summary::-webkit-details-marker { display: none; }
 .actions-menu .menu {
-    position: absolute; right: 0; z-index: 10; background: var(--surface-2);
+    position: absolute; right: 0; top: 100%; margin-top: 4px; z-index: 10; background: var(--surface-2);
     border: 1px solid var(--border); border-radius: var(--radius-sm);
     box-shadow: var(--shadow-pop); min-width: 200px; display: flex; flex-direction: column; overflow: hidden; padding: 4px;
 }
+/* Rows near the bottom (e.g. the last line) open the menu upward so it isn't cut off by the viewport. */
+.actions-menu.up .menu { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 4px; }
 .actions-menu .menu button {
     background: none; border: 0; text-align: left; padding: 8px 12px; cursor: pointer;
     font-size: 13px; color: var(--text); border-radius: 6px; font-family: inherit;
