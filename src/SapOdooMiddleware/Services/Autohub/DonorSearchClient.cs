@@ -85,7 +85,10 @@ public sealed record MintItemRequest(
     [property: JsonPropertyName("donor_tecdoc_article_id")] long?  DonorTecdocArticleId,
     [property: JsonPropertyName("source")]                 string? Source,
     [property: JsonPropertyName("item_code")]              string? ItemCode,
-    [property: JsonPropertyName("request_id")]             string? RequestId);
+    [property: JsonPropertyName("request_id")]             string? RequestId,
+    /// <summary>Seeds the row's name when there's no donor to take it from — without it the classifier
+    /// (which requires name &gt; '') can never categorize the item. Ignored when a donor supplies the name.</summary>
+    [property: JsonPropertyName("description")]            string? Description = null);
 
 public sealed record MintItemResponse
 {

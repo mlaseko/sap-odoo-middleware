@@ -71,7 +71,7 @@ public interface INeonBridgeService
     /// landing in needs_manual. Returns the new oitm id (or null if the insert produced no row).
     /// </summary>
     Task<long?> CreateFreshRowAsync(string sapItemCode, string articleNumber, string? supplierName,
-        IReadOnlyList<string> oemNumbers, string source, CancellationToken ct);
+        IReadOnlyList<string> oemNumbers, string source, string? description, CancellationToken ct);
 
     /// <summary>
     /// The donor row's true OEM cross-references (<c>reference_type = 'oem'</c> ONLY — never the
@@ -328,23 +328,27 @@ public sealed class NeonBridgeService : INeonBridgeService
     }
 
     public async Task<long?> CreateFreshRowAsync(string sapItemCode, string articleNumber, string? supplierName,
-        IReadOnlyList<string> oemNumbers, string source, CancellationToken ct)
+        IReadOnlyList<string> oemNumbers, string source, string? description, CancellationToken ct)
     {
         // No donor → DGX writes identity + OEMs only (no TecDoc record to deepen from), through the single
-        // DGX writer. Fall back to the local INSERT below if DGX is unavailable/fails.
+        // DGX writer. The invoice description seeds the name so the classifier (name > '') can categorize
+        // it. Fall back to the local INSERT below if DGX is unavailable/fails.
         var minted = await TryDeepMintAsync(new MintItemRequest(
             ArticleNumber: articleNumber, SupplierName: supplierName, OemNumbers: oemNumbers,
-            DonorTecdocArticleId: null, Source: source, ItemCode: sapItemCode, RequestId: null), ct);
+            DonorTecdocArticleId: null, Source: source, ItemCode: sapItemCode, RequestId: null,
+            Description: description), ct);
         if (minted is { } deepId) return deepId;
 
         await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync(ct);
 
         var canonicalOem = oemNumbers.Count > 0 ? oemNumbers[0] : null;
+        var name = string.IsNullOrWhiteSpace(description) ? null : description.Trim();
 
+        // Seed name from the description here too, so even a shallow fallback row is categorizable.
         const string insert = """
-            INSERT INTO oitm (article_number, supplier_name, canonical_oem_number, item_code, tecdoc_article_id, source)
-            VALUES (@article, @supplier, @canonical, @itemCode, NULL, @source)
+            INSERT INTO oitm (article_number, supplier_name, name, canonical_oem_number, item_code, tecdoc_article_id, source)
+            VALUES (@article, @supplier, @name, @canonical, @itemCode, NULL, @source)
             RETURNING id;
             """;
         long newId;
@@ -352,6 +356,7 @@ public sealed class NeonBridgeService : INeonBridgeService
         {
             cmd.Parameters.AddWithValue("article", articleNumber);
             cmd.Parameters.AddWithValue("supplier", (object?)supplierName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("name", (object?)name ?? DBNull.Value);
             cmd.Parameters.AddWithValue("canonical", (object?)canonicalOem ?? DBNull.Value);
             cmd.Parameters.AddWithValue("itemCode", sapItemCode);
             cmd.Parameters.AddWithValue("source", source);
