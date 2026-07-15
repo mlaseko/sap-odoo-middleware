@@ -102,10 +102,10 @@ public sealed record EnrichmentItemData
     [JsonPropertyName("primary_description")]   public string?       PrimaryDescription { get; init; }
     [JsonPropertyName("frgn_name")]             public string?       FrgnName           { get; init; }
     [JsonPropertyName("fit_for_auto")]          public string?       FitForAuto         { get; init; }
-    [JsonPropertyName("image_url")]             public string?       ImageUrl           { get; init; }
-    [JsonPropertyName("all_image_urls")]        public string?       AllImageUrls       { get; init; }
-    [JsonPropertyName("product_url")]           public string?       ProductUrl         { get; init; }
-    [JsonPropertyName("tecdoc_categories")]     public List<string>? TecdocCategories   { get; init; }
+    [JsonPropertyName("image_url")]      [JsonConverter(typeof(LenientStringJsonConverter))]     public string?       ImageUrl         { get; init; }
+    [JsonPropertyName("all_image_urls")] [JsonConverter(typeof(LenientStringJsonConverter))]     public string?       AllImageUrls     { get; init; }
+    [JsonPropertyName("product_url")]    [JsonConverter(typeof(LenientStringJsonConverter))]     public string?       ProductUrl       { get; init; }
+    [JsonPropertyName("tecdoc_categories")] [JsonConverter(typeof(LenientStringListJsonConverter))] public List<string>? TecdocCategories { get; init; }
     [JsonPropertyName("compatible_vehicles")]   public List<JsonElement>? CompatibleVehicles { get; init; }
     [JsonPropertyName("filtered_oems")]         public List<string>? FilteredOems       { get; init; }
     [JsonPropertyName("suggested_itms_grp_cod")]public int?          SuggestedItmsGrpCod{ get; init; }
