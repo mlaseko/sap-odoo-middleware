@@ -74,6 +74,31 @@ public sealed record MaterializeResponse
     [JsonPropertyName("error")]                     public string?       Error                   { get; init; }
 }
 
+/// <summary>Ask the DGX to mint a DEEP own-identity <c>oitm</c> row (identity + name + image + specs +
+/// compatible vehicles + categories from the donor's TecDoc record) and return its id. Replaces the
+/// middleware's shallow local INSERT so items are complete at creation. Idempotent on
+/// (article_number, UPPER(supplier_name)).</summary>
+public sealed record MintItemRequest(
+    [property: JsonPropertyName("article_number")]         string? ArticleNumber,
+    [property: JsonPropertyName("supplier_name")]          string? SupplierName,
+    [property: JsonPropertyName("oem_numbers")]            IReadOnlyList<string>? OemNumbers,
+    [property: JsonPropertyName("donor_tecdoc_article_id")] long?  DonorTecdocArticleId,
+    [property: JsonPropertyName("source")]                 string? Source,
+    [property: JsonPropertyName("item_code")]              string? ItemCode,
+    [property: JsonPropertyName("request_id")]             string? RequestId);
+
+public sealed record MintItemResponse
+{
+    /// <summary>The parts_catalog oitm.id of the minted row. The only strictly-required field.</summary>
+    [JsonPropertyName("neon_oitm_id")]     public long?   NeonOitmId       { get; init; }
+    [JsonPropertyName("deep")]             public bool    Deep             { get; init; }
+    [JsonPropertyName("specs_written")]    public int?    SpecsWritten     { get; init; }
+    [JsonPropertyName("vehicles_written")] public int?    VehiclesWritten  { get; init; }
+    [JsonPropertyName("categories_written")] public int?  CategoriesWritten { get; init; }
+    [JsonPropertyName("borrowed_from")]    public long?   BorrowedFrom     { get; init; }
+    [JsonPropertyName("error")]            public string? Error            { get; init; }
+}
+
 public interface IDonorSearchClient
 {
     /// <summary>Broad scored candidate pool for a line's OEMs (DGX <c>/candidates_for_line</c>).</summary>
@@ -82,6 +107,9 @@ public interface IDonorSearchClient
     Task<ArticleOemsResponse> ArticleOemsAsync(long tecdocArticleId, CancellationToken ct);
     /// <summary>Upsert a chosen API candidate into <c>oitm</c> and return its neon_oitm_id (DGX <c>/materialize_candidate</c>).</summary>
     Task<MaterializeResponse> MaterializeCandidateAsync(MaterializeRequest request, CancellationToken ct);
+
+    /// <summary>Mint a DEEP own-identity <c>oitm</c> row from the donor's TecDoc record (DGX <c>/mint_item</c>).</summary>
+    Task<MintItemResponse> MintItemAsync(MintItemRequest request, CancellationToken ct);
 }
 
 /// <summary>
@@ -128,6 +156,12 @@ public sealed class DonorSearchClient : IDonorSearchClient
     {
         var (ok, body, error) = await PostAsync<MaterializeResponse>("materialize_candidate", request, ct);
         return ok && body is not null ? body : new MaterializeResponse { Found = false, Error = error };
+    }
+
+    public async Task<MintItemResponse> MintItemAsync(MintItemRequest request, CancellationToken ct)
+    {
+        var (ok, body, error) = await PostAsync<MintItemResponse>("mint_item", request, ct);
+        return ok && body is not null ? body : new MintItemResponse { NeonOitmId = null, Error = error };
     }
 
     /// <summary>POST helper: returns the deserialized body, or (false, null, error) for 501/non-2xx/empty.</summary>

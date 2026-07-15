@@ -98,11 +98,13 @@ public sealed class NeonBridgeService : INeonBridgeService
 {
     private readonly ICompanyContext _company;
     private readonly ILogger<NeonBridgeService> _logger;
+    private readonly IDonorSearchClient _dgx;   // DGX /mint_item — deep own-identity rows at creation
 
-    public NeonBridgeService(ICompanyContext company, ILogger<NeonBridgeService> logger)
+    public NeonBridgeService(ICompanyContext company, ILogger<NeonBridgeService> logger, IDonorSearchClient dgx)
     {
         _company = company;
         _logger = logger;
+        _dgx = dgx;
     }
 
     private string ConnectionString => _company.Current.Neon.ConnectionString;
@@ -217,6 +219,16 @@ public sealed class NeonBridgeService : INeonBridgeService
     public async Task<long?> CreateOwnIdentityRowAsync(long donorOitmId, string sapItemCode, string source,
         string? articleNumber, string? supplierName, CancellationToken ct)
     {
+        // Prefer a DEEP mint by DGX (identity + name + image + specs/vehicles/categories from the donor's
+        // TecDoc record). Hand over the donor's tecdoc id + OEMs; fall back to the shallow local INSERT
+        // below if DGX is unavailable/fails, so the Neon mirror is never worse than before.
+        var (donorTecdocId, donorArticle) = await ReadDonorMintKeysAsync(donorOitmId, ct);
+        var donorOems = await GetOemCrossReferencesAsync(donorOitmId, ct);
+        var minted = await TryDeepMintAsync(new MintItemRequest(
+            ArticleNumber: articleNumber ?? donorArticle, SupplierName: supplierName, OemNumbers: donorOems,
+            DonorTecdocArticleId: donorTecdocId, Source: source, ItemCode: sapItemCode, RequestId: null), ct);
+        if (minted is { } deepId) return deepId;
+
         await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync(ct);
 
@@ -263,8 +275,8 @@ public sealed class NeonBridgeService : INeonBridgeService
             await cmd.ExecuteNonQueryAsync(ct);
         }
 
-        _logger.LogInformation(
-            "Cross-supplier: minted own-identity oitm {NewId} (supplier {Supplier}, ItemCode {Code}); copied OEMs from donor {Donor}.",
+        _logger.LogWarning(
+            "Cross-supplier: DGX mint unavailable — minted SHALLOW own-identity oitm {NewId} (supplier {Supplier}, ItemCode {Code}); copied OEMs from donor {Donor}. Deep tables pending a DGX backfill.",
             newId, supplierName, sapItemCode, donorOitmId);
         return newId;
     }
@@ -318,6 +330,13 @@ public sealed class NeonBridgeService : INeonBridgeService
     public async Task<long?> CreateFreshRowAsync(string sapItemCode, string articleNumber, string? supplierName,
         IReadOnlyList<string> oemNumbers, string source, CancellationToken ct)
     {
+        // No donor → DGX writes identity + OEMs only (no TecDoc record to deepen from), through the single
+        // DGX writer. Fall back to the local INSERT below if DGX is unavailable/fails.
+        var minted = await TryDeepMintAsync(new MintItemRequest(
+            ArticleNumber: articleNumber, SupplierName: supplierName, OemNumbers: oemNumbers,
+            DonorTecdocArticleId: null, Source: source, ItemCode: sapItemCode, RequestId: null), ct);
+        if (minted is { } deepId) return deepId;
+
         await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync(ct);
 
@@ -364,10 +383,53 @@ public sealed class NeonBridgeService : INeonBridgeService
             }
         }
 
-        _logger.LogInformation(
-            "Manual create: minted fresh oitm {NewId} (supplier {Supplier}, ItemCode {Code}, {OemCount} OEM ref(s)).",
+        _logger.LogWarning(
+            "DGX mint unavailable — minted SHALLOW fresh oitm {NewId} (supplier {Supplier}, ItemCode {Code}, {OemCount} OEM ref(s)).",
             newId, supplierName, sapItemCode, oemNumbers.Count);
         return newId;
+    }
+
+    /// <summary>Try the DGX deep mint (<c>/mint_item</c>). Returns the new oitm id, or null on any failure
+    /// (unavailable / 501 / error / throw) so the caller falls back to the shallow local INSERT.</summary>
+    private async Task<long?> TryDeepMintAsync(MintItemRequest req, CancellationToken ct)
+    {
+        MintItemResponse res;
+        try
+        {
+            res = await _dgx.MintItemAsync(req, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "DGX /mint_item threw for {Article}/{Supplier}; falling back to local insert.",
+                req.ArticleNumber, req.SupplierName);
+            return null;
+        }
+
+        if (res.NeonOitmId is { } id)
+        {
+            _logger.LogInformation(
+                "DGX /mint_item minted oitm {Id} for {Article}/{Supplier} (deep={Deep}, specs={Specs}, vehicles={Vehicles}, categories={Cats}, ItemCode {Code}).",
+                id, req.ArticleNumber, req.SupplierName, res.Deep, res.SpecsWritten, res.VehiclesWritten, res.CategoriesWritten, req.ItemCode);
+            return id;
+        }
+
+        _logger.LogWarning("DGX /mint_item unavailable/failed for {Article}/{Supplier} ({Error}); falling back to local insert.",
+            req.ArticleNumber, req.SupplierName, res.Error);
+        return null;
+    }
+
+    /// <summary>Donor row's TecDoc id + article, handed to <c>/mint_item</c> so DGX can deepen from the
+    /// donor's TecDoc record. (null, null) if the donor row is missing.</summary>
+    private async Task<(long? tecdocId, string? article)> ReadDonorMintKeysAsync(long donorOitmId, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+        const string sql = "SELECT tecdoc_article_id, article_number FROM oitm WHERE id = @id LIMIT 1;";
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", donorOitmId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct)) return (null, null);
+        return (r.IsDBNull(0) ? null : r.GetInt64(0), r.IsDBNull(1) ? null : r.GetString(1));
     }
 
     public async Task<IReadOnlyList<string>> GetOemCrossReferencesAsync(long oitmId, CancellationToken ct)
