@@ -422,6 +422,11 @@
     const mBody = document.getElementById('modal-body');
     const mActions = document.getElementById('modal-actions');
     const mDialog = overlay ? overlay.querySelector('.modal') : null;
+    // Set true by any user edit inside the modal, so we can warn before an accidental close.
+    let modalDirty = false;
+    mBody?.addEventListener('input',  () => { modalDirty = true; });
+    mBody?.addEventListener('change', () => { modalDirty = true; });
+
     function openModal(html, actions) {
         if (mDialog) mDialog.classList.remove('modal-wide');
         mBody.innerHTML = html;
@@ -433,9 +438,20 @@
             b.onclick = a.onClick;
             mActions.appendChild(b);
         });
+        modalDirty = false;
         overlay.style.display = 'flex';
     }
-    function closeModal() { overlay.style.display = 'none'; }
+    function closeModal() { overlay.style.display = 'none'; modalDirty = false; }
+    function requestCloseModal() {
+        if (overlay.style.display === 'none') return;
+        if (modalDirty && !confirm('You changed something in this dialog. Close without saving?')) return;
+        closeModal();
+    }
+    // Escape closes any open modal; a click on the backdrop does too — both guarded by the dirty check.
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && overlay.style.display !== 'none') { e.preventDefault(); requestCloseModal(); }
+    });
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) requestCloseModal(); });
 
     document.getElementById('btn-bulkcreate')?.addEventListener('click', () => {
         const n = document.getElementById('cnt-createnew').textContent;

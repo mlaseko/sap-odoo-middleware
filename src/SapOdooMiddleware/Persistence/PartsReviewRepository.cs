@@ -104,12 +104,16 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         "\"EnrichmentSource\",\"BorrowedFromArticle\",\"EnrichmentConfirmedAt\",\"CreateErrorMessage\"," +
         "\"MatchStrategy\",\"BorrowedFromSupplier\"," +
         "\"SuggestedDonorItemCode\",\"SuggestedDonorOitmId\",\"SuggestedDonorSupplier\"," +
-        // Computed donor-scoring flags from the enrichment audit block (null-tolerant: absent → false/null).
-        "COALESCE((\"EnrichmentPayloadJson\"#>>'{audit,selection,needs_review}')::boolean, false)," +
+        // Computed donor-scoring flags from the enrichment audit block. SHAPE-TOLERANT: a re-enrichment can
+        // write an off-shape audit block, and a raw `::boolean` cast or `jsonb_array_length` on a non-array
+        // throws at query time — which would 500 the whole document page. So compare needs_review as text
+        // (never cast) and only take the array length when the node is actually an array.
+        "COALESCE((\"EnrichmentPayloadJson\"#>>'{audit,selection,needs_review}') = 'true', false)," +
         "\"EnrichmentPayloadJson\"#>>'{audit,selection,selected_component_verdict}'," +
         "\"EnrichmentPayloadJson\"#>>'{audit,selection,selected_name}'," +
         "\"EnrichmentPayloadJson\"#>>'{audit,selection,selected_supplier}'," +
-        "COALESCE(jsonb_array_length(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}'), 0) > 0";
+        "COALESCE(CASE WHEN jsonb_typeof(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}') = 'array' " +
+        "THEN jsonb_array_length(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}') END, 0) > 0";
 
     private readonly ICompanyContext _company;
     public PartsReviewRepository(ICompanyContext company) => _company = company;
