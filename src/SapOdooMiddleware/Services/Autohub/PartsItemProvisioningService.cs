@@ -231,7 +231,8 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             try
             {
                 var supplier = string.IsNullOrWhiteSpace(line.Brand) ? null : line.Brand;
-                await _bridge.CreateFreshRowAsync(itemCode, article!, supplier, filtered, "enrichment_no_donor", ct);
+                await _bridge.CreateFreshRowAsync(itemCode, article!, supplier, filtered, "enrichment_no_donor",
+                    data.PrimaryDescription ?? line.Description, ct);
             }
             catch (Exception ex)
             {
@@ -315,7 +316,8 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         try
         {
             var supplier = string.IsNullOrWhiteSpace(line.Brand) ? null : line.Brand;
-            await _bridge.CreateFreshRowAsync(itemCode, article!, supplier, filtered, "manual_create", ct);
+            await _bridge.CreateFreshRowAsync(itemCode, article!, supplier, filtered, "manual_create",
+                manual.Description ?? line.Description, ct);
         }
         catch (Exception ex)
         {
