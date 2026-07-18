@@ -4994,7 +4994,6 @@ ItemMaster AS (
         validFor
     FROM OITM
     WHERE validFor = 'Y'
-      AND ItemCode NOT LIKE '%[SERVICE]%'
 ),
 ClassifiedItems AS (
     SELECT
