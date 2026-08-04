@@ -23,6 +23,10 @@ public class DetailModel : PageModel
     public bool IsReviewed => Doc.Status == "reviewed";
     public bool IsEditable => Doc.Status == "extracted";
 
+    /// <summary>Excel documents can be re-extracted in place (re-parse the stored .xlsx, refresh lines).</summary>
+    public bool IsExcel => Doc.OriginalFilename?.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) == true;
+    public bool CanReExtract => IsExcel && IsEditable;
+
     public async Task<IActionResult> OnGetAsync(Guid id, CancellationToken ct)
     {
         var doc = await _docs.GetByIdAsync(id, ct);

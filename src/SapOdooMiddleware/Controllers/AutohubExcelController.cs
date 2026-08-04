@@ -58,4 +58,36 @@ public sealed class AutohubExcelController : ControllerBase
             _ => BadRequest(new { error = r.Error }),
         };
     }
+
+    /// <summary>
+    /// Re-parse a document's already-stored Excel file and refresh its lines in place (same document id,
+    /// same file) — the "re-extract" action used to re-run extraction after a parser fix without a
+    /// delete-and-re-upload. 200 refreshed (+warnings/sigma), 400 hard-fail/not-eligible, 404 not found.
+    /// </summary>
+    [HttpPost("{id:guid}/re-extract")]
+    public async Task<IActionResult> ReExtract(Guid id, CancellationToken ct)
+    {
+        var r = await _upload.ReExtractAsync(id, ct);
+        return r.Outcome switch
+        {
+            ExcelUploadOutcome.Created => Ok(new
+            {
+                documentId = r.DocumentId,
+                linesCreated = r.LinesCreated,
+                validationWarnings = r.Warnings.Select(w => new { row = w.Row, field = w.Field, issue = w.Issue }),
+                sigma = new
+                {
+                    sumLineTotals = r.Sigma!.SumLineTotals,
+                    invoiceTotal = r.Sigma.InvoiceTotal,
+                    deltaPct = r.Sigma.DeltaPct,
+                },
+            }),
+            ExcelUploadOutcome.HardFailure => BadRequest(new
+            {
+                error = "validation failed",
+                errors = r.HardErrors.Select(e => new { row = e.Row, field = e.Field, issue = e.Issue }),
+            }),
+            _ => BadRequest(new { error = r.Error }),
+        };
+    }
 }

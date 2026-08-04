@@ -11,6 +11,11 @@
         <div class="sub">@Model.Doc.SupplierName</div>
     </div>
     <div style="display:flex; gap:12px; align-items:center;">
+        @if (Model.CanReExtract)
+        {
+            <button id="btn-reextract-doc" class="btn btn-sm" type="button" data-doc-id="@Model.Doc.Id"
+                    title="Re-parse the stored Excel file and refresh these lines in place (no re-upload).">Re-extract Excel</button>
+        }
         <button id="btn-delete-doc" class="btn btn-sm btn-danger" type="button" data-doc-id="@Model.Doc.Id">Delete invoice</button>
         <a class="btn btn-sm" href="/autohub/documents">← Back to list</a>
     </div>
@@ -1083,6 +1088,34 @@
             if (!r.ok) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
             window.location.href = '/autohub/documents';
         } catch (e) { alert('Delete failed: ' + e.message); btn.disabled = false; }
+    });
+})();
+
+// ---- re-extract Excel in place (re-parse the stored .xlsx, refresh the lines) ----
+(function () {
+    const btn = document.getElementById('btn-reextract-doc');
+    if (!btn) return;
+    const docId = btn.dataset.docId;
+    const apiKey = document.querySelector('meta[name="api-key"]')?.content || '';
+    const original = btn.textContent;
+    btn.addEventListener('click', async () => {
+        if (!confirm('Re-parse the stored Excel file and replace these extracted lines? '
+            + 'Any per-line review edits on this document will be discarded and re-enrichment will re-run. '
+            + '(SAP items already created are NOT affected.)')) return;
+        btn.disabled = true;
+        btn.textContent = 'Re-extracting…';
+        try {
+            const r = await fetch('/api/autohub/documents/' + docId + '/re-extract', {
+                method: 'POST',
+                headers: apiKey ? { 'X-Api-Key': apiKey } : {}
+            });
+            if (!r.ok) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
+            window.location.reload();
+        } catch (e) {
+            alert('Re-extract failed: ' + e.message);
+            btn.disabled = false;
+            btn.textContent = original;
+        }
     });
 })();
 </script>

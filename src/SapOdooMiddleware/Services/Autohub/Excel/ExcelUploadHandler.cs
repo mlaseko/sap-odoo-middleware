@@ -109,6 +109,72 @@ public sealed class ExcelUploadHandler
         }
         var doc = parsed.Document!;
 
+        // Create the document header + persist the file on disk first, then run the shared persist path
+        // (validate → coverage → sigma → lines → finalise). DeleteByDocumentAsync inside the shared path is
+        // a no-op here since no lines exist yet, so a single code path serves both upload and re-extract.
+        var documentId = Guid.NewGuid();
+        var now = DateTime.UtcNow;
+        var subdir = Path.Combine(ingestion.StorageRoot, now.ToString("yyyy"), now.ToString("MM"), documentId.ToString());
+        Directory.CreateDirectory(subdir);
+        var filePath = Path.Combine(subdir, file.FileName);
+        await File.WriteAllBytesAsync(filePath, bytes, ct);
+
+        await _docs.CreateAsync(documentId, file.FileName, filePath, hash, ct);
+
+        return await PersistParsedAsync(documentId, file.FileName, doc, ct);
+    }
+
+    /// <summary>
+    /// Re-parse a document's already-stored Excel file and refresh its staging lines in place — no
+    /// delete-and-re-upload, no new document id, no SHA change. Used to re-run extraction after a parser
+    /// fix (e.g. numeric supplier articles) so the operator can iterate without losing the document's
+    /// place in the queue. The lines are replaced and the document is reset to Status=extracted, which
+    /// re-arms the enrichment/auto-match background workers on the fresh rows.
+    /// </summary>
+    public async Task<ExcelUploadResult> ReExtractAsync(Guid documentId, CancellationToken ct)
+    {
+        var existing = await _docs.GetByIdAsync(documentId, ct);
+        if (existing is null)
+            return ExcelUploadResult.Bad("Document not found.");
+        if (!existing.OriginalFilename.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+            return ExcelUploadResult.Bad("Re-extract is only available for Excel (.xlsx) documents.");
+        if (string.IsNullOrWhiteSpace(existing.FilePath) || !File.Exists(existing.FilePath))
+            return ExcelUploadResult.Bad(
+                "The original Excel file is no longer on disk (storage is ephemeral) — re-upload the invoice instead.");
+
+        byte[] bytes;
+        try
+        {
+            bytes = await File.ReadAllBytesAsync(existing.FilePath, ct);
+        }
+        catch (IOException ex)
+        {
+            _logger.LogWarning(ex, "Autohub Excel re-extract {Id}: could not read {Path}.", documentId, existing.FilePath);
+            return ExcelUploadResult.Bad("Could not read the original Excel file.");
+        }
+
+        ExcelParseResult parsed;
+        using (var ps = new MemoryStream(bytes, writable: false))
+            parsed = _parser.Parse(ps);
+        if (!parsed.Ok)
+        {
+            _logger.LogInformation("Autohub Excel re-extract rejected ({Id}): {Count} hard error(s).", documentId, parsed.HardErrors.Count);
+            return ExcelUploadResult.HardFail(parsed.HardErrors);
+        }
+
+        _logger.LogInformation("Autohub Excel re-extract {Id} ({File}): re-parsing in place.", documentId, existing.OriginalFilename);
+        return await PersistParsedAsync(documentId, existing.OriginalFilename, parsed.Document!, ct);
+    }
+
+    /// <summary>
+    /// Shared persist path for both the initial upload and the in-place re-extract: sanitise each line,
+    /// compute the article-coverage and sigma notes, replace the document's staging lines, and finalise the
+    /// header + Status=extracted. The document row must already exist (created by the caller). Keeping this
+    /// in one place guarantees an upload and a re-extract of the same file produce identical rows.
+    /// </summary>
+    private async Task<ExcelUploadResult> PersistParsedAsync(
+        Guid documentId, string originalFilename, ParsedExcelDocument doc, CancellationToken ct)
+    {
         // Shared per-line sanitisation (same rules the PDF path applies to the DGX response).
         var warnings = new List<ExcelLineWarning>();
         var sanitised = new List<(PartsInvoiceLine Line, bool Promo)>(doc.Lines.Count);
@@ -140,7 +206,7 @@ public sealed class ExcelUploadHandler
                     "these can only match by OEM, so existing items may be re-created. Check the article column.";
                 _logger.LogWarning(
                     "Autohub Excel import {File}: low article coverage — {Missing}/{Total} lines have no supplier article.",
-                    file.FileName, missingArticle, sanitisedLines.Count);
+                    originalFilename, missingArticle, sanitisedLines.Count);
             }
         }
 
@@ -149,16 +215,8 @@ public sealed class ExcelUploadHandler
         var deltaPct = total is { } tt && tt != 0m ? Math.Abs(sumLineTotals - tt) / Math.Abs(tt) * 100m : 0m;
         var sigma = new ExcelSigmaResult(sumLineTotals, total, decimal.Round(deltaPct, 2));
 
-        // ---- Persist (identical two-step shape to the PDF path). ----
-        var documentId = Guid.NewGuid();
-        var now = DateTime.UtcNow;
-        var subdir = Path.Combine(ingestion.StorageRoot, now.ToString("yyyy"), now.ToString("MM"), documentId.ToString());
-        Directory.CreateDirectory(subdir);
-        var filePath = Path.Combine(subdir, file.FileName);
-        await File.WriteAllBytesAsync(filePath, bytes, ct);
-
-        await _docs.CreateAsync(documentId, file.FileName, filePath, hash, ct);
-
+        // Replace the document's lines (delete-then-insert). On the initial upload the delete is a no-op;
+        // on re-extract it clears the stale rows so the refreshed parse fully supersedes them.
         var rows = sanitised.Select((s, idx) => new StagingPartsLineRow(
             Id:                    Guid.NewGuid(),
             DocumentId:            documentId,
@@ -174,12 +232,13 @@ public sealed class ExcelUploadHandler
             DiscountPct:           s.Line.DiscountPct,
             LineTotalForeign:      s.Line.LineTotalForeign,
             IsPromotional:         s.Promo || PartsPromotionRules.IsPromotional(s.Line))).ToList();
+        await _lines.DeleteByDocumentAsync(documentId, ct);
         await _lines.InsertManyAsync(documentId, rows, ct);
 
         var rawJson = JsonSerializer.Serialize(new
         {
             source = "excel",
-            originalFilename = file.FileName,
+            originalFilename,
             header = doc.Header,
             forexRateUsed = doc.ForexRateUsed,
             forexRateDate = doc.ForexRateDate,
@@ -195,7 +254,7 @@ public sealed class ExcelUploadHandler
 
         _logger.LogInformation(
             "Autohub Excel import {Id} ({File}): {Lines} line(s), {Warnings} warning(s), validation={Validation}, sigma Δ={Delta:N2}%.",
-            documentId, file.FileName, rows.Count, warnings.Count, validationStatus, sigma.DeltaPct);
+            documentId, originalFilename, rows.Count, warnings.Count, validationStatus, sigma.DeltaPct);
 
         return new ExcelUploadResult(ExcelUploadOutcome.Created, documentId, rows.Count, warnings, sigma,
             Array.Empty<ExcelParseError>(), null);
