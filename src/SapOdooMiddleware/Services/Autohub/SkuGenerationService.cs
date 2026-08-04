@@ -20,7 +20,14 @@ public interface ISkuGenerationService
 public sealed class SkuGenerationService : ISkuGenerationService
 {
     private readonly ISkuCounterRepository _counters;
-    public SkuGenerationService(ISkuCounterRepository counters) => _counters = counters;
+    private readonly ISapSkuCounterRefreshService? _refresh;
+
+    // _refresh is optional so unit tests can construct with just the counter repo; DI always supplies it.
+    public SkuGenerationService(ISkuCounterRepository counters, ISapSkuCounterRefreshService? refresh = null)
+    {
+        _counters = counters;
+        _refresh = refresh;
+    }
 
     /// <summary>
     /// Canonical SAP prefix corrections. The SAP convention for MINI is the 4-character "MINI", not
@@ -40,7 +47,18 @@ public sealed class SkuGenerationService : ISkuGenerationService
             throw new ArgumentException("SKU prefix is required.", nameof(prefix));
 
         var canonical = Canonicalize(prefix);
-        var next = await _counters.IncrementAsync(canonical, ct);
+        long next;
+        try
+        {
+            next = await _counters.IncrementAsync(canonical, ct);
+        }
+        catch (InvalidOperationException) when (_refresh is not null)
+        {
+            // Prefix not seeded (e.g. the generic 'GEN' fallback on first use) — seed it from the live
+            // SAP MAX, then retry once. If the seed still fails, the retry rethrows the same clear error.
+            await _refresh.EnsureSeededAsync(canonical, ct);
+            next = await _counters.IncrementAsync(canonical, ct);
+        }
         return $"{canonical}{next}";
     }
 

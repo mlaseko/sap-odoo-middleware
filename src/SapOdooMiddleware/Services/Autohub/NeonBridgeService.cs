@@ -49,6 +49,13 @@ public interface INeonBridgeService
     Task<DonorDetail?> GetDonorDetailAsync(string articleNumber, string? supplierName, CancellationToken ct);
 
     /// <summary>
+    /// The SAP <c>item_code</c> already assigned to a <c>(article_number, supplier_name)</c> — the
+    /// duplicate-create guard. Considers only rows whose <c>item_code</c> is populated (an actual created
+    /// SAP item), so a not-yet-created enrichment mirror row never counts. Null if no created item exists.
+    /// </summary>
+    Task<string?> FindItemCodeByArticleSupplierAsync(string articleNumber, string? supplierName, CancellationToken ct);
+
+    /// <summary>
     /// Cross-supplier create-new: mint a NEW own-identity oitm row for the freshly-created SAP item (under
     /// our supplier), copying the donor's canonical OEM + OEM cross-references so future invoices auto-match
     /// it — WITHOUT touching the donor. Returns the new oitm id, or null if the donor row was not found.
@@ -141,6 +148,26 @@ public sealed class NeonBridgeService : INeonBridgeService
         cmd.Parameters.AddWithValue("sup", (object?)supplierName ?? DBNull.Value);
         var res = await cmd.ExecuteScalarAsync(ct);
         return res is null or DBNull ? null : Convert.ToInt64(res);
+    }
+
+    public async Task<string?> FindItemCodeByArticleSupplierAsync(string articleNumber, string? supplierName, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        const string sql = """
+            SELECT item_code FROM oitm
+            WHERE lower(btrim(article_number)) = lower(btrim(@art))
+              AND (@sup IS NULL OR lower(btrim(supplier_name)) = lower(btrim(@sup)))
+              AND item_code IS NOT NULL AND btrim(item_code) <> ''
+            ORDER BY id
+            LIMIT 1;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("art", articleNumber);
+        cmd.Parameters.AddWithValue("sup", (object?)supplierName ?? DBNull.Value);
+        var res = await cmd.ExecuteScalarAsync(ct);
+        return res is null or DBNull ? null : (string)res;
     }
 
     public async Task<DonorDetail?> GetDonorDetailAsync(string articleNumber, string? supplierName, CancellationToken ct)

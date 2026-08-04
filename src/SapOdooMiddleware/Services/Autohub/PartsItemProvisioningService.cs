@@ -82,6 +82,18 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         if (string.IsNullOrWhiteSpace(currency))
             return await Fail(line.Id, "Document currency is unknown; cannot convert cost.", ct);
 
+        // Idempotency guard: if a SAP item already exists for this (supplier, article), match it instead of
+        // minting a duplicate. Protects against a re-upload / re-run of the same invoice, and against two
+        // lines for the same part in one batch (the first mirrors to oitm, the second matches it).
+        if (await FindExistingItemCodeAsync(article!, line.Brand, ct) is { } existingCode)
+        {
+            _logger.LogInformation(
+                "Line {LineId}: SAP item {Code} already exists for {Article}/{Supplier}; matching instead of creating a duplicate.",
+                line.Id, existingCode, article, line.Brand);
+            await _review.SetReviewStatusAsync(line.Id, "matched", existingCode, ct);
+            return new PartsProvisioningOutcome("created", existingCode, null);
+        }
+
         var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
 
         // Prefer the enrichment persisted at review time (what the operator saw/confirmed); only
@@ -266,6 +278,16 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         if (manual.ItemsGroupCode <= 0)
             return await Fail(line.Id, "A SAP item group is required for manual creation.", ct);
 
+        // Same duplicate-create guard as ProvisionAsync.
+        if (await FindExistingItemCodeAsync(article!, line.Brand, ct) is { } existingCode)
+        {
+            _logger.LogInformation(
+                "Manual create: line {LineId}: SAP item {Code} already exists for {Article}/{Supplier}; matching instead of creating a duplicate.",
+                line.Id, existingCode, article, line.Brand);
+            await _review.SetReviewStatusAsync(line.Id, "matched", existingCode, ct);
+            return new PartsProvisioningOutcome("created", existingCode, null);
+        }
+
         var prefix = string.IsNullOrWhiteSpace(manual.SkuPrefix) ? "GEN" : manual.SkuPrefix.Trim();
         var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
 
@@ -398,6 +420,15 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             }
         }
     }
+
+    /// <summary>
+    /// The SAP ItemCode of an already-created item for this (supplier, article), or null if none exists.
+    /// The duplicate-create guard: an own-identity oitm row carries a populated item_code only once its SAP
+    /// item was created, so this fires on a re-run but not on the first create (item_code still NULL then).
+    /// </summary>
+    private async Task<string?> FindExistingItemCodeAsync(string article, string? brand, CancellationToken ct) =>
+        await _bridge.FindItemCodeByArticleSupplierAsync(
+            article, string.IsNullOrWhiteSpace(brand) ? null : brand, ct);
 
     private async Task<PartsProvisioningOutcome> Fail(Guid lineId, string error, CancellationToken ct)
     {
