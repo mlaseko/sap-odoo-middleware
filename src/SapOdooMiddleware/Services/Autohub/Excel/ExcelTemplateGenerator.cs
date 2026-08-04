@@ -79,6 +79,12 @@ public sealed class ExcelTemplateGenerator
             cell.Style.Fill.BackgroundColor = HeaderFill;
             cell.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
         }
+
+        // Article + OEM columns are IDENTIFIERS, not quantities — force Text so a purely-numeric value
+        // (e.g. 11031844101) is stored as text, keeping any leading zeros and its exact form. The parser
+        // also handles Number-typed cells, but this stops the problem at the source.
+        ws.Column(ExcelTemplateSchema.ColSku).Style.NumberFormat.Format = "@";
+        ws.Column(ExcelTemplateSchema.ColOem).Style.NumberFormat.Format = "@";
     }
 
     private static void BuildExampleRow(IXLWorksheet ws)

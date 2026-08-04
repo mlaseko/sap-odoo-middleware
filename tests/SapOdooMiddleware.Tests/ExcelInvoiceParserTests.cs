@@ -72,6 +72,18 @@ public class ExcelInvoiceParserTests
     }
 
     [Fact]
+    public void NumericArticleNumber_IsReadNotDropped()
+    {
+        // Excel stores a purely-numeric article (e.g. vika 11031844101) as a Number cell. ClosedXML's
+        // GetString() returns "" for Number cells, which used to silently drop the article → null.
+        using var s = Valid(ws => ws.Cell(ExcelTemplateSchema.FirstDataRow, ExcelTemplateSchema.ColSku).Value = 11031844101L);
+        var res = Parser.Parse(s);
+
+        Assert.True(res.Ok);
+        Assert.Equal("11031844101", Assert.Single(res.Document!.Lines).Line.SupplierArticleNumber);
+    }
+
+    [Fact]
     public void RenamedHeader_IsHardError()
     {
         using var s = Valid(ws => ws.Cell(ExcelTemplateSchema.HeaderRow, ExcelTemplateSchema.ColSku).Value = "SKU");
