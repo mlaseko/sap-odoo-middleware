@@ -20,6 +20,11 @@ public sealed class LineValidator : ILineValidator
     // A value is treated as a clean integer when it sits within this distance of the nearest whole number.
     private const decimal IntegerTolerance = 0.01m;
 
+    // Pure-digit SKUs shorter than this are treated as an invoice 'No.'/quantity column bleeding across;
+    // longer ones are legitimate numeric catalogue articles (e.g. a VIKA/DPA number like 11031844101).
+    // Real row numbers are ≤4 digits and are already nulled by the sku_too_short (<5) check above.
+    private const int MinNumericSkuLength = 7;
+
     public LineValidationResult Validate(PartsInvoiceLine line)
     {
         var issues = new List<LineValidationIssue>();
@@ -35,9 +40,11 @@ public sealed class LineValidator : ILineValidator
                 issues.Add(new("SupplierArticleNumber", "sku_too_short"));
                 sku = null;
             }
-            else if (sku.All(char.IsDigit))
+            else if (sku.All(char.IsDigit) && sku.Length < MinNumericSkuLength)
             {
-                // Pure digits in the SKU column is almost always the invoice 'No.' column bleeding across.
+                // A SHORT pure-digit value is almost always the invoice 'No.'/quantity column bleeding across.
+                // A LONG pure-digit value is a legitimate numeric article (VIKA/DPA catalogue numbers are
+                // 10-11 digits, e.g. 11031844101) and must be kept, so it can Tier-2 match its existing item.
                 issues.Add(new("SupplierArticleNumber", "sku_pure_digits_row_number_bleed"));
                 sku = null;
             }

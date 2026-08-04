@@ -35,11 +35,22 @@ public class LineValidatorTests
     }
 
     [Fact]
-    public void PureDigitSku_IsNulled_RowNumberBleed()
+    public void ShortPureDigitSku_IsNulled_RowNumberBleed()
     {
-        var r = V.Validate(Line(sku: "185"));
+        // 5-6 digit all-digits value (passes sku_too_short) → treated as a 'No.'/quantity bleed.
+        var r = V.Validate(Line(sku: "18542"));
         Assert.Null(r.Line.SupplierArticleNumber);
         Assert.True(Has(r, "sku_pure_digits_row_number_bleed"));
+    }
+
+    [Fact]
+    public void LongNumericSku_IsKept_LegitimateArticle()
+    {
+        // VIKA/DPA catalogue numbers are purely numeric and long — they must NOT be dropped, so they can
+        // Tier-2 match their existing oitm item instead of being re-created as duplicates.
+        var r = V.Validate(Line(sku: "11031844101"));
+        Assert.Equal("11031844101", r.Line.SupplierArticleNumber);
+        Assert.False(Has(r, "sku_pure_digits_row_number_bleed"));
     }
 
     [Fact]
