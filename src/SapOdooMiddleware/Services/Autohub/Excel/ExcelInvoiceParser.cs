@@ -160,9 +160,25 @@ public sealed class ExcelInvoiceParser
 
     private static IXLCell MetaCell(IXLWorksheet ws, int row) => ws.Cell(row, ExcelTemplateSchema.MetaValueCol);
 
-    private static string? MetaText(IXLWorksheet ws, int row) => NullIfBlank(MetaCell(ws, row).GetString());
+    private static string? MetaText(IXLWorksheet ws, int row) => NullIfBlank(CellString(MetaCell(ws, row)));
 
-    private static string? CellText(IXLWorksheet ws, int row, int col) => NullIfBlank(ws.Cell(row, col).GetString());
+    private static string? CellText(IXLWorksheet ws, int row, int col) => NullIfBlank(CellString(ws.Cell(row, col)));
+
+    /// <summary>
+    /// Read a cell as text. ClosedXML's <c>GetString()</c> returns "" for a <b>Number</b>-typed cell, which
+    /// silently drops purely-numeric identifiers — e.g. a numeric SupplierArticleNumber like 11031844101 that
+    /// Excel stored as a number rather than text. So render a numeric cell as a plain integer string
+    /// (identifiers have no decimals / thousands separators / scientific notation), falling back to
+    /// <c>GetString()</c> for text, dates and everything else.
+    /// </summary>
+    private static string CellString(IXLCell cell)
+    {
+        if (cell.DataType == XLDataType.Number && cell.TryGetValue(out double d) && !double.IsNaN(d) && !double.IsInfinity(d))
+            return d == Math.Floor(d)
+                ? ((long)d).ToString(CultureInfo.InvariantCulture)   // integral identifier → "11031844101"
+                : d.ToString(CultureInfo.InvariantCulture);           // non-integral (rare) → invariant decimal
+        return cell.GetString();
+    }
 
     private static string? NullIfBlank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
