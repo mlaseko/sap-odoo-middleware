@@ -22,6 +22,13 @@ public interface ISapSkuCounterRefreshService
     /// Returns per-prefix old/new plus a count of items above the ceiling (for operator review).
     /// </summary>
     Task<IReadOnlyList<SkuRefreshResult>> RefreshAllAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Ensure a single prefix exists in <c>sku_counters</c>, seeding it from the live SAP MAX when missing,
+    /// so a fallback prefix (e.g. the generic <c>GEN</c>) can never block a bulk-create. No-op when the
+    /// prefix already exists or SAP is unreachable/misconfigured.
+    /// </summary>
+    Task EnsureSeededAsync(string prefix, CancellationToken ct);
 }
 
 /// <summary>
@@ -116,6 +123,62 @@ public sealed class SapSkuCounterRefreshService : ISapSkuCounterRefreshService
         }
 
         return results;
+    }
+
+    public async Task EnsureSeededAsync(string prefix, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(prefix)) return;
+        if (!_companies.Companies.TryGetValue(CompanyContext.AutohubKey, out var cfg)) return;
+        if (cfg.SapB1 is null || string.IsNullOrWhiteSpace(cfg.SapB1.Server) || string.IsNullOrWhiteSpace(cfg.SapB1.CompanyDb)
+            || !cfg.SapB1.DbServerType.Contains("MSSQL", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("SKU auto-seed: Autohub SAP is not configured/MSSQL; cannot seed prefix {Prefix}.", prefix);
+            return;
+        }
+
+        var neonConn = cfg.Neon.ConnectionString;
+        if (await PrefixExistsAsync(neonConn, prefix, ct)) return;   // already seeded — nothing to do
+
+        long sapMax;
+        try
+        {
+            await using var sap = new SqlConnection(BuildSapConnectionString(cfg.SapB1));
+            await sap.OpenAsync(ct);
+            sapMax = await QuerySapMaxFilteredAsync(sap, prefix, maxAllowed: null, ct);   // MAX of existing prefix items
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SKU auto-seed: SAP MAX query failed for prefix {Prefix}; not seeding.", prefix);
+            return;
+        }
+
+        await SeedCounterAsync(neonConn, prefix, sapMax, ct);
+        _logger.LogInformation("SKU auto-seed: seeded prefix {Prefix} at CurrentValue={Value} (from SAP MAX).", prefix, sapMax);
+    }
+
+    private static async Task<bool> PrefixExistsAsync(string neonConn, string prefix, CancellationToken ct)
+    {
+        const string sql = """SELECT 1 FROM sku_counters WHERE "Prefix" = @prefix LIMIT 1;""";
+        await using var conn = new NpgsqlConnection(neonConn);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("prefix", prefix);
+        return await cmd.ExecuteScalarAsync(ct) is not null;
+    }
+
+    private static async Task SeedCounterAsync(string neonConn, string prefix, long sapMax, CancellationToken ct)
+    {
+        const string sql = """
+            INSERT INTO sku_counters ("Prefix", "CurrentValue", "MaxAllowed", "LastUpdated")
+            VALUES (@prefix, @value, NULL, NOW())
+            ON CONFLICT ("Prefix") DO NOTHING;
+            """;
+        await using var conn = new NpgsqlConnection(neonConn);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("prefix", prefix);
+        cmd.Parameters.AddWithValue("value", sapMax);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     private static string BuildSapConnectionString(SapB1Settings sap) =>
