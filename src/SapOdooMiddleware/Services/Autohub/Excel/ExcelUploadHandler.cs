@@ -123,6 +123,27 @@ public sealed class ExcelUploadHandler
         var sanitisedLines = sanitised.Select(s => s.Line).ToList();
         var (validationStatus, validationNotes) = _docValidator.Validate(sanitisedLines, doc.Header, doc.Header.TotalAmount);
 
+        // Article-coverage sanity check. A high share of lines with no supplier article usually signals a
+        // parse problem (e.g. numeric articles Excel stored as numbers) — those lines can only match by OEM,
+        // so existing items may be re-created as duplicates. Surface it on the document so the operator
+        // notices before bulk-create, rather than discovering the duplicates afterwards.
+        const decimal lowArticleCoveragePct = 40m;
+        var missingArticle = sanitisedLines.Count(l => string.IsNullOrWhiteSpace(l.SupplierArticleNumber));
+        string? articleCoverageNote = null;
+        if (sanitisedLines.Count > 0)
+        {
+            var missingPct = missingArticle * 100m / sanitisedLines.Count;
+            if (missingArticle > 0 && missingPct >= lowArticleCoveragePct)
+            {
+                articleCoverageNote =
+                    $"⚠ {missingArticle} of {sanitisedLines.Count} lines ({missingPct:N0}%) have no supplier article number — " +
+                    "these can only match by OEM, so existing items may be re-created. Check the article column.";
+                _logger.LogWarning(
+                    "Autohub Excel import {File}: low article coverage — {Missing}/{Total} lines have no supplier article.",
+                    file.FileName, missingArticle, sanitisedLines.Count);
+            }
+        }
+
         var sumLineTotals = sanitisedLines.Sum(l => l.LineTotalForeign ?? 0m);
         var total = doc.Header.TotalAmount;
         var deltaPct = total is { } tt && tt != 0m ? Math.Abs(sumLineTotals - tt) / Math.Abs(tt) * 100m : 0m;
@@ -166,7 +187,7 @@ public sealed class ExcelUploadHandler
             lines = doc.Lines.Select(l => new { row = l.ExcelRow, line = l.Line, explicitPromotional = l.ExplicitPromotional }),
         });
 
-        var errorMessage = BuildErrorMessage(validationNotes, warnings);
+        var errorMessage = BuildErrorMessage(validationNotes, warnings, articleCoverageNote);
         var headerUpdate = new PartsHeaderUpdate(
             doc.Header.SupplierName, doc.Header.InvoiceNumber,
             ParseIsoDate(doc.Header.InvoiceDate), doc.Header.Currency, doc.Header.TotalAmount);
@@ -180,9 +201,10 @@ public sealed class ExcelUploadHandler
             Array.Empty<ExcelParseError>(), null);
     }
 
-    private static string? BuildErrorMessage(string? validationNotes, IReadOnlyList<ExcelLineWarning> warnings)
+    private static string? BuildErrorMessage(string? validationNotes, IReadOnlyList<ExcelLineWarning> warnings, string? articleCoverageNote = null)
     {
         var msgs = new List<string>();
+        if (!string.IsNullOrWhiteSpace(articleCoverageNote)) msgs.Add(articleCoverageNote!);
         if (!string.IsNullOrWhiteSpace(validationNotes)) msgs.Add(validationNotes!);
         if (warnings.Count > 0)
         {
