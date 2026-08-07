@@ -28,6 +28,13 @@ public sealed record EnrichmentResponse
     [JsonPropertyName("noise_filtered_tokens")] public List<string>?      NoiseFilteredTokens { get; init; }
     /// <summary>DGX candidate-scoring block (bridge borrows): selection verdict + ranked alternatives for the operator swap UI.</summary>
     [JsonPropertyName("audit")]                 public EnrichmentAudit?   Audit               { get; init; }
+    /// <summary>
+    /// DGX manufacturer-resolution block — present (with resolved:false + candidates) when DGX could not
+    /// confidently pick the marque and the operator must choose. Typed so Part 2 can consume candidates
+    /// directly; it already round-tripped through <see cref="Extra"/> (JsonExtensionData), so nothing was
+    /// lost before — this upgrades raw preservation to strongly-typed access.
+    /// </summary>
+    [JsonPropertyName("manufacturer_resolution")] public ManufacturerResolution? ManufacturerResolution { get; init; }
     /// <summary>Preserve any other DGX fields verbatim through the deserialize→reserialize round-trip into EnrichmentPayloadJson (future-proofing).</summary>
     [JsonExtensionData]                         public Dictionary<string, JsonElement>? Extra { get; init; }
 
@@ -95,6 +102,32 @@ public sealed record DonorCandidate
     [JsonPropertyName("crossref_count")]    public long?    CrossrefCount   { get; init; }
     /// <summary>True for the candidate that was actually borrowed.</summary>
     [JsonPropertyName("is_default")]        public bool     IsDefault       { get; init; }
+}
+
+/// <summary>
+/// DGX manufacturer-resolution block. <see cref="Resolved"/> is false when the marque could not be
+/// auto-resolved and the operator must pick from <see cref="Candidates"/> — which are rendered in the order
+/// received (the order IS the ranking). The invoice brand is a marque SET prior, so several candidates
+/// (VAG first) are normal.
+/// </summary>
+public sealed record ManufacturerResolution
+{
+    [JsonPropertyName("resolved")]   public bool                        Resolved   { get; init; }
+    [JsonPropertyName("candidates")] public List<ManufacturerCandidate>? Candidates { get; init; }
+}
+
+/// <summary>
+/// One operator-selectable marque option. <see cref="Share"/> is the per-candidate evidence share and may
+/// be 0.0 for a set-derived candidate that still carries meaningful <see cref="Evidence"/> text — such
+/// candidates are real options and must NOT be hidden. <see cref="Evidence"/> may mark an out-of-set vote
+/// with "(OUTSIDE)".
+/// </summary>
+public sealed record ManufacturerCandidate
+{
+    [JsonPropertyName("code")]     public string?  Code     { get; init; }
+    [JsonPropertyName("label")]    public string?  Label    { get; init; }
+    [JsonPropertyName("share")]    public decimal? Share    { get; init; }
+    [JsonPropertyName("evidence")] public string?  Evidence { get; init; }
 }
 
 public sealed record EnrichmentItemData
