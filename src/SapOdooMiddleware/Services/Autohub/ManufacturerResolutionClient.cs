@@ -9,14 +9,21 @@ namespace SapOdooMiddleware.Services.Autohub;
 // ---- DGX /resolve_manufacturer contract (manufacturer-resolution Part 2) ----
 
 /// <summary>
-/// Operator's marque choice for a held line. DGX uses the line identity to re-rank the stored OEM
-/// cross-references under the chosen marque (a Neon-side effect) and returns the marque package.
+/// Operator's marque choice for a held line. Identity for the stored ruling is
+/// <c>(supplier_article_number, lower(brand))</c> — <c>brand</c> MUST be the staging line's Brand
+/// ("vika", "Borsehung"), the same value the S1 lookup uses at enrichment time; sending anything else
+/// (e.g. the TecDoc manufacturer, which this system confusingly calls "supplier_name") files the ruling
+/// under a mismatched key and identical parts re-queue next month. <c>oem_numbers</c> is what DGX
+/// re-ranks (v1 re-ranks what the caller sends; it does not fetch stored cross-refs) — pass the line's
+/// OEMs to get them back marque-ordered in <c>ranked_oems</c>, or omit for a valid resolution with an
+/// empty ranking. <c>decided_by</c> is the audit identity (defaults "operator" server-side).
 /// </summary>
 public sealed record ResolveManufacturerRequest(
     [property: JsonPropertyName("supplier_article_number")] string? SupplierArticleNumber,
-    [property: JsonPropertyName("supplier_name")]           string? SupplierName,
-    [property: JsonPropertyName("neon_oitm_id")]            long?   NeonOitmId,
-    [property: JsonPropertyName("manufacturer")]            string  Manufacturer);
+    [property: JsonPropertyName("brand")]                   string? Brand,
+    [property: JsonPropertyName("manufacturer")]            string  Manufacturer,
+    [property: JsonPropertyName("decided_by")]              string? DecidedBy,
+    [property: JsonPropertyName("oem_numbers")]             IReadOnlyList<string>? OemNumbers);
 
 /// <summary>
 /// The marque package DGX returns for a resolved line (v1 shape). The name/enrichment payload were
@@ -108,13 +115,16 @@ public static class ManufacturerResolutionMerge
             SuggestedSkuPrefix  = pkg.Prefix,
             SuggestedItmsGrpCod = pkg.SuggestedItmsGrpCod ?? item.SuggestedItmsGrpCod,
         };
+        // Rewrite the block to its resolved shape (method=operator + prefix); reason/candidates are
+        // unresolved-only, so they're cleared now that a human decided.
         return held with
         {
             ItemData = mergedItem,
             ManufacturerResolution = new ManufacturerResolution
             {
-                Resolved   = true,
-                Candidates = held.ManufacturerResolution?.Candidates,
+                Resolved = true,
+                Method   = "operator",
+                Prefix   = pkg.Prefix,
             },
         };
     }

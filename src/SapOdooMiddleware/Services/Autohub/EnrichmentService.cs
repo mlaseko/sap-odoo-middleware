@@ -105,15 +105,28 @@ public sealed record DonorCandidate
 }
 
 /// <summary>
-/// DGX manufacturer-resolution block. <see cref="Resolved"/> is false when the marque could not be
-/// auto-resolved and the operator must pick from <see cref="Candidates"/> — which are rendered in the order
-/// received (the order IS the ranking). The invoice brand is a marque SET prior, so several candidates
-/// (VAG first) are normal.
+/// DGX manufacturer-resolution block. Full field census as emitted today (all typed so nothing drops on the
+/// store-on-line round-trip, plus <see cref="Extra"/> as a safety net for any future field):
+///   <c>resolved</c> (always); <c>evidence</c> (always, human-readable — "(OUTSIDE)" lives here as text, not a status);
+///   unresolved-only: <c>reason</c> ("insufficient_signals" | "signal_conflict") + <c>candidates</c> (rendered in the
+///   order received — the order IS the ranking; VAG-first set priors are normal);
+///   resolved-only: <c>method</c> ("voted:…" | "learned" | "operator") + <c>prefix</c>;
+///   shadow-only: <c>shadow</c> + <c>legacy_prefix</c> (disappear at the MRES_SHADOW=0 flip).
+/// <see cref="Reason"/> drives the UI hold-label: insufficient_signals → "not enough evidence — pick from the
+/// brand's family"; signal_conflict → "evidence disagrees — the candidates show the dispute".
 /// </summary>
 public sealed record ManufacturerResolution
 {
-    [JsonPropertyName("resolved")]   public bool                        Resolved   { get; init; }
-    [JsonPropertyName("candidates")] public List<ManufacturerCandidate>? Candidates { get; init; }
+    [JsonPropertyName("resolved")]      public bool                         Resolved      { get; init; }
+    [JsonPropertyName("reason")]        public string?                      Reason        { get; init; }
+    [JsonPropertyName("candidates")]    public List<ManufacturerCandidate>? Candidates    { get; init; }
+    [JsonPropertyName("method")]        public string?                      Method        { get; init; }
+    [JsonPropertyName("prefix")]        public string?                      Prefix        { get; init; }
+    [JsonPropertyName("evidence")]      public string?                      Evidence      { get; init; }
+    [JsonPropertyName("shadow")]        public bool?                        Shadow        { get; init; }
+    [JsonPropertyName("legacy_prefix")] public string?                      LegacyPrefix  { get; init; }
+    /// <summary>Safety net so any future block-level field survives the router's re-serialization.</summary>
+    [JsonExtensionData]                 public Dictionary<string, JsonElement>? Extra     { get; init; }
 }
 
 /// <summary>

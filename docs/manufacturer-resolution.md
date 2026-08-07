@@ -65,12 +65,26 @@ When the ladder cannot resolve (or rungs conflict), the line is **held** for a h
    > **Preservation note:** `EnrichmentResultRouter` stores the enrichment by re-serializing the typed `EnrichmentResponse` — but that record already carries `[JsonExtensionData] Extra`, added to round-trip unknown DGX fields, so `manufacturer_resolution` **already survives storage** (nothing is lost). The typed `ManufacturerResolution` property (shipped separately, PR #265) upgrades that raw round-trip to strongly-typed access for the UI — a convenience, not a data-loss fix.
 3. **Hold** — middleware routes the line to `needs_manufacturer` (not creatable) and stores the candidates for the UI. No code assigned.
 4. **Operator resolves** — the review UI shows a marque dropdown (candidates first, full list as fallback); operator picks e.g. `VAG`.
-5. **Finalize** — middleware calls the dedicated **`POST /resolve_manufacturer`** with the line identity + `manufacturer: "VAG"`. DGX **re-ranks the stored OEM cross-references under that marque** (the ItemName OEM chain is marque-ranked — the `Take(5)` ordering changes with the marque) and returns the **marque package** (v1 shape as live):
+5. **Finalize** — middleware calls the dedicated **`POST /resolve_manufacturer`**. Request shape (confirmed against the shipped endpoint):
+   ```json
+   { "supplier_article_number": "B13403",   // required (422 if missing)
+     "brand": "Borsehung",                  // ⚠ "brand", NOT "supplier_name" — the staging line Brand,
+                                             //   which is what the ruling is keyed on: (article, lower(brand))
+     "manufacturer": "MB",                  // required; validated against the authority list (422 if unknown)
+     "decided_by": "operator-name",         // audit identity (defaults "operator")
+     "oem_numbers": ["A2711801510"] }        // what DGX re-ranks — v1 re-ranks what we send, it does NOT
+                                             //   fetch stored cross-refs; omit → valid resolution, empty ranking
+   ```
+   > **`brand`, not `supplier_name`** is load-bearing: the ruling is keyed on `(supplier_article_number, lower(brand))` and the enrichment-time lookup uses the line Brand, so the value sent must be the line Brand ("vika"/"Borsehung") — `supplier_name` in this system confusingly means the TecDoc manufacturer. `neon_oitm_id` is ignored by v1 (identity is `(article, brand)`; re-rank identity is the `oem_numbers` sent).
+
+   DGX returns the **marque package** (v1 shape as live), re-ranking the OEMs we passed:
    ```json
    { "prefix": "VAG", "suggested_itms_grp_cod": 137, "vehicle_category": "…",
      "ranked_oems": ["…"], "ruling_stored": true }
    ```
-   The name and enrichment payload were **already delivered by the original `/enrich_item`** response the middleware holds on the line, so the resolve client **merges the marque package into the held enrichment** — it does NOT expect a second full `item_data`. Idempotent — callable twice safely. (If a future version prefers returning full `item_data` from this endpoint, that's buildable; v1 is the merge shape.)
+   The name and enrichment payload were **already delivered by the original `/enrich_item`** response the middleware holds on the line, so the resolve client **merges the marque package into the held enrichment** (prefix + item group) — it does NOT expect a second full `item_data`. Idempotent — callable twice safely.
+
+   **Block field census** (`manufacturer_resolution`, all typed + `[JsonExtensionData]` safety net): `resolved` (always); `evidence` (always, human-readable — `(OUTSIDE)` is evidence text, not a status); unresolved-only `reason` (`insufficient_signals` | `signal_conflict`) + `candidates`; resolved-only `method` (`voted:…` | `learned` | `operator`) + `prefix`; shadow-only `shadow` + `legacy_prefix`. `reason` drives the dropdown's hold-label.
 6. **Create** — the line returns to a normal creatable state; bulk-create proceeds with the resolved prefix. `GEN` is never used.
 
 ---

@@ -324,11 +324,21 @@ public class AutohubDocumentsController : ControllerBase
                 new { error = $"Stored enrichment could not be read: {ex.Message}" });
         }
 
+        // OEMs DGX re-ranks under the marque: the line's own OEMs plus the enrichment's, de-duped. v1 re-ranks
+        // exactly what we send (it does not fetch stored cross-refs), so passing the fuller chain gets it back
+        // marque-ordered. Brand is the staging line Brand — the key the stored ruling is filed under.
+        var oems = (row.OemNumbers ?? new List<string>())
+            .Concat(held.ItemData?.FilteredOems ?? Enumerable.Empty<string>())
+            .Where(o => !string.IsNullOrWhiteSpace(o))
+            .Select(o => o.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         ManufacturerPackage pkg;
         try
         {
             pkg = await _manufacturer.ResolveAsync(
-                new ResolveManufacturerRequest(row.SupplierArticleNumber, row.Brand, held.NeonOitmId, code!), ct);
+                new ResolveManufacturerRequest(row.SupplierArticleNumber, row.Brand, code!, CurrentUser, oems), ct);
         }
         catch (Exception ex)
         {
