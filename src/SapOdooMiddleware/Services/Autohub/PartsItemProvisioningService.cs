@@ -144,9 +144,14 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         if (data.SuggestedItmsGrpCod is not { } groupCode)
             return await Fail(line.Id, "Enrichment did not return a SAP item group (suggested_itms_grp_cod).", ct);
         // The SKU prefix IS the manufacturer/marque code (BM, MB, VAG, …) and DGX is its sole authority. If
-        // DGX could not resolve the marque it returns no prefix — hold the line for an operator to assign it,
-        // NEVER silently fall back to a generic 'GEN' bucket (that produced mis-prefixed items + duplicates).
-        if (string.IsNullOrWhiteSpace(data.SuggestedSkuPrefix))
+        // DGX could not resolve the marque, hold the line for an operator to assign it — NEVER mint a generic
+        // 'GEN' item (that produced mis-prefixed items + duplicates).
+        //
+        // "Unresolved" arrives two ways: a null/blank prefix, OR the literal "GEN" sent through the normal
+        // path while DGX runs MRES_SHADOW=1 (legacy behaviour preserved by design). BOTH must hold — a "GEN"
+        // string is a real value that would otherwise sail past a null-only check and be minted. Operator
+        // candidates ride on the response's manufacturer_resolution block (captured for the UI in Part 2).
+        if (IsUnresolvedPrefix(data.SuggestedSkuPrefix))
             return await Held(line.Id, "needs_manufacturer",
                 "Manufacturer could not be resolved automatically — assign the marque so a SAP item code can be generated.", ct);
         var prefix = data.SuggestedSkuPrefix!.Trim();
@@ -307,10 +312,12 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             return new PartsProvisioningOutcome("created", existingCode, null);
         }
 
-        // The operator explicitly supplies the prefix here; a blank one is an input error, not a 'GEN'
-        // fallback. (GEN is no longer machine-reachable on either path.)
+        // The operator explicitly supplies the prefix here; a blank or 'GEN' value is an input error, not a
+        // fallback. GEN is not an assignable marque on either path.
         if (string.IsNullOrWhiteSpace(manual.SkuPrefix))
             return await Fail(line.Id, "A SKU prefix (manufacturer/marque code) is required for manual creation.", ct);
+        if (IsUnresolvedPrefix(manual.SkuPrefix))
+            return await Fail(line.Id, "'GEN' is not an assignable prefix — choose a real manufacturer/marque code.", ct);
         var prefix = manual.SkuPrefix.Trim();
         var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
 
@@ -461,6 +468,14 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
     private async Task<string?> FindExistingItemCodeAsync(string article, string? brand, CancellationToken ct) =>
         await _bridge.FindItemCodeByArticleSupplierAsync(
             article, string.IsNullOrWhiteSpace(brand) ? null : brand, ct);
+
+    /// <summary>
+    /// A SKU prefix that must NOT be minted: blank, or the legacy generic <c>GEN</c> marker DGX still emits
+    /// for a GEN-class line while <c>MRES_SHADOW=1</c>. Either means "marque unresolved" — the line is held,
+    /// never coded. Case- and whitespace-insensitive so "gen"/" GEN " are caught too.
+    /// </summary>
+    internal static bool IsUnresolvedPrefix(string? prefix) =>
+        string.IsNullOrWhiteSpace(prefix) || string.Equals(prefix.Trim(), "GEN", StringComparison.OrdinalIgnoreCase);
 
     private async Task<PartsProvisioningOutcome> Fail(Guid lineId, string error, CancellationToken ct)
     {

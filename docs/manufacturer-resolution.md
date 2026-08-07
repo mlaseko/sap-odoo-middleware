@@ -9,7 +9,7 @@
 
 SAP item codes are structured with a leading **manufacturer / marque code** — `BM` = BMW, `MB` = Mercedes-Benz, `VAG` = VW/Audi/Porsche, etc. That prefix *is* the marque, and DGX (which owns the internal code structure) derives it during enrichment.
 
-When DGX could **not** determine the marque it returned `suggested_sku_prefix = "GEN"` (or empty), and the middleware minted the item under a generic `GEN` counter. On the Germax invoice `INS20260804` (VIKA / DPA / Borsehung, one supplier) this produced 88 mis-prefixed `GEN##` items, and — because the `GEN` counter was unseeded and then hand-seeded and re-run before the dedup guard existed — a batch of duplicates. All 88 were deleted from Neon and re-created cleanly.
+When DGX could **not** determine the marque it returned `suggested_sku_prefix = "GEN"` (or empty), and the middleware minted the item under a generic `GEN` counter. On the Germax invoice `INS20260804` (VIKA / DPA / Borsehung, one supplier) this produced 88 mis-prefixed `GEN##` items, and — because the `GEN` counter was unseeded and then hand-seeded and re-run before the dedup guard existed — a batch of duplicates. **The 88 `GEN##` `oitm` rows were deleted from Neon; re-creation is pending** (the SAP-side `GEN` items still exist, and the staging lines in document `643d4876…` still carry `CreatedSku LIKE 'GEN%'` with `WrittenToSapAt` set — see the re-run choreography below).
 
 **Root cause:** a *machine* was allowed to pick a fallback marque bucket. The fix removes that ability and replaces it with a human decision at exactly the point where the machine is genuinely unsure.
 
@@ -43,15 +43,22 @@ When the ladder cannot resolve (or rungs conflict), the line is **held** for a h
      "resolved": false,
      "candidates": [
        { "code": "VAG", "label": "VW/Audi/Porsche", "share": 0.96,
-         "reason": "fitment: 214 of 223 vehicles; oemBrand 5/5" },
-       { "code": "BM",  "label": "BMW", "share": 0.03, "reason": "fitment: 7 of 223" }
+         "evidence": "fitment: 214 of 223 vehicles; oemBrand 5/5" },
+       { "code": "BM",  "label": "BMW", "share": 0.03, "evidence": "fitment: 7 of 223" }
      ]
    }
    ```
-   `suggested_sku_prefix` left null. `candidates` may be empty (operator picks from the full list). The **evidence line** (`share`, `reason`) is what makes the operator’s click fast and auditable — they confirm a case, not research one — and it gives the confidence threshold a measurable dial.
+   **Candidate shape is pinned: `{ code, label, share, evidence }` per candidate** — `evidence` (not `reason`) to match the resolved-case block; `share` is per-candidate (a pending ~15-line DGX module patch emits per-candidate shares — as shipped today DGX sends `{code,label}` with a single top-level evidence string). `suggested_sku_prefix` left null. `candidates` may be empty (operator picks from the full list). The **evidence line** (`share`, `evidence`) is what makes the operator’s click fast and auditable — they confirm a case, not research one — and it gives the confidence threshold a measurable dial.
+
+   > **Preservation note:** `EnrichmentResultRouter` stores the enrichment by re-serializing the *typed* `EnrichmentResponse`, so `manufacturer_resolution` is dropped today (not in the type). Part 2 must preserve it — either a typed `ManufacturerResolution` property (once the shape above is in code) or `[JsonExtensionData]`. Part 0’s hold does not depend on it.
 3. **Hold** — middleware routes the line to `needs_manufacturer` (not creatable) and stores the candidates for the UI. No code assigned.
 4. **Operator resolves** — the review UI shows a marque dropdown (candidates first, full list as fallback); operator picks e.g. `VAG`.
-5. **Finalize** — middleware calls the dedicated **`POST /resolve_manufacturer`** with the line identity + `manufacturer: "VAG"`. DGX **re-ranks the stored OEM cross-references under that marque** (the ItemName OEM chain is marque-ranked — the `Take(5)` ordering changes with the marque) and returns a complete `item_data` with a real `suggested_sku_prefix`, item group, and name. Idempotent — callable twice safely.
+5. **Finalize** — middleware calls the dedicated **`POST /resolve_manufacturer`** with the line identity + `manufacturer: "VAG"`. DGX **re-ranks the stored OEM cross-references under that marque** (the ItemName OEM chain is marque-ranked — the `Take(5)` ordering changes with the marque) and returns the **marque package** (v1 shape as live):
+   ```json
+   { "prefix": "VAG", "suggested_itms_grp_cod": 137, "vehicle_category": "…",
+     "ranked_oems": ["…"], "ruling_stored": true }
+   ```
+   The name and enrichment payload were **already delivered by the original `/enrich_item`** response the middleware holds on the line, so the resolve client **merges the marque package into the held enrichment** — it does NOT expect a second full `item_data`. Idempotent — callable twice safely. (If a future version prefers returning full `item_data` from this endpoint, that's buildable; v1 is the merge shape.)
 6. **Create** — the line returns to a normal creatable state; bulk-create proceeds with the resolved prefix. `GEN` is never used.
 
 ---
@@ -107,6 +114,7 @@ Middleware **feeds** the learning table via the resolve call; it does not own it
 These are ours regardless of how the DGX contract lands, and they make `GEN` unreachable today:
 
 - **`GEN` default removed** at both mint sites (`PartsItemProvisioningService`, auto + manual). Auto path with no resolved prefix → `needs_manufacturer` hold; manual path with a blank prefix → validation error (the operator must supply it).
+- **Shadow-mode guard (belt-now, braces-at-the-gate).** DGX currently runs `MRES_SHADOW=1`, which for a GEN-class line sends `suggested_sku_prefix: "GEN"` as a *real value through the normal path* — not a null hitting a removed default. So the middleware treats an incoming prefix that is null/blank **or equal to `"GEN"`** (case-insensitive) as unresolved → `needs_manufacturer`. With this, the merge is safe with shadow still on: known marques flow unchanged, GEN-class lines queue, zero wrong mints. The later `MRES_SHADOW=0` flip (gated on the labeling pass) merely changes which brain picks the prefix for the resolvable majority. Manual create likewise rejects `"GEN"` as non-assignable.
 - **Counter cap enforced** (`SkuCounterRepository.IncrementAsync`): increments only while `CurrentValue < MaxAllowed` (NULL = uncapped); at the ceiling it throws the new **`SkuCounterExhaustedException`** — a *distinct* type so it is never mistaken for the not-seeded (seed-and-retry) case.
 - **Two hold states** `needs_manufacturer` / `prefix_exhausted`: persisted via `RecordHeldAsync` (status + operator-facing reason), shown with their own review pills, tallied apart from failures in bulk-create, excluded from the bulk-create retry set, and blocking document completion.
 
@@ -114,9 +122,19 @@ These are ours regardless of how the DGX contract lands, and they make `GEN` unr
 
 ---
 
+## Re-run choreography for `INS20260804` (to settle before the acceptance run)
+
+The 88 `GEN##` `oitm` rows are deleted, but re-creation has **not** happened, so the baseline is intact. Rather than delete-the-document-and-re-upload, the cheaper, cleaner path re-runs provisioning on the **existing** staging lines (which still hold the parsed data):
+
+1. **SAP:** remove/deactivate the 88 `GEN##` items (they were written via DI API; keep them frozen so they can't be reused).
+2. **Staging:** reset the lines in document `643d4876…` keyed on `CreatedSku LIKE 'GEN%'` back to a creatable state (clear `CreatedSku` / `WrittenToSapAt` / `GeneratedItemCode`, `ReviewStatus` → `create_new`).
+3. **Provisioning:** one re-run (NOT a fresh Excel upload). With this PR's holds, resolvable lines mint real codes and GEN-class lines hold as `needs_manufacturer`; with the dedup guard (already merged) any duplicate pairs collapse to one SKU each.
+
+> **Open question for whoever ran the deletion:** confirm re-creation truly hasn't happened (staging reads showed `WrittenToSapAt` set on all 91 and `CreatedSku` still `GEN%`), and confirm the SAP-side `GEN` items are being deactivated — so we take the reset-and-re-run path above rather than a fresh upload.
+
 ## Acceptance test (go-live gate)
 
-Re-run document `643d4876…` / `INS20260804`:
+Re-run document `643d4876…` / `INS20260804` (via the choreography above):
 
 - **zero** machine-assigned `GEN`
 - every auto-resolved line carries the **correct** marque (against a one-time human label — *not* merely non-GEN)

@@ -58,4 +58,30 @@ public class PartsItemNameTests
         Assert.Equal(oem + "/GL0911/GJ0085", name);
         Assert.True(name.Length <= 200);
     }
+
+    // ---- marque-prefix resolution guard (never mint GEN) ----
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("GEN")]
+    [InlineData("gen")]
+    [InlineData("  Gen  ")]
+    public void UnresolvedPrefix_TreatsBlankAndGenAsUnresolved(string? prefix)
+    {
+        // The critical guard: a literal "GEN" (what DGX sends while MRES_SHADOW=1) must be treated the same
+        // as a missing prefix — held, never minted — not sail past a null-only check.
+        Assert.True(PartsItemProvisioningService.IsUnresolvedPrefix(prefix));
+    }
+
+    [Theory]
+    [InlineData("BM")]
+    [InlineData("MB")]
+    [InlineData("VAG")]
+    [InlineData("GENUINE")]   // a real prefix that merely starts with GEN is NOT the generic marker
+    public void UnresolvedPrefix_AllowsRealMarques(string prefix)
+    {
+        Assert.False(PartsItemProvisioningService.IsUnresolvedPrefix(prefix));
+    }
 }
