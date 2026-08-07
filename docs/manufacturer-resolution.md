@@ -65,12 +65,26 @@ When the ladder cannot resolve (or rungs conflict), the line is **held** for a h
    > **Preservation note:** `EnrichmentResultRouter` stores the enrichment by re-serializing the typed `EnrichmentResponse` — but that record already carries `[JsonExtensionData] Extra`, added to round-trip unknown DGX fields, so `manufacturer_resolution` **already survives storage** (nothing is lost). The typed `ManufacturerResolution` property (shipped separately, PR #265) upgrades that raw round-trip to strongly-typed access for the UI — a convenience, not a data-loss fix.
 3. **Hold** — middleware routes the line to `needs_manufacturer` (not creatable) and stores the candidates for the UI. No code assigned.
 4. **Operator resolves** — the review UI shows a marque dropdown (candidates first, full list as fallback); operator picks e.g. `VAG`.
-5. **Finalize** — middleware calls the dedicated **`POST /resolve_manufacturer`** with the line identity + `manufacturer: "VAG"`. DGX **re-ranks the stored OEM cross-references under that marque** (the ItemName OEM chain is marque-ranked — the `Take(5)` ordering changes with the marque) and returns the **marque package** (v1 shape as live):
+5. **Finalize** — middleware calls the dedicated **`POST /resolve_manufacturer`**. Request shape (confirmed against the shipped endpoint):
+   ```json
+   { "supplier_article_number": "B13403",   // required (422 if missing)
+     "brand": "Borsehung",                  // ⚠ "brand", NOT "supplier_name" — the staging line Brand,
+                                             //   which is what the ruling is keyed on: (article, lower(brand))
+     "manufacturer": "MB",                  // required; validated against the authority list (422 if unknown)
+     "decided_by": "operator-name",         // audit identity (defaults "operator")
+     "oem_numbers": ["A2711801510"] }        // what DGX re-ranks — v1 re-ranks what we send, it does NOT
+                                             //   fetch stored cross-refs; omit → valid resolution, empty ranking
+   ```
+   > **`brand`, not `supplier_name`** is load-bearing: the ruling is keyed on `(supplier_article_number, lower(brand))` and the enrichment-time lookup uses the line Brand, so the value sent must be the line Brand ("vika"/"Borsehung") — `supplier_name` in this system confusingly means the TecDoc manufacturer. `neon_oitm_id` is ignored by v1 (identity is `(article, brand)`; re-rank identity is the `oem_numbers` sent).
+
+   DGX returns the **marque package** (v1 shape as live), re-ranking the OEMs we passed:
    ```json
    { "prefix": "VAG", "suggested_itms_grp_cod": 137, "vehicle_category": "…",
      "ranked_oems": ["…"], "ruling_stored": true }
    ```
-   The name and enrichment payload were **already delivered by the original `/enrich_item`** response the middleware holds on the line, so the resolve client **merges the marque package into the held enrichment** — it does NOT expect a second full `item_data`. Idempotent — callable twice safely. (If a future version prefers returning full `item_data` from this endpoint, that's buildable; v1 is the merge shape.)
+   The name and enrichment payload were **already delivered by the original `/enrich_item`** response the middleware holds on the line, so the resolve client **merges the marque package into the held enrichment** (prefix + item group) — it does NOT expect a second full `item_data`. Idempotent — callable twice safely.
+
+   **Block field census** (`manufacturer_resolution`, all typed + `[JsonExtensionData]` safety net): `resolved` (always); `evidence` (always, human-readable — `(OUTSIDE)` is evidence text, not a status); unresolved-only `reason` (`insufficient_signals` | `signal_conflict`) + `candidates`; resolved-only `method` (`voted:…` | `learned` | `operator`) + `prefix`; shadow-only `shadow` + `legacy_prefix`. `reason` drives the dropdown's hold-label.
 6. **Create** — the line returns to a normal creatable state; bulk-create proceeds with the resolved prefix. `GEN` is never used.
 
 ---
@@ -133,8 +147,11 @@ These are ours regardless of how the DGX contract lands, and they make `GEN` unr
 **Still to build (Part 2 — contract now pinned & stable, no type changes beyond the pinned shape):**
 
 - **DONE (PR #265) — typed `manufacturer_resolution`.** ~~Gating item~~: the block was *not* being dropped — `EnrichmentResponse` already round-trips unknown DGX fields via `[JsonExtensionData] Extra`, so candidates already survived storage. PR #265 adds the typed `ManufacturerResolution` property (`{ resolved, candidates:[{code,label,share,evidence}] }`) for clean strongly-typed access (the field now binds to the property instead of `Extra`). No data-loss gate; the rest of Part 2 was never blocked on it.
-- Capture + render candidates per the **three rendering rules** above (order-preserving, show `share:0.0`, 3–4 candidates with evidence lines).
-- The `manufacturer_override` request field, the `/resolve_manufacturer` client + per-line resolve endpoint (merge marque package into held enrichment), and the marque dropdown.
+- **DONE — `/resolve_manufacturer` backend handshake.** `ManufacturerResolutionClient` (`POST /resolve_manufacturer`) + the per-line endpoint `POST …/lines/{lineId}/resolve-manufacturer`: validates the `needs_manufacturer` hold, calls DGX with the chosen marque + line identity, merges the returned package (prefix + item group) into the held enrichment via `ManufacturerResolutionMerge.Apply`, and moves the line to `create_new`. `GEN` is rejected as a choice. The resolved prefix passes the no-machine-`GEN` guard, so bulk-create mints under it.
+- **DONE — the review-UI marque picker** (Part 2b): the held line's detail panel leads with an "Assign manufacturer (marque)" picker, rendering the stored candidates per the **three rendering rules** (order preserved, `share:0.0` shown, evidence line per candidate); the `reason` drives the hold-label (`insufficient_signals` / `signal_conflict`). "Resolve marque" calls the endpoint, then flips the row to `create_new`. Empty-candidates falls back to a free-typed marque code.
+- Optional: the `manufacturer_override` convenience field on `/enrich_item`.
+
+**Operator flow (end to end, works in shadow today):** upload → extract → enrich (stores candidates) → bulk-create holds GEN-class lines as `needs_manufacturer` → operator expands a held line, picks the marque, Resolve → line goes `create_new` → bulk-create again mints under the real prefix. No `GEN`, nothing wrong able to mint.
 
 Part 1 (the marque-set ladder), `GET /manufacturers`, the learning table, and the threshold are DGX-side.
 

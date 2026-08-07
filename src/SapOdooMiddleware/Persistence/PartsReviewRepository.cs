@@ -86,6 +86,12 @@ public interface IPartsReviewRepository
     Task RecordCreateFailedAsync(Guid lineId, string error, CancellationToken ct);
 
     /// <summary>
+    /// Finalize a <c>needs_manufacturer</c> hold: replace the line's enrichment payload with the marque-merged
+    /// one and move it to <c>create_new</c> so bulk-create mints under the resolved prefix. Clears any hold reason.
+    /// </summary>
+    Task ApplyManufacturerResolutionAsync(Guid lineId, string payloadJson, CancellationToken ct);
+
+    /// <summary>
     /// Park a line in a hold state (e.g. <c>needs_manufacturer</c>, <c>prefix_exhausted</c>) with an
     /// operator-facing reason. Unlike <see cref="RecordCreateFailedAsync"/> this is not an error state —
     /// the line is waiting on a human decision and is excluded from the bulk-create retry set.
@@ -514,6 +520,22 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         await using var conn = await OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("err", error.Length > 1000 ? error[..1000] : error);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task ApplyManufacturerResolutionAsync(Guid lineId, string payloadJson, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "EnrichmentPayloadJson" = @payload,
+                "ReviewStatus"          = 'create_new',
+                "CreateErrorMessage"    = NULL
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.Add(new NpgsqlParameter("payload", NpgsqlDbType.Jsonb) { Value = payloadJson });
         cmd.Parameters.AddWithValue("id", lineId);
         await cmd.ExecuteNonQueryAsync(ct);
     }

@@ -64,4 +64,83 @@ public class ManufacturerResolutionTests
         // The typed property owns the field now — it must not ALSO leak into the extension-data bag.
         Assert.False(round.Extra?.ContainsKey("manufacturer_resolution") ?? false);
     }
+
+    // ---- ManufacturerResolutionMerge (folding the resolved marque package into the held enrichment) ----
+
+    [Fact]
+    public void Merge_AppliesPrefixAndGroup_RewritesBlockToResolvedOperatorShape()
+    {
+        var held = JsonSerializer.Deserialize<EnrichmentResponse>(DgxJson, ReadOpts)!;
+        var pkg = new ManufacturerPackage { Prefix = "MB", SuggestedItmsGrpCod = 137, RulingStored = true };
+
+        var merged = ManufacturerResolutionMerge.Apply(held, pkg);
+
+        Assert.Equal("MB", merged.ItemData!.SuggestedSkuPrefix);
+        Assert.Equal(137, merged.ItemData.SuggestedItmsGrpCod);
+        Assert.Equal("Water Pump", merged.ItemData.PrimaryDescription);   // untouched item_data survives the `with`
+        // Block rewritten to its resolved shape: resolved + method/prefix; reason/candidates are unresolved-only.
+        Assert.True(merged.ManufacturerResolution!.Resolved);
+        Assert.Equal("operator", merged.ManufacturerResolution.Method);
+        Assert.Equal("MB", merged.ManufacturerResolution.Prefix);
+        Assert.Null(merged.ManufacturerResolution.Candidates);
+        // The input is unchanged (Apply returns a new record).
+        Assert.Null(held.ItemData!.SuggestedSkuPrefix);
+        Assert.False(held.ManufacturerResolution!.Resolved);
+    }
+
+    [Fact]
+    public void Merge_KeepsExistingGroup_WhenPackageOmitsIt()
+    {
+        var held = JsonSerializer.Deserialize<EnrichmentResponse>(
+            """{ "item_data": { "suggested_itms_grp_cod": 140 } }""", ReadOpts)!;
+        var pkg = new ManufacturerPackage { Prefix = "VAG", SuggestedItmsGrpCod = null };
+
+        var merged = ManufacturerResolutionMerge.Apply(held, pkg);
+
+        Assert.Equal("VAG", merged.ItemData!.SuggestedSkuPrefix);
+        Assert.Equal(140, merged.ItemData.SuggestedItmsGrpCod);   // package omitted the group → keep existing
+    }
+
+    [Fact]
+    public void Merge_ResolvedPrefix_PassesTheNoMachineGenGuard()
+    {
+        // A resolved line must mint on the next bulk-create — i.e. its prefix is no longer "unresolved".
+        var held = JsonSerializer.Deserialize<EnrichmentResponse>(DgxJson, ReadOpts)!;
+        var merged = ManufacturerResolutionMerge.Apply(held, new ManufacturerPackage { Prefix = "BM" });
+        Assert.False(PartsItemProvisioningService.IsUnresolvedPrefix(merged.ItemData!.SuggestedSkuPrefix));
+    }
+
+    // ---- full block field census (all eight fields typed; nothing lands in the extension bag) ----
+
+    [Fact]
+    public void ManufacturerResolution_UnresolvedBlock_TypesReasonEvidenceShadowFields()
+    {
+        const string json = """
+        { "manufacturer_resolution": {
+            "resolved": false, "reason": "signal_conflict", "evidence": "MB structure (OUTSIDE)",
+            "shadow": true, "legacy_prefix": "GEN",
+            "candidates": [ { "code": "MB", "label": "Mercedes-Benz", "share": 0.7, "evidence": "fitment" } ]
+        } }
+        """;
+        var mr = JsonSerializer.Deserialize<EnrichmentResponse>(json, ReadOpts)!.ManufacturerResolution!;
+
+        Assert.False(mr.Resolved);
+        Assert.Equal("signal_conflict", mr.Reason);
+        Assert.Equal("MB structure (OUTSIDE)", mr.Evidence);
+        Assert.True(mr.Shadow);
+        Assert.Equal("GEN", mr.LegacyPrefix);
+        Assert.Single(mr.Candidates!);
+        Assert.Null(mr.Extra);   // every emitted field is typed → nothing drops into the extension bag
+    }
+
+    [Fact]
+    public void ManufacturerResolution_ResolvedBlock_BindsMethodAndPrefix()
+    {
+        const string json = """{ "manufacturer_resolution": { "resolved": true, "method": "learned", "prefix": "VAG", "evidence": "prior ruling" } }""";
+        var mr = JsonSerializer.Deserialize<EnrichmentResponse>(json, ReadOpts)!.ManufacturerResolution!;
+
+        Assert.True(mr.Resolved);
+        Assert.Equal("learned", mr.Method);
+        Assert.Equal("VAG", mr.Prefix);
+    }
 }
