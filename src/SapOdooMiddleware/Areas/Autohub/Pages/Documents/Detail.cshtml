@@ -43,6 +43,23 @@
     .line-detail .ld-desc-wrap input { width: 100%; }
     .line-detail .ld-enrichment { font-size: 13px; }
     .line-detail .ld-enrichment h3 { font-size: 14px; margin: 4px 0; color: var(--text-strong); }
+    /* Marque picker (needs_manufacturer hold) */
+    .ld-marque { border: 1px solid var(--primary, #7c6cff); background: rgba(124,108,255,.07); border-radius: 10px; padding: 12px 14px; margin: 0 0 14px; }
+    .ld-marque h3 { margin: 0 0 4px; }
+    .mq-reason { color: var(--muted); font-size: 12px; margin: 0 0 10px; }
+    .mq-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+    .mq-opt { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: baseline; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+    .mq-opt:has(> input:checked) { border-color: var(--primary, #7c6cff); background: rgba(124,108,255,.10); box-shadow: 0 0 0 1px var(--primary, #7c6cff) inset; }
+    .mq-opt > input { grid-row: 1 / span 2; align-self: center; accent-color: var(--primary, #7c6cff); }
+    .mq-head { display: flex; gap: 8px; align-items: baseline; }
+    .mq-code { font-weight: 700; font-family: ui-monospace, monospace; }
+    .mq-label { color: var(--text); }
+    .mq-share { font-size: 11px; color: var(--muted); }
+    .mq-ev { grid-column: 2; font-size: 12px; color: var(--muted); }
+    .mq-free { display: block; margin-bottom: 12px; }
+    .mq-free input { margin-left: 8px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev); color: var(--text); }
+    .mq-actions { display: flex; gap: 10px; align-items: center; }
+    .mq-status { font-size: 12px; color: var(--muted); }
     .line-detail .kv th { text-align: left; color: var(--muted); padding-right: 10px; font-weight: 600; vertical-align: top; }
     .ld-saved { color: var(--success); }
     .ld-borrowed { color: var(--warning); }
@@ -302,7 +319,8 @@
         matched: ['pill-green', 'matched'], create_new: ['pill-blue', 'create new'],
         skip: ['pill-grey', 'skip'], pending: ['pill-yellow', 'pending'],
         created: ['pill-green', 'created'], create_failed: ['pill-red', 'create failed'],
-        needs_manual: ['pill-orange', 'needs manual'], needs_confirmation: ['pill-purple', 'confirm match']
+        needs_manual: ['pill-orange', 'needs manual'], needs_confirmation: ['pill-purple', 'confirm match'],
+        needs_manufacturer: ['pill-orange', 'assign marque'], prefix_exhausted: ['pill-red', 'SKU range full']
     };
 
     const API_KEY = document.querySelector('meta[name="api-key"]')?.content || '';
@@ -419,12 +437,49 @@
     });
 
     // ---- enrichment package -> readable summary ----
+    // Marque picker for a held (needs_manufacturer) line: DGX couldn't resolve the manufacturer, so the
+    // operator picks it. Candidates render in the order DGX sent (the order IS the ranking); zero-share
+    // set-derived candidates are shown, not hidden; the reason drives the hold-label.
+    function marquePickerHtml(mr) {
+        const cands = mr.candidates || [];
+        const reason = mr.reason === 'signal_conflict'
+            ? 'Evidence disagrees — the candidates below show the dispute. Pick the correct marque.'
+            : 'Not enough evidence to auto-resolve — pick from the brand\'s family (most likely first).';
+        let html = '<div class="ld-marque">';
+        html += '<h3>Assign manufacturer (marque)</h3>';
+        html += '<p class="mq-reason">' + esc(reason) + '</p>';
+        if (cands.length) {
+            html += '<div class="mq-list">';
+            cands.forEach((c, i) => {
+                const share = (typeof c.share === 'number' && c.share > 0)
+                    ? '<span class="mq-share">' + Math.round(c.share * 100) + '%</span>' : '';
+                html += '<label class="mq-opt">' +
+                    '<input type="radio" name="mq" value="' + esc(c.code) + '"' + (i === 0 ? ' checked' : '') + '>' +
+                    '<span class="mq-head"><span class="mq-code">' + esc(c.code) + '</span>' +
+                    '<span class="mq-label">' + esc(c.label) + '</span>' + share + '</span>' +
+                    (c.evidence ? '<span class="mq-ev">' + esc(c.evidence) + '</span>' : '') +
+                    '</label>';
+            });
+            html += '</div>';
+        } else {
+            // No candidates (rare) — fall back to a free-typed marque code.
+            html += '<label class="mq-free">Marque code <input type="text" class="mq-freetext" placeholder="e.g. VAG"></label>';
+        }
+        html += '<div class="mq-actions"><button type="button" class="btn btn-sm mq-resolve">Resolve marque</button>' +
+                '<span class="mq-status"></span></div>';
+        html += '</div>';
+        return html;
+    }
+
     function enrichmentHtml(enr) {
         const d = enr.item_data || {};
         const bf = enr.borrowed_from;
         const noData = !enr.item_data;
+        // A held line leads with the marque picker — that's the one action the operator must take here.
+        const mr = enr.manufacturer_resolution;
+        let head = (mr && mr.resolved === false) ? marquePickerHtml(mr) : '';
         // Enrichment already happened during extraction — show its outcome, don't imply it's pending.
-        let html = '<h3>Item enrichment</h3>';
+        let html = head + '<h3>Item enrichment</h3>';
         html += '<p>Enrichment: <strong>' + (noData ? 'no catalog match found' : 'done') + '</strong>' +
                 ' &middot; source <strong>' + esc(enr.enrichment_source || enr.source || 'unknown') + '</strong>';
         // Only a genuine cross-supplier borrow needs sign-off before creating.
@@ -742,10 +797,36 @@
             if (r.status === 204) { box.innerHTML = '<em>No enrichment data (matched directly or not yet enriched).</em>'; return; }
             if (!r.ok) throw new Error('HTTP ' + r.status);
             box.innerHTML = enrichmentHtml(await r.json());
+            wireMarqueResolve(lineId, box);
         } catch (e) {
             box.dataset.loaded = 'false';
             box.innerHTML = '<em class="ld-error">Could not load enrichment: ' + esc(e.message) + '</em>';
         }
+    }
+
+    // Resolve a held line's marque: POST the operator's choice, then flip the row to its new status.
+    function wireMarqueResolve(lineId, box) {
+        const btn = box.querySelector('.mq-resolve');
+        if (!btn) return;
+        btn.addEventListener('click', async () => {
+            const picked = box.querySelector('input[name="mq"]:checked') || box.querySelector('.mq-freetext');
+            const code = picked ? (picked.value || '').trim() : '';
+            const status = box.querySelector('.mq-status');
+            if (!code) { if (status) status.textContent = 'Pick a marque first.'; return; }
+            btn.disabled = true;
+            if (status) status.textContent = 'Resolving…';
+            try {
+                const updated = await api('POST', '/lines/' + lineId + '/resolve-manufacturer', { manufacturerCode: code });
+                const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
+                if (row) setRowPill(row, (updated && updated.reviewStatus) || 'create_new');
+                const marque = box.querySelector('.ld-marque');
+                if (marque) marque.remove();
+                refreshSummary();
+            } catch (e) {
+                if (status) status.textContent = 'Failed: ' + e.message;
+                btn.disabled = false;
+            }
+        });
     }
 
     document.querySelectorAll('#lines-table .ld-save').forEach(btn => {
