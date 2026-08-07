@@ -84,6 +84,13 @@ public interface IPartsReviewRepository
 
     Task RecordCreatedAsync(Guid lineId, string itemCode, decimal pl01, decimal pl03, decimal pl05, decimal forexRate, CancellationToken ct);
     Task RecordCreateFailedAsync(Guid lineId, string error, CancellationToken ct);
+
+    /// <summary>
+    /// Park a line in a hold state (e.g. <c>needs_manufacturer</c>, <c>prefix_exhausted</c>) with an
+    /// operator-facing reason. Unlike <see cref="RecordCreateFailedAsync"/> this is not an error state —
+    /// the line is waiting on a human decision and is excluded from the bulk-create retry set.
+    /// </summary>
+    Task RecordHeldAsync(Guid lineId, string status, string reason, CancellationToken ct);
     Task<IReadOnlyList<PartsProvisioningLine>> ListCreateNewAsync(Guid documentId, CancellationToken ct);
 
     /// <summary>Pending, non-promotional, not-yet-enriched lines on extracted documents (background worker).</summary>
@@ -507,6 +514,23 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         await using var conn = await OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("err", error.Length > 1000 ? error[..1000] : error);
+        cmd.Parameters.AddWithValue("id", lineId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task RecordHeldAsync(Guid lineId, string status, string reason, CancellationToken ct)
+    {
+        // Sets the hold ReviewStatus (needs_manufacturer / prefix_exhausted) and surfaces the reason in the
+        // same CreateErrorMessage column the UI already renders, WITHOUT touching MatchedItemCode.
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "ReviewStatus" = @status, "CreateErrorMessage" = @reason
+            WHERE "Id" = @id;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("status", status);
+        cmd.Parameters.AddWithValue("reason", reason.Length > 1000 ? reason[..1000] : reason);
         cmd.Parameters.AddWithValue("id", lineId);
         await cmd.ExecuteNonQueryAsync(ct);
     }

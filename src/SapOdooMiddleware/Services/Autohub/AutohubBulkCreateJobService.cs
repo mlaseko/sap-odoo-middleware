@@ -15,6 +15,7 @@ public sealed class AutohubBulkCreateJob
     public int Attempted { get; set; }
     public int Created { get; set; }
     public int NeedsConfirmation { get; set; }
+    public int Held { get; set; }
     public int Failed { get; set; }
     public string? Error { get; set; }
     public IReadOnlyList<PartsBulkCreateFailure> Failures { get; set; } = Array.Empty<PartsBulkCreateFailure>();
@@ -74,13 +75,14 @@ public sealed class AutohubBulkCreateJobService
             job.Attempted = result.Attempted;
             job.Created = result.Created;
             job.NeedsConfirmation = result.NeedsConfirmation;
+            job.Held = result.Held;
             job.Failed = result.Failed;
             job.Failures = result.Failures;
             job.FinishedAt = DateTime.UtcNow;
             job.Status = "done";
             _logger.LogInformation(
-                "Autohub async bulk-create {JobId} ({Doc}) complete: created {Created}/{Attempted}, needsConfirmation {Needs}, failed {Failed}.",
-                job.JobId, job.DocumentId, result.Created, result.Attempted, result.NeedsConfirmation, result.Failed);
+                "Autohub async bulk-create {JobId} ({Doc}) complete: created {Created}/{Attempted}, needsConfirmation {Needs}, held {Held}, failed {Failed}.",
+                job.JobId, job.DocumentId, result.Created, result.Attempted, result.NeedsConfirmation, result.Held, result.Failed);
         }
         catch (Exception ex)
         {

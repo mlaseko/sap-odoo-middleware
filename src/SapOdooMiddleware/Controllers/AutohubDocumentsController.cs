@@ -704,6 +704,7 @@ public class AutohubDocumentsController : ControllerBase
             attempted = result.Attempted,
             created = result.Created,
             needsConfirmation = result.NeedsConfirmation,
+            held = result.Held,
             failed = result.Failed,
             failures = result.Failures.Select(f => new { lineId = f.LineId, articleNumber = f.ArticleNumber, error = f.Error })
         });
@@ -730,6 +731,7 @@ public class AutohubDocumentsController : ControllerBase
         {
             attempted = result.Attempted,
             created = result.Created,
+            held = result.Held,
             failed = result.Failed,
             failures = result.Failures.Select(f => new { lineId = f.LineId, articleNumber = f.ArticleNumber, error = f.Error })
         });
@@ -747,6 +749,7 @@ public class AutohubDocumentsController : ControllerBase
         var counts = await _review.GetStatusCountsAsync(documentId, ct);
         var blocking = counts.GetValueOrDefault("pending") + counts.GetValueOrDefault("create_failed")
             + counts.GetValueOrDefault("create_new") + counts.GetValueOrDefault("needs_manual")
+            + counts.GetValueOrDefault("needs_manufacturer") + counts.GetValueOrDefault("prefix_exhausted")
             + counts.GetValueOrDefault("needs_confirmation");
         if (blocking > 0)
             return Conflict(new { error = "All lines must be matched, created, or skipped before completing review.", counts });
@@ -768,6 +771,8 @@ public class AutohubDocumentsController : ControllerBase
             && counts.GetValueOrDefault("create_failed") == 0
             && counts.GetValueOrDefault("create_new") == 0
             && counts.GetValueOrDefault("needs_manual") == 0
+            && counts.GetValueOrDefault("needs_manufacturer") == 0
+            && counts.GetValueOrDefault("prefix_exhausted") == 0
             && counts.GetValueOrDefault("needs_confirmation") == 0;
 
         return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, awaitingEnrichment, canComplete, status = doc.Status });

@@ -36,7 +36,7 @@ public sealed class PartsItemCreationService
 
         var toCreate = await _review.ListCreateNewAsync(documentId, ct);
 
-        int created = 0, needsConfirmation = 0;
+        int created = 0, needsConfirmation = 0, held = 0;
         var failures = new List<PartsBulkCreateFailure>();
 
         foreach (var line in toCreate)
@@ -52,6 +52,10 @@ public sealed class PartsItemCreationService
                 {
                     case "created": created++; break;
                     case "needs_confirmation": needsConfirmation++; break;
+                    // Holds are waiting on an operator decision, NOT failures — the provisioning service has
+                    // already parked the line with its own status/reason; just tally them apart.
+                    case "needs_manufacturer":
+                    case "prefix_exhausted": held++; break;
                     default: failures.Add(new PartsBulkCreateFailure(line.Id, line.SupplierArticleNumber, outcome.Error ?? "failed")); break;
                 }
             }
@@ -73,10 +77,10 @@ public sealed class PartsItemCreationService
         }
 
         _logger.LogInformation(
-            "Autohub bulk-create for {Id}: attempted {Attempted}, created {Created}, needsConfirmation {Needs}, failed {Failed}.",
-            documentId, toCreate.Count, created, needsConfirmation, failures.Count);
+            "Autohub bulk-create for {Id}: attempted {Attempted}, created {Created}, needsConfirmation {Needs}, held {Held}, failed {Failed}.",
+            documentId, toCreate.Count, created, needsConfirmation, held, failures.Count);
 
-        return new PartsBulkCreateResult(toCreate.Count, created, needsConfirmation, failures.Count, failures);
+        return new PartsBulkCreateResult(toCreate.Count, created, needsConfirmation, held, failures.Count, failures);
     }
 
     /// <summary>
@@ -90,7 +94,7 @@ public sealed class PartsItemCreationService
         var doc = await _docs.GetByIdAsync(documentId, ct);
         var currency = doc?.Currency;
 
-        int created = 0;
+        int created = 0, held = 0;
         var failures = new List<PartsBulkCreateFailure>();
 
         foreach (var lineId in lineIds)
@@ -117,6 +121,7 @@ public sealed class PartsItemCreationService
 
                 var outcome = await _provisioning.ProvisionManualAsync(provLine, currency, manual, timeoutCts.Token);
                 if (outcome.Status == "created") created++;
+                else if (outcome.Status is "needs_manufacturer" or "prefix_exhausted") held++;
                 else failures.Add(new PartsBulkCreateFailure(lineId, row.SupplierArticleNumber, outcome.Error ?? "failed"));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -137,12 +142,12 @@ public sealed class PartsItemCreationService
         }
 
         _logger.LogInformation(
-            "Autohub manual bulk-create for {Id}: attempted {Attempted}, created {Created}, failed {Failed} (group {Group}, prefix {Prefix}).",
-            documentId, lineIds.Count, created, failures.Count, manual.ItemsGroupCode, manual.SkuPrefix);
+            "Autohub manual bulk-create for {Id}: attempted {Attempted}, created {Created}, held {Held}, failed {Failed} (group {Group}, prefix {Prefix}).",
+            documentId, lineIds.Count, created, held, failures.Count, manual.ItemsGroupCode, manual.SkuPrefix);
 
-        return new PartsBulkCreateResult(lineIds.Count, created, 0, failures.Count, failures);
+        return new PartsBulkCreateResult(lineIds.Count, created, 0, held, failures.Count, failures);
     }
 }
 
-public record PartsBulkCreateResult(int Attempted, int Created, int NeedsConfirmation, int Failed, List<PartsBulkCreateFailure> Failures);
+public record PartsBulkCreateResult(int Attempted, int Created, int NeedsConfirmation, int Held, int Failed, List<PartsBulkCreateFailure> Failures);
 public record PartsBulkCreateFailure(Guid LineId, string? ArticleNumber, string Error);

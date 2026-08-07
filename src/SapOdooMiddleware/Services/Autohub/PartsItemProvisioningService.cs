@@ -6,7 +6,11 @@ using SapOdooMiddleware.Services;
 
 namespace SapOdooMiddleware.Services.Autohub;
 
-/// <summary>Per-line provisioning outcome. Status ∈ {created, failed, needs_confirmation}.</summary>
+/// <summary>
+/// Per-line provisioning outcome. Status ∈ {created, failed, needs_confirmation, needs_manufacturer,
+/// prefix_exhausted}. The last two are HOLDS — not failures — awaiting an operator decision (assign the
+/// marque / extend the SKU range) before the line can be created.
+/// </summary>
 public sealed record PartsProvisioningOutcome(string Status, string? ItemCode, string? Error);
 
 /// <summary>
@@ -139,7 +143,18 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         var data = enr.ItemData;
         if (data.SuggestedItmsGrpCod is not { } groupCode)
             return await Fail(line.Id, "Enrichment did not return a SAP item group (suggested_itms_grp_cod).", ct);
-        var prefix = string.IsNullOrWhiteSpace(data.SuggestedSkuPrefix) ? "GEN" : data.SuggestedSkuPrefix!.Trim();
+        // The SKU prefix IS the manufacturer/marque code (BM, MB, VAG, …) and DGX is its sole authority. If
+        // DGX could not resolve the marque, hold the line for an operator to assign it — NEVER mint a generic
+        // 'GEN' item (that produced mis-prefixed items + duplicates).
+        //
+        // "Unresolved" arrives two ways: a null/blank prefix, OR the literal "GEN" sent through the normal
+        // path while DGX runs MRES_SHADOW=1 (legacy behaviour preserved by design). BOTH must hold — a "GEN"
+        // string is a real value that would otherwise sail past a null-only check and be minted. Operator
+        // candidates ride on the response's manufacturer_resolution block (captured for the UI in Part 2).
+        if (IsUnresolvedPrefix(data.SuggestedSkuPrefix))
+            return await Held(line.Id, "needs_manufacturer",
+                "Manufacturer could not be resolved automatically — assign the marque so a SAP item code can be generated.", ct);
+        var prefix = data.SuggestedSkuPrefix!.Trim();
 
         // Forex → landed cost (TZS), and the rate we used (for audit).
         decimal costTzs;
@@ -159,7 +174,16 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
 
         // Allocate the final ItemCode. NOTE: the counter is atomic but burns a number even if the
         // SAP write below fails — gaps in SAP item codes are acceptable; we never reuse/duplicate.
-        var itemCode = await _sku.GenerateAsync(prefix, ct);
+        // A counter at its MaxAllowed ceiling is a hold (operator extends the range), never a silent overrun.
+        string itemCode;
+        try
+        {
+            itemCode = await _sku.GenerateAsync(prefix, ct);
+        }
+        catch (SkuCounterExhaustedException ex)
+        {
+            return await Held(line.Id, "prefix_exhausted", ex.Message, ct);
+        }
         // ItemName carries the OEM cross-references: the line's invoice OEM(s) PLUS the donor's OEM
         // cross-references — reference_type='oem' ONLY, never aftermarket/IAM equivalents — up to five,
         // then the supplier article. The invoice usually lists a single OEM, so without these the item
@@ -288,7 +312,13 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             return new PartsProvisioningOutcome("created", existingCode, null);
         }
 
-        var prefix = string.IsNullOrWhiteSpace(manual.SkuPrefix) ? "GEN" : manual.SkuPrefix.Trim();
+        // The operator explicitly supplies the prefix here; a blank or 'GEN' value is an input error, not a
+        // fallback. GEN is not an assignable marque on either path.
+        if (string.IsNullOrWhiteSpace(manual.SkuPrefix))
+            return await Fail(line.Id, "A SKU prefix (manufacturer/marque code) is required for manual creation.", ct);
+        if (IsUnresolvedPrefix(manual.SkuPrefix))
+            return await Fail(line.Id, "'GEN' is not an assignable prefix — choose a real manufacturer/marque code.", ct);
+        var prefix = manual.SkuPrefix.Trim();
         var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
 
         decimal costTzs;
@@ -307,7 +337,16 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             return await Fail(line.Id, "Computed price-list 01 (cost) is zero — check the forex rate and pricing config before creating the SAP item.", ct);
 
         // Same atomic-counter caveat as ProvisionAsync: the number is burned even if the SAP write fails.
-        var itemCode = await _sku.GenerateAsync(prefix, ct);
+        // A counter at its MaxAllowed ceiling is a hold (operator extends the range), never a silent overrun.
+        string itemCode;
+        try
+        {
+            itemCode = await _sku.GenerateAsync(prefix, ct);
+        }
+        catch (SkuCounterExhaustedException ex)
+        {
+            return await Held(line.Id, "prefix_exhausted", ex.Message, ct);
+        }
         var altArticles = await _bridge.GetGermaxAlternateArticleNumbersAsync(article!, ct);
         var itemName = BuildItemName(filtered, article!, altArticles);
 
@@ -430,9 +469,29 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         await _bridge.FindItemCodeByArticleSupplierAsync(
             article, string.IsNullOrWhiteSpace(brand) ? null : brand, ct);
 
+    /// <summary>
+    /// A SKU prefix that must NOT be minted: blank, or the legacy generic <c>GEN</c> marker DGX still emits
+    /// for a GEN-class line while <c>MRES_SHADOW=1</c>. Either means "marque unresolved" — the line is held,
+    /// never coded. Case- and whitespace-insensitive so "gen"/" GEN " are caught too.
+    /// </summary>
+    internal static bool IsUnresolvedPrefix(string? prefix) =>
+        string.IsNullOrWhiteSpace(prefix) || string.Equals(prefix.Trim(), "GEN", StringComparison.OrdinalIgnoreCase);
+
     private async Task<PartsProvisioningOutcome> Fail(Guid lineId, string error, CancellationToken ct)
     {
         await _review.RecordCreateFailedAsync(lineId, error, ct);
         return new PartsProvisioningOutcome("failed", null, error);
+    }
+
+    /// <summary>
+    /// Park a line in a hold state (<c>needs_manufacturer</c> / <c>prefix_exhausted</c>) with an
+    /// operator-facing reason, WITHOUT recording it as a failure. A hold means "waiting on a human
+    /// decision", not "errored": it is excluded from the bulk-create retry set (ListCreateNewAsync) and
+    /// shown with its own review pill so the operator can resolve it and re-run.
+    /// </summary>
+    private async Task<PartsProvisioningOutcome> Held(Guid lineId, string status, string reason, CancellationToken ct)
+    {
+        await _review.RecordHeldAsync(lineId, status, reason, ct);
+        return new PartsProvisioningOutcome(status, null, reason);
     }
 }

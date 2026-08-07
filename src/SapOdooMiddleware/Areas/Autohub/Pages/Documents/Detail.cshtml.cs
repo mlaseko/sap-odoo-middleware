@@ -48,6 +48,8 @@ public class DetailModel : PageModel
         "skip"          => ("pill-grey", "skip"),
         "create_failed" => ("pill-red", "create failed"),
         "needs_manual"  => ("pill-orange", "needs manual"),
+        "needs_manufacturer" => ("pill-orange", "assign marque"),
+        "prefix_exhausted"   => ("pill-red", "SKU range full"),
         "needs_confirmation" => ("pill-purple", "confirm match"),
         _               => ("pill-yellow", "pending"),
     };

@@ -97,4 +97,22 @@ public class SkuGenerationServiceTests
         var svc = new SkuGenerationService(new UnseededThenSeededRepo(1));
         await Assert.ThrowsAsync<InvalidOperationException>(() => svc.GenerateAsync("GEN", CancellationToken.None));
     }
+
+    private sealed class ExhaustedRepo : ISkuCounterRepository
+    {
+        public Task<long> IncrementAsync(string prefix, CancellationToken ct) =>
+            throw new SkuCounterExhaustedException(prefix, 102500, 102500);
+    }
+
+    [Fact]
+    public async Task Generate_DoesNotSeed_AndRethrows_WhenCounterExhausted()
+    {
+        // A counter at its ceiling must NOT be mistaken for an unseeded prefix: the seed-and-retry path is
+        // skipped and the distinct exhaustion error propagates for the caller to hold the line on.
+        var refresh = new RecordingRefresh();
+        var svc = new SkuGenerationService(new ExhaustedRepo(), refresh);
+
+        await Assert.ThrowsAsync<SkuCounterExhaustedException>(() => svc.GenerateAsync("MB", CancellationToken.None));
+        Assert.Null(refresh.SeededPrefix);   // exhaustion is not a seeding case
+    }
 }
