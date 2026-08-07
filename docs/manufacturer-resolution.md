@@ -1,0 +1,125 @@
+# Manufacturer resolution for SAP item-code assignment
+
+**Status:** design agreed (DGX ↔ middleware); middleware Part 0 shipped (see “What ships in this PR”).
+**Owners:** DGX (auto-resolution + candidates + finalize endpoint + learning table); middleware (hold states, review UI, resolve call, counter cap).
+
+---
+
+## Problem
+
+SAP item codes are structured with a leading **manufacturer / marque code** — `BM` = BMW, `MB` = Mercedes-Benz, `VAG` = VW/Audi/Porsche, etc. That prefix *is* the marque, and DGX (which owns the internal code structure) derives it during enrichment.
+
+When DGX could **not** determine the marque it returned `suggested_sku_prefix = "GEN"` (or empty), and the middleware minted the item under a generic `GEN` counter. On the Germax invoice `INS20260804` (VIKA / DPA / Borsehung, one supplier) this produced 88 mis-prefixed `GEN##` items, and — because the `GEN` counter was unseeded and then hand-seeded and re-run before the dedup guard existed — a batch of duplicates. All 88 were deleted from Neon and re-created cleanly.
+
+**Root cause:** a *machine* was allowed to pick a fallback marque bucket. The fix removes that ability and replaces it with a human decision at exactly the point where the machine is genuinely unsure.
+
+---
+
+## The fix is two parts (order matters)
+
+### Part 1 — DGX climbs the resolution ladder it already has data for (primary)
+
+Before ever asking a human, DGX resolves the marque from evidence it already holds, as a **corroboration model** (not strict first-rung-wins):
+
+- matched article’s `oemBrand` majority
+- vehicle-fitment marque majority
+- OE-structure rule (the framework’s own digit rule — deterministic, derived from the part number)
+- invoice brand as corroboration
+
+Rungs **vote**. When they agree, auto-resolve. When the deterministic OE-structure rule and the statistical majorities **disagree**, that conflict is itself a genuine-ambiguity signal → drop to Part 2, regardless of how high any single share is. This is what earns “N of N *correct*” rather than “N of N *confident*.”
+
+> On batch `INS20260804` the ladder is expected to auto-resolve the vast majority with no human involvement. Without Part 1, the `needs_manufacturer` queue would serve the operator a dropdown click for parts a machine can read — and review fatigue is how review states die. Part 1 keeps the queue rare and worth attention.
+
+### Part 2 — Operator handshake (catches what the ladder genuinely can’t)
+
+When the ladder cannot resolve (or rungs conflict), the line is **held** for a human, who selects the marque from a controlled list; DGX then uses that selection to finalize the code. The operator supplies only the *marque*; DGX remains the sole authority for the *code structure*.
+
+**Flow**
+
+1. **Enrich** — middleware calls `/enrich_item` (unchanged trigger).
+2. **Unresolved signal** — instead of `suggested_sku_prefix = "GEN"`, DGX returns:
+   ```json
+   "manufacturer_resolution": {
+     "resolved": false,
+     "candidates": [
+       { "code": "VAG", "label": "VW/Audi/Porsche", "share": 0.96,
+         "reason": "fitment: 214 of 223 vehicles; oemBrand 5/5" },
+       { "code": "BM",  "label": "BMW", "share": 0.03, "reason": "fitment: 7 of 223" }
+     ]
+   }
+   ```
+   `suggested_sku_prefix` left null. `candidates` may be empty (operator picks from the full list). The **evidence line** (`share`, `reason`) is what makes the operator’s click fast and auditable — they confirm a case, not research one — and it gives the confidence threshold a measurable dial.
+3. **Hold** — middleware routes the line to `needs_manufacturer` (not creatable) and stores the candidates for the UI. No code assigned.
+4. **Operator resolves** — the review UI shows a marque dropdown (candidates first, full list as fallback); operator picks e.g. `VAG`.
+5. **Finalize** — middleware calls the dedicated **`POST /resolve_manufacturer`** with the line identity + `manufacturer: "VAG"`. DGX **re-ranks the stored OEM cross-references under that marque** (the ItemName OEM chain is marque-ranked — the `Take(5)` ordering changes with the marque) and returns a complete `item_data` with a real `suggested_sku_prefix`, item group, and name. Idempotent — callable twice safely.
+6. **Create** — the line returns to a normal creatable state; bulk-create proceeds with the resolved prefix. `GEN` is never used.
+
+---
+
+## Goal, sharpened
+
+**GEN is never machine-chosen.** Whether `GEN` remains an operator-*choosable* option for genuine multi-marque universals is a business ruling, not a fallback — and since the fleets are marque-organized, the default is that humans don’t pick it either. It is removed from every automatic path.
+
+---
+
+## Two design decisions (settled)
+
+**(a) DGX owns the authority list AND returns per-line ranked candidates.** `GET /manufacturers` is the single source of valid `{code,label}` pairs (the prefix-is-the-marque model lives in exactly one system, or the lists drift). Per-line candidates come ranked with evidence attached (see step 2). Middleware treats DGX as the source of valid codes.
+
+**(b) Dedicated `/resolve_manufacturer` endpoint — not a re-run of `/enrich_item`.** Re-running full enrichment risks nondeterminism (the donor landscape shifts between calls) and wastes work that already succeeded. More importantly, finalization is not just filling in a prefix: DGX must **re-rank the OEM chain under the chosen marque** before emitting `item_data`. A lightweight endpoint taking line identity + `manufacturer` and returning the complete re-ranked package — idempotent — is the right shape. `manufacturer_override` may also live on `/enrich_item` as a convenience, but the dedicated endpoint is the contract.
+
+---
+
+## Four additions written into the contract
+
+1. **Learning loop is v1, not later.** A curated rulings table `(SupplierArticleNumber, Brand) → marque, decided_by, decided_at`, consulted **before** the ladder, written on **every** operator resolution. One insert, one lookup; identical parts never queue twice. It is the marque analogue of the existing curated-override tables. **Seed it from history on day one** — every already-coded `oitm` row’s `item_code` prefix *is* a marque ruling, so `(article_number, supplier_name) → marque` derived from existing rows gives the loop the whole catalogue as ground truth immediately (and doubles as a consistency audit: history disagreeing with the ladder on a known part is a bug to see before go-live). Lives in DGX; middleware feeds it via the resolve call.
+
+2. **Counter-cap behavior is defined, not undefined.** When a `sku_counters` prefix reaches `MaxAllowed`, minting must **hold** (`prefix_exhausted`, operator extends the range), never silently overrun. (Verified gap: the middleware previously ignored `MaxAllowed` on the mint path — see Part 0.) Example live state: `MB` had ~937 codes left of its ceiling.
+
+3. **Freeze, don’t delete, the `GEN` counter row.** It is the audit trail of this incident; the middleware simply refuses to mint against it (achieved by removing the `GEN` default — `GEN` is never passed to the generator).
+
+4. **The acceptance test asserts correctness, not just GEN-absence.** The failure mode has shifted from a *visible* placeholder (`GEN`) to a *plausible* wrong marque that looks correct. “Zero GEN, N auto-resolved, zero interventions” measures throughput, not correctness — it passes even if the ladder is confidently wrong. Before go-live a human labels ground-truth marques for `INS20260804` **once**, and the test asserts **correct marque per line**. The “single-marque” expectation for that batch must be confirmed by someone other than the resolver’s author. **Do not calibrate the auto/handshake threshold on this batch** — a single-marque, unambiguous document drives the threshold to “always auto-resolve”; calibrate on a mixed multi-marque set, regression-test on this one.
+
+---
+
+## Division of labour
+
+| Concern | Owner |
+|---|---|
+| Resolution ladder + corroboration/conflict logic | DGX |
+| `GET /manufacturers` authority list | DGX |
+| Per-line evidence-ranked candidates | DGX |
+| `POST /resolve_manufacturer` (re-ranks OEM chain, idempotent) | DGX |
+| Learning/rulings table + history backfill + threshold | DGX |
+| Detect `resolved:false` → `needs_manufacturer` hold | middleware |
+| Render candidates **with evidence** + marque dropdown | middleware |
+| Resolve-call + local resolution audit on the line | middleware |
+| Remove the `GEN` default (machine-unreachable) | middleware |
+| `prefix_exhausted` counter-cap guard | middleware |
+| Exclude both holds from bulk-create & document completion | middleware |
+
+Middleware **feeds** the learning table via the resolve call; it does not own it.
+
+---
+
+## What ships in this PR (middleware Part 0 — contract-independent)
+
+These are ours regardless of how the DGX contract lands, and they make `GEN` unreachable today:
+
+- **`GEN` default removed** at both mint sites (`PartsItemProvisioningService`, auto + manual). Auto path with no resolved prefix → `needs_manufacturer` hold; manual path with a blank prefix → validation error (the operator must supply it).
+- **Counter cap enforced** (`SkuCounterRepository.IncrementAsync`): increments only while `CurrentValue < MaxAllowed` (NULL = uncapped); at the ceiling it throws the new **`SkuCounterExhaustedException`** — a *distinct* type so it is never mistaken for the not-seeded (seed-and-retry) case.
+- **Two hold states** `needs_manufacturer` / `prefix_exhausted`: persisted via `RecordHeldAsync` (status + operator-facing reason), shown with their own review pills, tallied apart from failures in bulk-create, excluded from the bulk-create retry set, and blocking document completion.
+
+**Still to build (once the DGX contract is pinned):** the candidate/evidence response types, the `manufacturer_override` request field, the `/resolve_manufacturer` middleware client + per-line resolve endpoint, and the review-UI dropdown. Part 1 (the ladder), `GET /manufacturers`, the learning table, and the threshold are DGX-side.
+
+---
+
+## Acceptance test (go-live gate)
+
+Re-run document `643d4876…` / `INS20260804`:
+
+- **zero** machine-assigned `GEN`
+- every auto-resolved line carries the **correct** marque (against a one-time human label — *not* merely non-GEN)
+- the “single-marque” expectation independently confirmed
+- the `needs_manufacturer` queue exercised only by a deliberately-crafted ambiguous line (and the threshold calibrated on a separate mixed set, not this batch)
+- a prefix driven to its `MaxAllowed` ceiling produces a `prefix_exhausted` hold, never an overrun
