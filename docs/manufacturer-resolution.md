@@ -62,7 +62,7 @@ When the ladder cannot resolve (or rungs conflict), the line is **held** for a h
    2. **Do not hide `share: 0.0` candidates.** Set-derived candidates legitimately carry zero evidence-share with meaningful evidence text — they are real options (VAG deliberately first), not noise.
    3. **The dropdown must comfortably show 3–4 candidates with their evidence lines** — don’t design for 1–2.
 
-   > **Preservation note:** `EnrichmentResultRouter` stores the enrichment by re-serializing the *typed* `EnrichmentResponse`, so `manufacturer_resolution` is dropped today (not in the type). Part 2 must preserve it — either a typed `ManufacturerResolution` property (once the shape above is in code) or `[JsonExtensionData]`. Part 0’s hold does not depend on it.
+   > **Preservation note:** `EnrichmentResultRouter` stores the enrichment by re-serializing the typed `EnrichmentResponse` — but that record already carries `[JsonExtensionData] Extra`, added to round-trip unknown DGX fields, so `manufacturer_resolution` **already survives storage** (nothing is lost). The typed `ManufacturerResolution` property (shipped separately, PR #265) upgrades that raw round-trip to strongly-typed access for the UI — a convenience, not a data-loss fix.
 3. **Hold** — middleware routes the line to `needs_manufacturer` (not creatable) and stores the candidates for the UI. No code assigned.
 4. **Operator resolves** — the review UI shows a marque dropdown (candidates first, full list as fallback); operator picks e.g. `VAG`.
 5. **Finalize** — middleware calls the dedicated **`POST /resolve_manufacturer`** with the line identity + `manufacturer: "VAG"`. DGX **re-ranks the stored OEM cross-references under that marque** (the ItemName OEM chain is marque-ranked — the `Take(5)` ordering changes with the marque) and returns the **marque package** (v1 shape as live):
@@ -132,7 +132,7 @@ These are ours regardless of how the DGX contract lands, and they make `GEN` unr
 
 **Still to build (Part 2 — contract now pinned & stable, no type changes beyond the pinned shape):**
 
-- **GATING ITEM — preserve `manufacturer_resolution` through storage.** `EnrichmentResultRouter` re-serializes the typed `EnrichmentResponse`, so the block is dropped today; **until it survives storage, no candidates reach the review UI**. Fix = a typed `ManufacturerResolution` property (`{ resolved, candidates:[{code,label,share,evidence}] }`) or `[JsonExtensionData]`. Everything else in Part 2 is blocked on this.
+- **DONE (PR #265) — typed `manufacturer_resolution`.** ~~Gating item~~: the block was *not* being dropped — `EnrichmentResponse` already round-trips unknown DGX fields via `[JsonExtensionData] Extra`, so candidates already survived storage. PR #265 adds the typed `ManufacturerResolution` property (`{ resolved, candidates:[{code,label,share,evidence}] }`) for clean strongly-typed access (the field now binds to the property instead of `Extra`). No data-loss gate; the rest of Part 2 was never blocked on it.
 - Capture + render candidates per the **three rendering rules** above (order-preserving, show `share:0.0`, 3–4 candidates with evidence lines).
 - The `manufacturer_override` request field, the `/resolve_manufacturer` client + per-line resolve endpoint (merge marque package into held enrichment), and the marque dropdown.
 
