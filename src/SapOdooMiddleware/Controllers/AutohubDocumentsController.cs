@@ -30,6 +30,7 @@ public class AutohubDocumentsController : ControllerBase
     private readonly IAutohubSapB1Service _sap;   // Autohub company (Molas Live 2021) connection
     private readonly INeonBridgeService _bridge;   // resolve donor oitm rows for the operator swap
     private readonly IDonorSearchClient _donorSearch;   // DGX "find more candidates" (broad TecDoc pool)
+    private readonly IManufacturerResolutionClient _manufacturer;   // DGX /resolve_manufacturer (marque handshake)
 
     public AutohubDocumentsController(
         IStagingPartsDocumentRepository docs,
@@ -42,7 +43,8 @@ public class AutohubDocumentsController : ControllerBase
         PartsItemCreationService itemCreation,
         IAutohubSapB1Service sap,
         INeonBridgeService bridge,
-        IDonorSearchClient donorSearch)
+        IDonorSearchClient donorSearch,
+        IManufacturerResolutionClient manufacturer)
     {
         _docs = docs;
         _review = review;
@@ -55,6 +57,7 @@ public class AutohubDocumentsController : ControllerBase
         _sap = sap;
         _bridge = bridge;
         _donorSearch = donorSearch;
+        _manufacturer = manufacturer;
     }
 
     private static readonly JsonSerializerOptions EnrichmentJson = new()
@@ -281,6 +284,68 @@ public class AutohubDocumentsController : ControllerBase
         await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
         return Ok(await _review.GetByIdAsync(lineId, ct));
     }
+
+    /// <summary>
+    /// Resolve the marque for a <c>needs_manufacturer</c> hold: the operator picks a manufacturer/marque code,
+    /// DGX finalizes the SKU prefix + item group under it (re-ranking the OEM chain on its side), and the
+    /// marque package is merged into the held enrichment. The line moves to <c>create_new</c> so bulk-create
+    /// mints under the resolved prefix. Idempotent on the DGX side; safe to retry.
+    /// </summary>
+    [HttpPost("{documentId:guid}/lines/{lineId:guid}/resolve-manufacturer")]
+    public async Task<IActionResult> ResolveManufacturer(
+        Guid documentId, Guid lineId, [FromBody] ResolveManufacturerBody body, CancellationToken ct)
+    {
+        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
+
+        var code = body?.ManufacturerCode?.Trim();
+        if (string.IsNullOrWhiteSpace(code))
+            return BadRequest(new { error = "manufacturerCode is required." });
+        if (PartsItemProvisioningService.IsUnresolvedPrefix(code))
+            return BadRequest(new { error = "'GEN' is not an assignable marque — pick a real manufacturer." });
+
+        var row = await _review.GetByIdAsync(lineId, ct);
+        if (row is null) return NotFound();
+        if (row.ReviewStatus != "needs_manufacturer")
+            return Conflict(new { error = $"Line is '{row.ReviewStatus}', not 'needs_manufacturer'." });
+
+        var payloadJson = await _review.GetEnrichmentPayloadAsync(lineId, ct);
+        if (string.IsNullOrWhiteSpace(payloadJson))
+            return Conflict(new { error = "Line has no stored enrichment to finalize." });
+
+        EnrichmentResponse held;
+        try
+        {
+            held = JsonSerializer.Deserialize<EnrichmentResponse>(payloadJson, EnrichmentJson)
+                   ?? throw new InvalidOperationException("empty payload");
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                new { error = $"Stored enrichment could not be read: {ex.Message}" });
+        }
+
+        ManufacturerPackage pkg;
+        try
+        {
+            pkg = await _manufacturer.ResolveAsync(
+                new ResolveManufacturerRequest(row.SupplierArticleNumber, row.Brand, held.NeonOitmId, code!), ct);
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(StatusCodes.Status502BadGateway, new { error = $"Manufacturer resolution failed: {ex.Message}" });
+        }
+
+        if (!string.IsNullOrWhiteSpace(pkg.Error))
+            return StatusCode(StatusCodes.Status502BadGateway, new { error = $"DGX could not resolve '{code}': {pkg.Error}" });
+        if (PartsItemProvisioningService.IsUnresolvedPrefix(pkg.Prefix))
+            return StatusCode(StatusCodes.Status502BadGateway, new { error = $"DGX returned no usable prefix for '{code}'." });
+
+        var merged = ManufacturerResolutionMerge.Apply(held, pkg);
+        await _review.ApplyManufacturerResolutionAsync(lineId, JsonSerializer.Serialize(merged), ct);
+        return Ok(await _review.GetByIdAsync(lineId, ct));
+    }
+
+    public sealed record ResolveManufacturerBody(string? ManufacturerCode);
 
     /// <summary>The persisted DGX enrichment for a line (detail panel). 204 if the line was never enriched.</summary>
     [HttpGet("{documentId:guid}/lines/{lineId:guid}/enrichment")]

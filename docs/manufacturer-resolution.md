@@ -133,8 +133,9 @@ These are ours regardless of how the DGX contract lands, and they make `GEN` unr
 **Still to build (Part 2 — contract now pinned & stable, no type changes beyond the pinned shape):**
 
 - **DONE (PR #265) — typed `manufacturer_resolution`.** ~~Gating item~~: the block was *not* being dropped — `EnrichmentResponse` already round-trips unknown DGX fields via `[JsonExtensionData] Extra`, so candidates already survived storage. PR #265 adds the typed `ManufacturerResolution` property (`{ resolved, candidates:[{code,label,share,evidence}] }`) for clean strongly-typed access (the field now binds to the property instead of `Extra`). No data-loss gate; the rest of Part 2 was never blocked on it.
-- Capture + render candidates per the **three rendering rules** above (order-preserving, show `share:0.0`, 3–4 candidates with evidence lines).
-- The `manufacturer_override` request field, the `/resolve_manufacturer` client + per-line resolve endpoint (merge marque package into held enrichment), and the marque dropdown.
+- **DONE — `/resolve_manufacturer` backend handshake.** `ManufacturerResolutionClient` (`POST /resolve_manufacturer`) + the per-line endpoint `POST …/lines/{lineId}/resolve-manufacturer`: validates the `needs_manufacturer` hold, calls DGX with the chosen marque + line identity, merges the returned package (prefix + item group) into the held enrichment via `ManufacturerResolutionMerge.Apply`, and moves the line to `create_new`. `GEN` is rejected as a choice. The resolved prefix passes the no-machine-`GEN` guard, so bulk-create mints under it.
+- **Still to build — the review-UI marque dropdown** (Part 2b): render the stored candidates per the **three rendering rules** above (order-preserving, show `share:0.0`, 3–4 candidates with evidence lines) with a "Resolve" action calling the endpoint above. Deferred to its own PR (a Razor change is best landed built).
+- Optional: the `manufacturer_override` convenience field on `/enrich_item`.
 
 Part 1 (the marque-set ladder), `GET /manufacturers`, the learning table, and the threshold are DGX-side.
 
