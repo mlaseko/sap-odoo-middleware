@@ -876,7 +876,9 @@
             btn.disabled = true;
             if (status) status.textContent = 'Resolving…';
             try {
-                const updated = await api('POST', '/lines/' + lineId + '/resolve-manufacturer', { manufacturerCode: code });
+                // Body keys are snake_case to match the API's SnakeCaseLower JSON policy (server binds
+                // ManufacturerCode from manufacturer_code) — a camelCase key deserializes to null.
+                const updated = await api('POST', '/lines/' + lineId + '/resolve-manufacturer', { manufacturer_code: code });
                 const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
                 if (row) setRowPill(row, (updated && updated.reviewStatus) || 'create_new');
                 const marque = box.querySelector('.ld-marque');
