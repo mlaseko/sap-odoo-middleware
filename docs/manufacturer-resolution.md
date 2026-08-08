@@ -157,6 +157,54 @@ Part 1 (the marque-set ladder), `GET /manufacturers`, the learning table, and th
 
 ---
 
+## Database constraint: `staging_document_line."ReviewStatus"` (setup / rebuild)
+
+The `ReviewStatus` column is free-text but gated by a `CHECK` constraint,
+`staging_document_line_reviewstatus_chk`. **There is no migration file for it**, so it does not
+travel with the repo — every environment/rebuild must apply the constraint by hand, and it drifted
+once already (the two hold states below were added to the code but not to a live DB, so bulk-create
+threw `violates check constraint …_reviewstatus_chk` when the code tried to write them).
+
+The **complete, canonical set of values the code writes** — verified against every
+`SET "ReviewStatus" = …` / `SetReviewStatusAsync` / `RecordHeldAsync` site — is exactly these ten
+(there is **no** eleventh transitional value; the code never writes `manufacturer_resolved`,
+`confirmed`, `creating`, or similar):
+
+| Value | Written by |
+|---|---|
+| `pending` | initial insert; reset paths |
+| `matched` | auto-match; duplicate-create guard |
+| `needs_confirmation` | vehicle-group / cross-supplier borrow awaiting sign-off |
+| `needs_manual` | enrichment failure / partial / DGX unreachable |
+| `create_new` | queued for creation; **marque resolved** (per-line + bulk confirm) |
+| `created` | SAP OITM write succeeded |
+| `create_failed` | any hard failure before the SAP item is written |
+| `skip` | operator skipped the line |
+| `needs_manufacturer` | **hold** — marque unresolved (blank/`GEN` prefix), `RecordHeldAsync` |
+| `prefix_exhausted` | **hold** — SKU counter at `MaxAllowed`, `RecordHeldAsync` |
+
+The last two are the ones most likely to be missing from an older DB. Apply the superset (note the
+column is quoted PascalCase — `"ReviewStatus"`, **not** `review_status`):
+
+```sql
+ALTER TABLE public."staging_document_line"
+  DROP CONSTRAINT IF EXISTS staging_document_line_reviewstatus_chk;
+ALTER TABLE public."staging_document_line"
+  ADD  CONSTRAINT staging_document_line_reviewstatus_chk
+  CHECK ("ReviewStatus" = ANY (ARRAY[
+    'pending','matched','needs_confirmation','needs_manual','create_new',
+    'created','create_failed','skip','needs_manufacturer','prefix_exhausted'
+  ]::text[]));
+```
+
+> **The two holds are written *during* bulk-create.** A `create_new` line whose stored
+> `suggested_sku_prefix` is still `GEN`/blank hits the GEN-guard in `ProvisionAsync` →
+> `RecordHeldAsync(…, "needs_manufacturer", …)`. If the constraint lacks that value, the write
+> throws, the bulk loop catches it, and the line lands in `create_failed` with the constraint text
+> in `CreateErrorMessage` — which is exactly the "12 failed" symptom. Fixing the constraint lets the
+> line rest in `needs_manufacturer` instead; the operator then assigns the marque (→ `create_new`)
+> and re-runs bulk-create to actually mint it.
+
 ## Re-run choreography for `INS20260804` (to settle before the acceptance run)
 
 **Confirmed state** (diagnostics, 2026-08-07): re-creation has **not** happened. Document `643d4876…` still holds its original bulk-create state — 269 lines created with real marque codes (leave alone), **91** lines still `created` with `GEN##` codes + `WrittenToSapAt` set (fix these), 158 `matched` (leave alone). The `GEN##` `oitm` rows are deleted from Neon; the SAP `GEN` items still exist. So the reset-and-re-run path applies (no fresh Excel upload). **Ordering is load-bearing** — run it in exactly this sequence:
