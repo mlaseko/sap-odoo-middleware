@@ -353,6 +353,7 @@
     function setRowPill(row, status) {
         const [cls, label] = PILL[status] || ['pill-grey', status];
         row.querySelector('.status-cell').innerHTML = '<span class="pill ' + cls + '">' + label + '</span>';
+        row.dataset.reviewStatus = status;   // keep the dataset in sync so a panel re-render reads the new status
     }
 
     // ---- review summary banner ----
@@ -527,7 +528,13 @@
         // Only in the inline review panel (which passes the line's status) — and not once terminal. Callers
         // that pass no status (e.g. the borrowed-enrichment confirm modal) deliberately suppress the section.
         const actionable = !!reviewStatus && reviewStatus !== 'created' && reviewStatus !== 'matched' && reviewStatus !== 'skip';
-        let head = (mr && actionable) ? marqueSectionHtml(mr, lineId) : '';
+        // Only prompt for the marque while the stored prefix is still unresolved (blank / 'GEN'). Once a
+        // real marque is applied (operator pick or bulk-confirm) the picker/confirm drops away and the KV
+        // table below shows the resolved prefix — so re-rendering after resolve neither nags nor shows a
+        // stale 'GEN'. Held/GEN lines (including create_new ones queued with GEN) still get the picker.
+        const prefixUnresolved = !d.suggested_sku_prefix ||
+            String(d.suggested_sku_prefix).trim().toUpperCase() === 'GEN';
+        let head = (mr && actionable && prefixUnresolved) ? marqueSectionHtml(mr, lineId) : '';
         // Enrichment already happened during extraction — show its outcome, don't imply it's pending.
         let html = head + '<h3>Item enrichment</h3>';
         html += '<p>Enrichment: <strong>' + (noData ? 'no catalog match found' : 'done') + '</strong>' +
@@ -881,8 +888,10 @@
                 const updated = await api('POST', '/lines/' + lineId + '/resolve-manufacturer', { manufacturer_code: code });
                 const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
                 if (row) setRowPill(row, (updated && updated.reviewStatus) || 'create_new');
-                const marque = box.querySelector('.ld-marque');
-                if (marque) marque.remove();
+                // Re-render the panel from the server so the SKU-prefix row shows the resolved marque (not
+                // the stale 'GEN') and the now-resolved picker drops away.
+                box.dataset.loaded = 'false';
+                await loadEnrichment(lineId, detailRowFor(lineId));
                 refreshSummary();
             } catch (e) {
                 if (status) status.textContent = 'Failed: ' + e.message;
