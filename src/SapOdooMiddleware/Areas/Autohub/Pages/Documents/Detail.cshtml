@@ -236,6 +236,11 @@
                     <span class="pill pill-orange" style="margin-left:4px;"
                           title="Borrowed part type unverified (@l.SelectedComponentVerdict) — review/choose the donor">⚠ review</span>
                 }
+                @if (l.NeedsMarque && l.ReviewStatus != "needs_manufacturer" && l.ReviewStatus != "created")
+                {
+                    <span class="pill pill-orange" style="margin-left:4px;"
+                          title="DGX couldn't auto-resolve the manufacturer — expand the line to assign the marque before creating">⚑ marque</span>
+                }
             </td>
             @if (Model.IsEditable)
             {
