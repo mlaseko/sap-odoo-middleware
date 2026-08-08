@@ -13,23 +13,9 @@ namespace SapOdooMiddleware.Services.Autohub;
 /// </summary>
 public sealed record PartsProvisioningOutcome(string Status, string? ItemCode, string? Error);
 
-/// <summary>
-/// Operator-supplied values for manual creation, used when DGX enrichment could not classify the part
-/// (no <c>suggested_itms_grp_cod</c> / <c>suggested_sku_prefix</c>). Lets the operator pick the SAP item
-/// group and brand prefix directly so the line can still be created.
-/// </summary>
-public sealed record ManualItemOverride(int ItemsGroupCode, string SkuPrefix, string? Description, string? FitForAuto, string? ImageUrl);
-
 public interface IPartsItemProvisioningService
 {
     Task<PartsProvisioningOutcome> ProvisionAsync(PartsProvisioningLine line, string? currency, CancellationToken ct);
-
-    /// <summary>
-    /// Create a SAP item from operator-supplied item group + SKU prefix, bypassing the enrichment
-    /// <c>item_data</c>/group requirement (for parts DGX can't classify). Mirrors a fresh own-identity
-    /// Neon row so future invoices auto-match it. Persists its own created/failed outcome.
-    /// </summary>
-    Task<PartsProvisioningOutcome> ProvisionManualAsync(PartsProvisioningLine line, string? currency, ManualItemOverride manual, CancellationToken ct);
 }
 
 /// <summary>
@@ -261,7 +247,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         {
             // No donor oitm to stamp (e.g. germax_local / fresh enrichment with no parts_catalog match):
             // mint a fresh own-identity Neon row so the new SAP item lands in oitm too and future invoices
-            // for this (supplier, article) auto-match. Best-effort, mirroring ProvisionManualAsync — the SAP
+            // for this (supplier, article) auto-match. Best-effort — the SAP
             // item already exists, so a mirror failure must NOT fail the line (a retry would mint a
             // duplicate). The line OEMs (reference_type='oem' equivalents) seed the cross-references.
             try
@@ -279,116 +265,6 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         }
 
         await _review.RecordCreatedAsync(line.Id, itemCode, prices.Cost, prices.Retail, prices.Wholesale, rate, ct);
-        return new PartsProvisioningOutcome("created", itemCode, null);
-    }
-
-    /// <summary>
-    /// Manual create: the operator supplies the SAP item group + prefix that enrichment couldn't.
-    /// Self-contained (parallel to <see cref="ProvisionAsync"/>, NOT a refactor of it, so the proven
-    /// enrichment path stays byte-identical): validate → forex → price → allocate SKU → write OITM →
-    /// mint a fresh Neon mirror row (no donor) so future invoices auto-match. No DGX call, no
-    /// enrichment-confirmation gate. Persists its own created/failed outcome.
-    /// </summary>
-    public async Task<PartsProvisioningOutcome> ProvisionManualAsync(
-        PartsProvisioningLine line, string? currency, ManualItemOverride manual, CancellationToken ct)
-    {
-        var article = line.SupplierArticleNumber?.Trim();
-        if (string.IsNullOrWhiteSpace(article))
-            return await Fail(line.Id, "Line has no supplier article number.", ct);
-        if (line.UnitPriceForeign is not > 0m)
-            return await Fail(line.Id, "Line has no positive unit price.", ct);
-        if (string.IsNullOrWhiteSpace(currency))
-            return await Fail(line.Id, "Document currency is unknown; cannot convert cost.", ct);
-        if (manual.ItemsGroupCode <= 0)
-            return await Fail(line.Id, "A SAP item group is required for manual creation.", ct);
-
-        // Same duplicate-create guard as ProvisionAsync.
-        if (await FindExistingItemCodeAsync(article!, line.Brand, ct) is { } existingCode)
-        {
-            _logger.LogInformation(
-                "Manual create: line {LineId}: SAP item {Code} already exists for {Article}/{Supplier}; matching instead of creating a duplicate.",
-                line.Id, existingCode, article, line.Brand);
-            await _review.SetReviewStatusAsync(line.Id, "matched", existingCode, ct);
-            return new PartsProvisioningOutcome("created", existingCode, null);
-        }
-
-        // The operator explicitly supplies the prefix here; a blank or 'GEN' value is an input error, not a
-        // fallback. GEN is not an assignable marque on either path.
-        if (string.IsNullOrWhiteSpace(manual.SkuPrefix))
-            return await Fail(line.Id, "A SKU prefix (manufacturer/marque code) is required for manual creation.", ct);
-        if (IsUnresolvedPrefix(manual.SkuPrefix))
-            return await Fail(line.Id, "'GEN' is not an assignable prefix — choose a real manufacturer/marque code.", ct);
-        var prefix = manual.SkuPrefix.Trim();
-        var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
-
-        decimal costTzs;
-        try
-        {
-            costTzs = await ConvertToTzsWithRetryAsync(line.UnitPriceForeign.Value, currency!, ct);
-        }
-        catch (Exception ex)
-        {
-            return await Fail(line.Id, $"Forex conversion failed after retries: {ex.Message}", ct);
-        }
-        var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
-
-        var prices = await _pricing.CalculateAsync(costTzs, line.Brand ?? "", ct);
-        if (prices.Cost <= 0m)
-            return await Fail(line.Id, "Computed price-list 01 (cost) is zero — check the forex rate and pricing config before creating the SAP item.", ct);
-
-        // Same atomic-counter caveat as ProvisionAsync: the number is burned even if the SAP write fails.
-        // A counter at its MaxAllowed ceiling is a hold (operator extends the range), never a silent overrun.
-        string itemCode;
-        try
-        {
-            itemCode = await _sku.GenerateAsync(prefix, ct);
-        }
-        catch (SkuCounterExhaustedException ex)
-        {
-            return await Held(line.Id, "prefix_exhausted", ex.Message, ct);
-        }
-        var altArticles = await _bridge.GetGermaxAlternateArticleNumbersAsync(article!, ct);
-        var itemName = BuildItemName(filtered, article!, altArticles);
-
-        var sapReq = new SapAutohubItemRequest(
-            ItemCode: itemCode,
-            ItemName: itemName,
-            ItemsGroupCode: manual.ItemsGroupCode,
-            CostPrice: prices.Cost,
-            RetailPrice: prices.Retail,
-            WholesalePrice: prices.Wholesale,
-            ArticleNumber: article!,
-            PartName: manual.Description ?? line.Description,
-            Manufacturer: line.Brand);
-
-        try
-        {
-            await _sap.CreateAutohubItemAsync(sapReq);
-        }
-        catch (Exception ex)
-        {
-            return await Fail(line.Id, $"SAP item write failed: {ex.Message}", ct);
-        }
-
-        // Mirror a fresh own-identity Neon row (no donor to copy from) so future invoices for this
-        // (supplier, article) auto-match instead of repeatedly landing in needs_manual. Best-effort:
-        // the SAP item already exists, so a mirror failure must NOT fail the line (a retry would mint a
-        // duplicate). Log for reconcile.
-        try
-        {
-            var supplier = string.IsNullOrWhiteSpace(line.Brand) ? null : line.Brand;
-            await _bridge.CreateFreshRowAsync(itemCode, article!, supplier, filtered, "manual_create",
-                manual.Description ?? line.Description, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "Manual create: SAP item {ItemCode} created but the Neon mirror insert failed; reconcile required.", itemCode);
-        }
-
-        await _review.RecordCreatedAsync(line.Id, itemCode, prices.Cost, prices.Retail, prices.Wholesale, rate, ct);
-        _logger.LogInformation("Manual create: line {LineId} → SAP item {ItemCode} (group {Group}, prefix {Prefix}).",
-            line.Id, itemCode, manual.ItemsGroupCode, prefix);
         return new PartsProvisioningOutcome("created", itemCode, null);
     }
 

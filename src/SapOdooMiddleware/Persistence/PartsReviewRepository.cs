@@ -52,13 +52,6 @@ public interface IPartsReviewRepository
     Task<int> BulkReenrichSkippedAsync(Guid documentId, CancellationToken ct);
 
     /// <summary>
-    /// Re-run enrichment for the RESIDUAL BLOCKERS only: lines DGX couldn't classify
-    /// (EnrichmentStatus 'partial'/'unmatched'), never touching already-resolved lines
-    /// ('matched'/'created'). Resets them to 'pending' with enrichment state cleared. Returns the count.
-    /// </summary>
-    Task<int> BulkReenrichBlockersAsync(Guid documentId, CancellationToken ct);
-
-    /// <summary>
     /// Bulk-accept DGX's resolved marque for every resolved:true line: copy the voted prefix into the
     /// item_data SKU prefix (replacing the shadow 'GEN') and queue the line for creation. Skips terminal
     /// lines. Returns the count. Operator overrides/picks go through the per-line resolve, not this.
@@ -86,7 +79,6 @@ public interface IPartsReviewRepository
 
     /// <summary>Count of lines still awaiting background enrichment (pending, not-yet-enriched, non-promotional) for one document.</summary>
     Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct);
-    Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
 
     /// <summary>Persist the full enrichment outcome (source, borrowed, neon_oitm_id, status, strategy, payload) on the line.</summary>
     Task RecordEnrichmentResultAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier,
@@ -276,30 +268,6 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         return await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    public async Task<int> BulkReenrichBlockersAsync(Guid documentId, CancellationToken ct)
-    {
-        // The residual blockers — enrichments DGX couldn't classify ('partial'/'unmatched') AND lines that
-        // failed purely because DGX was unreachable ('failed', e.g. a mid-run outage) — but never a line the
-        // operator/worker already resolved ('matched'/'created'). Including 'failed' is what lets this one
-        // button recover a DGX outage; without it those lines could only be re-enriched one at a time. Full
-        // reset → 'pending' with enrichment state cleared so the worker re-queries the (recovered) classifier.
-        const string sql = """
-            UPDATE public."staging_document_line"
-            SET "ReviewStatus" = 'pending',
-                "EnrichmentSource" = NULL, "BorrowedFromArticle" = NULL, "BorrowedFromSupplier" = NULL,
-                "NeonOitmId" = NULL, "EnrichmentStatus" = NULL, "EnrichmentErrorCode" = NULL,
-                "EnrichedAt" = NULL, "EnrichmentPayloadJson" = NULL, "EnrichmentConfirmationRequired" = false,
-                "EnrichmentConfirmedBy" = NULL, "EnrichmentConfirmedAt" = NULL, "MatchStrategy" = NULL
-            WHERE "DocumentId" = @doc
-              AND "EnrichmentStatus" IN ('partial', 'unmatched', 'failed')
-              AND "ReviewStatus" NOT IN ('matched', 'created')
-              AND "IsPromotional" = false;
-            """;
-        await using var conn = await OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("doc", documentId);
-        return await cmd.ExecuteNonQueryAsync(ct);
-    }
 
     public async Task<int> BulkApplyResolvedMarquesAsync(Guid documentId, CancellationToken ct)
     {
@@ -436,27 +404,6 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         cmd.Parameters.AddWithValue("doc", documentId);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is null or DBNull ? 0 : Convert.ToInt32(result);
-    }
-
-    public async Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct)
-    {
-        const string sql = """
-            UPDATE public."staging_document_line"
-            SET "EnrichmentSource" = @source,
-                "BorrowedFromArticle" = @ba,
-                "BorrowedFromSupplier" = @bs,
-                "EnrichmentConfirmedBy" = @by,
-                "EnrichmentConfirmedAt" = CASE WHEN @by IS NULL THEN NULL ELSE NOW() END
-            WHERE "Id" = @id;
-            """;
-        await using var conn = await OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("source", (object?)source ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("ba", (object?)borrowedArticle ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("bs", (object?)borrowedSupplier ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("by", (object?)confirmedBy ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("id", lineId);
-        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task RecordEnrichmentResultAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier,

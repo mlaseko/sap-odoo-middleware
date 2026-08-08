@@ -260,25 +260,21 @@ public class AutohubDocumentsController : ControllerBase
 
     /// <summary>Reject a (borrowed) enrichment: move the line to 'needs_manual' so the operator can match-by-search (Q9).</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/reject")]
-    public async Task<IActionResult> RejectLine(Guid documentId, Guid lineId, CancellationToken ct)
-    {
-        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
-        await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
-        return Ok(await _review.GetByIdAsync(lineId, ct));
-    }
+    public Task<IActionResult> RejectLine(Guid documentId, Guid lineId, CancellationToken ct)
+        => SetNeedsManualAsync(documentId, lineId, ct);
 
     /// <summary>Reopen a skipped line back to 'needs_manual' so the operator can match/create it (undo bulk-skip).</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/reopen")]
-    public async Task<IActionResult> ReopenLine(Guid documentId, Guid lineId, CancellationToken ct)
-    {
-        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
-        await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
-        return Ok(await _review.GetByIdAsync(lineId, ct));
-    }
+    public Task<IActionResult> ReopenLine(Guid documentId, Guid lineId, CancellationToken ct)
+        => SetNeedsManualAsync(documentId, lineId, ct);
 
     /// <summary>Flag a line 'needs_manual' (operator will match / manual-create / skip it). Available from any status.</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/needs-manual")]
-    public async Task<IActionResult> MarkNeedsManual(Guid documentId, Guid lineId, CancellationToken ct)
+    public Task<IActionResult> MarkNeedsManual(Guid documentId, Guid lineId, CancellationToken ct)
+        => SetNeedsManualAsync(documentId, lineId, ct);
+
+    /// <summary>Shared body for reject / reopen / needs-manual — all three move a line to 'needs_manual'.</summary>
+    private async Task<IActionResult> SetNeedsManualAsync(Guid documentId, Guid lineId, CancellationToken ct)
     {
         if (await GuardLine(documentId, lineId, ct) is { } err) return err;
         await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
@@ -767,19 +763,6 @@ public class AutohubDocumentsController : ControllerBase
         return Ok(new { reopened = count, reEnriched = reEnrich });
     }
 
-    /// <summary>
-    /// Re-run enrichment for the residual blockers only — lines DGX couldn't classify
-    /// (EnrichmentStatus 'partial'/'unmatched'), never the resolved ('matched'/'created') ones. Use after a
-    /// DGX classifier improvement to pick up only what was stuck. The background worker re-queries DGX.
-    /// </summary>
-    [HttpPost("{documentId:guid}/bulk-reenrich-blockers")]
-    public async Task<IActionResult> BulkReenrichBlockers(Guid documentId, CancellationToken ct)
-    {
-        var doc = await _docs.GetByIdAsync(documentId, ct);
-        if (doc is null) return NotFound();
-        return Ok(new { reEnriched = await _review.BulkReenrichBlockersAsync(documentId, ct) });
-    }
-
     /// <summary>Confirm all unconfirmed 'create_new' lines at once, so Bulk Create stops blocking on the
     /// cross-supplier gate (review the borrowed lines first). Returns the count confirmed.</summary>
     [HttpPost("{documentId:guid}/bulk-confirm-create-new")]
@@ -802,33 +785,6 @@ public class AutohubDocumentsController : ControllerBase
             attempted = result.Attempted,
             created = result.Created,
             needsConfirmation = result.NeedsConfirmation,
-            held = result.Held,
-            failed = result.Failed,
-            failures = result.Failures.Select(f => new { lineId = f.LineId, articleNumber = f.ArticleNumber, error = f.Error })
-        });
-    }
-
-    /// <summary>
-    /// Manual create: create SAP items for the given lines using an operator-supplied item group + SKU
-    /// prefix, for parts DGX enrichment could not classify (no suggested group/prefix). Bypasses the
-    /// enrichment requirement; per-line is just this with a single id.
-    /// </summary>
-    [HttpPost("{documentId:guid}/bulk-create-manual")]
-    public async Task<IActionResult> BulkCreateManual(Guid documentId, [FromBody] BulkCreateManualRequest body, CancellationToken ct)
-    {
-        var doc = await _docs.GetByIdAsync(documentId, ct);
-        if (doc is null) return NotFound();
-        if (body?.LineIds is not { Count: > 0 }) return BadRequest(new { error = "lineIds is required." });
-        if (body.ItemsGroupCode <= 0) return BadRequest(new { error = "itemsGroupCode is required (a positive SAP item group)." });
-        if (string.IsNullOrWhiteSpace(body.SkuPrefix)) return BadRequest(new { error = "skuPrefix is required (e.g. 'LR')." });
-
-        var manual = new ManualItemOverride(
-            body.ItemsGroupCode, body.SkuPrefix.Trim().ToUpperInvariant(), body.Description, body.FitForAuto, body.ImageUrl);
-        var result = await _itemCreation.BulkCreateManualAsync(documentId, body.LineIds, manual, ct);
-        return Ok(new
-        {
-            attempted = result.Attempted,
-            created = result.Created,
             held = result.Held,
             failed = result.Failed,
             failures = result.Failures.Select(f => new { lineId = f.LineId, articleNumber = f.ArticleNumber, error = f.Error })
@@ -904,8 +860,6 @@ public class AutohubDocumentsController : ControllerBase
 }
 
 public sealed record PartsMatchRequest(string ItemCode);
-public sealed record BulkCreateManualRequest(
-    List<Guid> LineIds, int ItemsGroupCode, string SkuPrefix, string? Description, string? FitForAuto, string? ImageUrl);
 public sealed record CreateNewRequest(bool Confirmed);
 public sealed record UpdateLineRequest(decimal? Quantity, decimal? UnitPriceForeign, string? Description);
 public sealed record SwapDonorRequest(string ArticleNumber, string? Supplier);
