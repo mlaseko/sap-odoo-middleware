@@ -758,19 +758,6 @@ public class AutohubDocumentsController : ControllerBase
         return Ok(new { reopened = count, reEnriched = reEnrich });
     }
 
-    /// <summary>
-    /// Re-run enrichment for the residual blockers only — lines DGX couldn't classify
-    /// (EnrichmentStatus 'partial'/'unmatched'), never the resolved ('matched'/'created') ones. Use after a
-    /// DGX classifier improvement to pick up only what was stuck. The background worker re-queries DGX.
-    /// </summary>
-    [HttpPost("{documentId:guid}/bulk-reenrich-blockers")]
-    public async Task<IActionResult> BulkReenrichBlockers(Guid documentId, CancellationToken ct)
-    {
-        var doc = await _docs.GetByIdAsync(documentId, ct);
-        if (doc is null) return NotFound();
-        return Ok(new { reEnriched = await _review.BulkReenrichBlockersAsync(documentId, ct) });
-    }
-
     /// <summary>Confirm all unconfirmed 'create_new' lines at once, so Bulk Create stops blocking on the
     /// cross-supplier gate (review the borrowed lines first). Returns the count confirmed.</summary>
     [HttpPost("{documentId:guid}/bulk-confirm-create-new")]
