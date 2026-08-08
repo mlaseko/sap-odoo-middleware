@@ -360,6 +360,21 @@ public class AutohubDocumentsController : ControllerBase
 
     public sealed record ResolveManufacturerBody(string? ManufacturerCode);
 
+    /// <summary>
+    /// Bulk-accept DGX's resolved marque for every resolved:true line in the document — applies each line's
+    /// own voted prefix and queues it for creation. For SPEED on a mostly-resolved batch; the operator
+    /// should independently spot-check and override exceptions (per-line resolve) BEFORE running this, since
+    /// it applies DGX's answer as-is without a fresh ruling.
+    /// </summary>
+    [HttpPost("{documentId:guid}/confirm-resolved-marques")]
+    public async Task<IActionResult> ConfirmResolvedMarques(Guid documentId, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(documentId, ct);
+        if (doc is null) return NotFound();
+        var confirmed = await _review.BulkApplyResolvedMarquesAsync(documentId, ct);
+        return Ok(new { confirmed });
+    }
+
     /// <summary>The persisted DGX enrichment for a line (detail panel). 204 if the line was never enriched.</summary>
     [HttpGet("{documentId:guid}/lines/{lineId:guid}/enrichment")]
     public async Task<IActionResult> GetLineEnrichment(Guid documentId, Guid lineId, CancellationToken ct)
@@ -844,6 +859,7 @@ public class AutohubDocumentsController : ControllerBase
 
         var counts = await _review.GetStatusCountsAsync(documentId, ct);
         var awaitingEnrichment = await _review.CountAwaitingEnrichmentAsync(documentId, ct);
+        var (marqueToConfirm, marqueToPick) = await _review.GetMarqueProgressAsync(documentId, ct);
         var canComplete = doc.Status == "extracted"
             && counts.GetValueOrDefault("pending") == 0
             && counts.GetValueOrDefault("create_failed") == 0
@@ -853,7 +869,7 @@ public class AutohubDocumentsController : ControllerBase
             && counts.GetValueOrDefault("prefix_exhausted") == 0
             && counts.GetValueOrDefault("needs_confirmation") == 0;
 
-        return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, awaitingEnrichment, canComplete, status = doc.Status });
+        return Ok(new { totalLines = counts.Values.Sum(), byStatus = counts, awaitingEnrichment, marqueToConfirm, marqueToPick, canComplete, status = doc.Status });
     }
 
     // ----------------------------------------------------------------------------------------

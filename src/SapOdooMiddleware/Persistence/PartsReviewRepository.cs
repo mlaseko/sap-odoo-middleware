@@ -58,6 +58,13 @@ public interface IPartsReviewRepository
     /// </summary>
     Task<int> BulkReenrichBlockersAsync(Guid documentId, CancellationToken ct);
 
+    /// <summary>
+    /// Bulk-accept DGX's resolved marque for every resolved:true line: copy the voted prefix into the
+    /// item_data SKU prefix (replacing the shadow 'GEN') and queue the line for creation. Skips terminal
+    /// lines. Returns the count. Operator overrides/picks go through the per-line resolve, not this.
+    /// </summary>
+    Task<int> BulkApplyResolvedMarquesAsync(Guid documentId, CancellationToken ct);
+
     /// <summary>Operator edits to an extracted line before creation (qty / unit price / description). Recomputes the line total.</summary>
     Task UpdateLineFieldsAsync(Guid lineId, decimal? quantity, decimal? unitPriceForeign, string? description, CancellationToken ct);
 
@@ -70,6 +77,12 @@ public interface IPartsReviewRepository
     /// <summary>Stamp EditedBy/EditedAt on a line (e.g. after an operator donor-swap).</summary>
     Task MarkEditedAsync(Guid lineId, string editedBy, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>
+    /// Marque-labelling progress for the review header: how many still-actionable lines are awaiting an
+    /// operator confirm (DGX resolved them) vs a pick (DGX could not). Excludes already-queued/terminal lines.
+    /// </summary>
+    Task<(int ToConfirm, int ToPick)> GetMarqueProgressAsync(Guid documentId, CancellationToken ct);
 
     /// <summary>Count of lines still awaiting background enrichment (pending, not-yet-enriched, non-promotional) for one document.</summary>
     Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct);
@@ -288,6 +301,32 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         return await cmd.ExecuteNonQueryAsync(ct);
     }
 
+    public async Task<int> BulkApplyResolvedMarquesAsync(Guid documentId, CancellationToken ct)
+    {
+        // Copy manufacturer_resolution.prefix into item_data.suggested_sku_prefix (replacing the shadow
+        // 'GEN') for every resolved:true line, and queue it as create_new so bulk-create mints under the
+        // voted marque. No DGX call and no ruling written — these are ACCEPTED verdicts, not independent
+        // operator picks (those go through the per-line resolve endpoint, which does write a ruling).
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "EnrichmentPayloadJson" = jsonb_set(
+                    "EnrichmentPayloadJson", '{item_data,suggested_sku_prefix}',
+                    "EnrichmentPayloadJson"#>'{manufacturer_resolution,prefix}', true),
+                "ReviewStatus" = 'create_new',
+                "CreateErrorMessage" = NULL
+            WHERE "DocumentId" = @doc
+              AND "EnrichmentPayloadJson"#>>'{manufacturer_resolution,resolved}' = 'true'
+              AND "EnrichmentPayloadJson"#>'{item_data}' IS NOT NULL
+              AND "EnrichmentPayloadJson"#>>'{manufacturer_resolution,prefix}' IS NOT NULL
+              AND "ReviewStatus" NOT IN ('created','matched','skip')
+              AND "IsPromotional" = false;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     public async Task UpdateLineFieldsAsync(Guid lineId, decimal? quantity, decimal? unitPriceForeign, string? description, CancellationToken ct)
     {
         // COALESCE keeps untouched fields; the line total is kept consistent with the edited qty/price.
@@ -353,6 +392,27 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct)) counts[r.GetString(0)] = (int)r.GetInt64(1);
         return counts;
+    }
+
+    public async Task<(int ToConfirm, int ToPick)> GetMarqueProgressAsync(Guid documentId, CancellationToken ct)
+    {
+        // Still-actionable lines only (not queued for creation / terminal). resolved=true → awaiting confirm;
+        // resolved=false → awaiting a pick. Text compare on the jsonb node (shape-tolerant, never cast).
+        const string sql = """
+            SELECT
+              count(*) FILTER (WHERE "EnrichmentPayloadJson"#>>'{manufacturer_resolution,resolved}' = 'true')  AS to_confirm,
+              count(*) FILTER (WHERE "EnrichmentPayloadJson"#>>'{manufacturer_resolution,resolved}' = 'false') AS to_pick
+            FROM public."staging_document_line"
+            WHERE "DocumentId" = @doc
+              AND "IsPromotional" = false
+              AND "ReviewStatus" NOT IN ('created','matched','skip','create_new');
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct)) return (0, 0);
+        return ((int)r.GetInt64(0), (int)r.GetInt64(1));
     }
 
     public async Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct)

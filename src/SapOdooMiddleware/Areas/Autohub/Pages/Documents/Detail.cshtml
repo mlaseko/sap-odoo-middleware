@@ -184,6 +184,7 @@
         {
             <div class="review-actions">
                 <button id="btn-automatch" class="btn btn-sm" type="button">Auto-match again</button>
+                <button id="btn-confirm-marques" class="btn btn-sm" type="button" title="Accept DGX's resolved marque for every auto-resolved line — do this after spot-checking/overriding exceptions">Confirm DGX-resolved marques</button>
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
                 <button id="btn-skip-pending" class="btn btn-sm" type="button">Skip All Pending (<span id="cnt-skip-pending">@(Model.Count("pending") + Model.Count("needs_manual"))</span>)</button>
                 <button id="btn-reopen-skipped" class="btn btn-sm" type="button">Reopen Skipped (<span id="cnt-reopen-skipped">@Model.Count("skip")</span>)</button>
@@ -359,6 +360,11 @@
         let s;
         try { s = await api('GET', '/review-summary'); } catch (e) { return; }
         const b = s.by_status || {};
+        // Marque-labelling progress: how many still need a confirm (DGX resolved) vs a pick (DGX couldn't).
+        const toConfirm = s.marque_to_confirm || 0, toPick = s.marque_to_pick || 0;
+        const marque = (toConfirm + toPick) > 0
+            ? ' &nbsp;|&nbsp; ⚑ Marque: <span class="rc">' + toConfirm + ' to confirm</span> · <span class="rc">' + toPick + ' to pick</span>'
+            : '';
         document.getElementById('review-counts').innerHTML =
             '📋 Review: <span class="rc">' + (b.matched || 0) + ' matched</span> · ' +
             '<span class="rc">' + (b.created || 0) + ' created</span> · ' +
@@ -367,7 +373,7 @@
             '<span class="rc">' + (b.needs_manual || 0) + ' needs manual</span> · ' +
             '<span class="rc">' + (b.needs_confirmation || 0) + ' confirm</span> · ' +
             '<span class="rc">' + (b.pending || 0) + ' pending</span> · ' +
-            '<span class="rc">' + (b.create_failed || 0) + ' failed</span>';
+            '<span class="rc">' + (b.create_failed || 0) + ' failed</span>' + marque;
         // Background-enrichment indicator: visible while DGX is still enriching this document's lines.
         const awaiting = s.awaiting_enrichment || 0;
         const ei = document.getElementById('enrich-indicator');
@@ -485,12 +491,20 @@
     function marqueConfirmHtml(mr) {
         const method = mr.method ? ' <span class="mq-share">(' + esc(mr.method) + ')</span>' : '';
         const ev = mr.evidence ? '<p class="mq-reason">' + esc(mr.evidence) + '</p>' : '';
+        // DGX resolved it — the operator CONFIRMS the pick by default, but can OVERRIDE to another marque
+        // (these brands are multi-marque, so a vote can be wrong). Confirm is preselected.
         return '<div class="ld-marque">' +
             '<h3>Manufacturer (marque)</h3>' +
-            '<p class="mq-reason">✓ DGX resolved this to <strong>' + esc(mr.prefix) + '</strong>' + method + ' — confirm to create under it.</p>' +
+            '<p class="mq-reason">✓ DGX resolved this to <strong>' + esc(mr.prefix) + '</strong>' + method + '. Confirm, or override if it\'s the wrong marque.</p>' +
             ev +
-            '<input type="hidden" class="mq-prefill" value="' + esc(mr.prefix) + '">' +
-            '<div class="mq-actions"><button type="button" class="btn btn-sm mq-resolve">Confirm ' + esc(mr.prefix) + '</button>' +
+            '<div class="mq-list">' +
+              '<label class="mq-opt"><input type="radio" name="mq" value="' + esc(mr.prefix) + '" checked>' +
+                '<span class="mq-head"><span class="mq-code">' + esc(mr.prefix) + '</span><span class="mq-label">DGX pick — confirm</span></span></label>' +
+              '<label class="mq-opt"><input type="radio" name="mq" value="__other__">' +
+                '<span class="mq-head"><span class="mq-code">Override</span></span>' +
+                '<span class="mq-ev"><input type="text" class="mq-freetext" placeholder="e.g. BM, MB"></span></label>' +
+            '</div>' +
+            '<div class="mq-actions"><button type="button" class="btn btn-sm mq-resolve">Resolve</button>' +
             '<span class="mq-status"></span></div>' +
             '</div>';
     }
@@ -842,9 +856,17 @@
     function wireMarqueResolve(lineId, box) {
         const btn = box.querySelector('.mq-resolve');
         if (!btn) return;
+        // Typing an override auto-selects its radio, so the operator doesn't have to click both.
+        const free = box.querySelector('.mq-freetext');
+        const other = box.querySelector('input[name="mq"][value="__other__"]');
+        if (free && other) free.addEventListener('input', () => { if (free.value.trim()) other.checked = true; });
         btn.addEventListener('click', async () => {
-            const picked = box.querySelector('input[name="mq"]:checked') || box.querySelector('.mq-prefill') || box.querySelector('.mq-freetext');
-            const code = picked ? (picked.value || '').trim() : '';
+            // Confirm (radio = the DGX prefix), override (radio = __other__ → free text), or pick (a candidate radio).
+            let code = '';
+            const checked = box.querySelector('input[name="mq"]:checked');
+            if (checked && checked.value === '__other__') code = (box.querySelector('.mq-freetext')?.value || '').trim();
+            else if (checked) code = (checked.value || '').trim();
+            else code = (box.querySelector('.mq-freetext')?.value || '').trim();
             const status = box.querySelector('.mq-status');
             if (!code) { if (status) status.textContent = 'Pick a marque first.'; return; }
             btn.disabled = true;
@@ -1015,6 +1037,30 @@
         try { await api('POST', '/bulk-mark-pending-as-create-new'); location.reload(); }
         catch (err) { alert('Failed: ' + err.message); }
     });
+
+    (function () {
+        const btn = document.getElementById('btn-confirm-marques');
+        if (!btn) return;
+        btn.addEventListener('click', () => {
+            openModal(
+                '<h3>Confirm DGX-resolved marques</h3>' +
+                '<p>Accept DGX\'s resolved marque for <strong>every auto-resolved line</strong> and queue them as Create New. ' +
+                'It applies DGX\'s answer <strong>as-is</strong>.</p>' +
+                '<p class="hint">Do this only <strong>after</strong> you\'ve spot-checked a sample and overridden any wrong ones ' +
+                '(open the line → change the marque). These brands are multi-marque, so a few may be BMW/Mercedes, not VAG.</p>',
+                [
+                    { label: 'Cancel', onClick: closeModal },
+                    { label: 'Confirm resolved', primary: true, onClick: async () => {
+                        try {
+                            const r = await api('POST', '/confirm-resolved-marques');
+                            closeModal();
+                            alert('Confirmed ' + (r.confirmed || 0) + ' resolved marque(s) — queued as Create New.');
+                            location.reload();
+                        } catch (e) { alert('Failed: ' + e.message); }
+                    } }
+                ]);
+        });
+    })();
 
     document.getElementById('btn-skip-pending').addEventListener('click', () => {
         const n = document.getElementById('cnt-skip-pending').textContent;
