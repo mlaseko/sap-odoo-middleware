@@ -260,9 +260,11 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
 
     public async Task<int> BulkReenrichBlockersAsync(Guid documentId, CancellationToken ct)
     {
-        // Only the residual blockers — partial/unmatched enrichments DGX couldn't classify — and never a
-        // line the operator/worker already resolved ('matched'/'created'). Full reset → 'pending' with
-        // enrichment state cleared so the worker re-queries the (now-improved) DGX classifier.
+        // The residual blockers — enrichments DGX couldn't classify ('partial'/'unmatched') AND lines that
+        // failed purely because DGX was unreachable ('failed', e.g. a mid-run outage) — but never a line the
+        // operator/worker already resolved ('matched'/'created'). Including 'failed' is what lets this one
+        // button recover a DGX outage; without it those lines could only be re-enriched one at a time. Full
+        // reset → 'pending' with enrichment state cleared so the worker re-queries the (recovered) classifier.
         const string sql = """
             UPDATE public."staging_document_line"
             SET "ReviewStatus" = 'pending',
@@ -271,7 +273,7 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
                 "EnrichedAt" = NULL, "EnrichmentPayloadJson" = NULL, "EnrichmentConfirmationRequired" = false,
                 "EnrichmentConfirmedBy" = NULL, "EnrichmentConfirmedAt" = NULL, "MatchStrategy" = NULL
             WHERE "DocumentId" = @doc
-              AND "EnrichmentStatus" IN ('partial', 'unmatched')
+              AND "EnrichmentStatus" IN ('partial', 'unmatched', 'failed')
               AND "ReviewStatus" NOT IN ('matched', 'created')
               AND "IsPromotional" = false;
             """;
@@ -430,14 +432,26 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
 
     public async Task<IReadOnlyList<EnrichmentCandidate>> GetLinesNeedingEnrichmentAsync(int limit, CancellationToken ct)
     {
+        // Two candidate sources:
+        //   1. Never-enriched pending lines (the normal path).
+        //   2. Self-heal after a DGX outage: lines parked in needs_manual purely because the enrichment
+        //      service was unreachable (a TRANSIENT transport failure, error code 'dgx_unreachable'), retried
+        //      after a short cooldown so a momentary outage recovers on its own without an operator noticing.
+        //      Terminal no-matches (status 'partial', no error) are NOT retried — only the transient failure.
+        //      The cooldown bounds the retry rate while DGX is still down (each failed retry re-stamps
+        //      EnrichedAt); an operator action (match/skip/create) moves the line out of this set immediately.
         const string sql = """
             SELECT l."Id", l."DocumentId", l."SupplierArticleNumber", l."OemNumbers", l."Brand", l."Description"
             FROM public."staging_document_line" l
             JOIN public."staging_document" d ON d."Id" = l."DocumentId"
             WHERE d."Status" = 'extracted'
-              AND l."ReviewStatus" = 'pending'
-              AND l."EnrichmentSource" IS NULL
               AND l."IsPromotional" = false
+              AND (
+                    (l."ReviewStatus" = 'pending' AND l."EnrichmentSource" IS NULL)
+                 OR (l."ReviewStatus" = 'needs_manual'
+                     AND l."EnrichmentErrorCode" = 'dgx_unreachable'
+                     AND (l."EnrichedAt" IS NULL OR l."EnrichedAt" < now() - interval '2 minutes'))
+                  )
             ORDER BY l."DocumentId", l."LineNumber"
             LIMIT @limit;
             """;
