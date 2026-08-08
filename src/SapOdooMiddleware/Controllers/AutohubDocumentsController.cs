@@ -360,6 +360,21 @@ public class AutohubDocumentsController : ControllerBase
 
     public sealed record ResolveManufacturerBody(string? ManufacturerCode);
 
+    /// <summary>
+    /// Bulk-accept DGX's resolved marque for every resolved:true line in the document — applies each line's
+    /// own voted prefix and queues it for creation. For SPEED on a mostly-resolved batch; the operator
+    /// should independently spot-check and override exceptions (per-line resolve) BEFORE running this, since
+    /// it applies DGX's answer as-is without a fresh ruling.
+    /// </summary>
+    [HttpPost("{documentId:guid}/confirm-resolved-marques")]
+    public async Task<IActionResult> ConfirmResolvedMarques(Guid documentId, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(documentId, ct);
+        if (doc is null) return NotFound();
+        var confirmed = await _review.BulkApplyResolvedMarquesAsync(documentId, ct);
+        return Ok(new { confirmed });
+    }
+
     /// <summary>The persisted DGX enrichment for a line (detail panel). 204 if the line was never enriched.</summary>
     [HttpGet("{documentId:guid}/lines/{lineId:guid}/enrichment")]
     public async Task<IActionResult> GetLineEnrichment(Guid documentId, Guid lineId, CancellationToken ct)

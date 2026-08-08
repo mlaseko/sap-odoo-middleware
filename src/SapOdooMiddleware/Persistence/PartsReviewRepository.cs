@@ -58,6 +58,13 @@ public interface IPartsReviewRepository
     /// </summary>
     Task<int> BulkReenrichBlockersAsync(Guid documentId, CancellationToken ct);
 
+    /// <summary>
+    /// Bulk-accept DGX's resolved marque for every resolved:true line: copy the voted prefix into the
+    /// item_data SKU prefix (replacing the shadow 'GEN') and queue the line for creation. Skips terminal
+    /// lines. Returns the count. Operator overrides/picks go through the per-line resolve, not this.
+    /// </summary>
+    Task<int> BulkApplyResolvedMarquesAsync(Guid documentId, CancellationToken ct);
+
     /// <summary>Operator edits to an extracted line before creation (qty / unit price / description). Recomputes the line total.</summary>
     Task UpdateLineFieldsAsync(Guid lineId, decimal? quantity, decimal? unitPriceForeign, string? description, CancellationToken ct);
 
@@ -280,6 +287,32 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
             WHERE "DocumentId" = @doc
               AND "EnrichmentStatus" IN ('partial', 'unmatched', 'failed')
               AND "ReviewStatus" NOT IN ('matched', 'created')
+              AND "IsPromotional" = false;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        return await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<int> BulkApplyResolvedMarquesAsync(Guid documentId, CancellationToken ct)
+    {
+        // Copy manufacturer_resolution.prefix into item_data.suggested_sku_prefix (replacing the shadow
+        // 'GEN') for every resolved:true line, and queue it as create_new so bulk-create mints under the
+        // voted marque. No DGX call and no ruling written — these are ACCEPTED verdicts, not independent
+        // operator picks (those go through the per-line resolve endpoint, which does write a ruling).
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "EnrichmentPayloadJson" = jsonb_set(
+                    "EnrichmentPayloadJson", '{item_data,suggested_sku_prefix}',
+                    "EnrichmentPayloadJson"#>'{manufacturer_resolution,prefix}', true),
+                "ReviewStatus" = 'create_new',
+                "CreateErrorMessage" = NULL
+            WHERE "DocumentId" = @doc
+              AND "EnrichmentPayloadJson"#>>'{manufacturer_resolution,resolved}' = 'true'
+              AND "EnrichmentPayloadJson"#>'{item_data}' IS NOT NULL
+              AND "EnrichmentPayloadJson"#>>'{manufacturer_resolution,prefix}' IS NOT NULL
+              AND "ReviewStatus" NOT IN ('created','matched','skip')
               AND "IsPromotional" = false;
             """;
         await using var conn = await OpenAsync(ct);
