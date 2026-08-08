@@ -63,9 +63,15 @@ public sealed class OemFilterService : IOemFilterService
 
             foreach (var piece in TokenSeparator.Split(raw))
             {
-                var token = piece.Trim().Trim(EdgePunctuation).Trim();
-                if (token.Length == 0)
+                var trimmed = piece.Trim().Trim(EdgePunctuation).Trim();
+                if (trimmed.Length == 0)
                     continue;
+
+                // OE codes are case-insensitive but the token pattern only accepts uppercase, so a lowercase
+                // or mixed-case cell (e.g. "b19126", "a2711801510") would otherwise be dropped as noise and
+                // the whole line would enrich with no OEMs. Canonicalise to upper before matching AND store
+                // the upper form so the OEM lands in the enrich request and matches downstream consistently.
+                var token = trimmed.ToUpperInvariant();
 
                 if (NoiseBlacklist.Contains(token) || EngineSizePattern.IsMatch(token))
                     noise.Add(token);
