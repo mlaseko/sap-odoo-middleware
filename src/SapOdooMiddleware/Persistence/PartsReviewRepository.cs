@@ -86,7 +86,6 @@ public interface IPartsReviewRepository
 
     /// <summary>Count of lines still awaiting background enrichment (pending, not-yet-enriched, non-promotional) for one document.</summary>
     Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct);
-    Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
 
     /// <summary>Persist the full enrichment outcome (source, borrowed, neon_oitm_id, status, strategy, payload) on the line.</summary>
     Task RecordEnrichmentResultAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier,
@@ -436,27 +435,6 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         cmd.Parameters.AddWithValue("doc", documentId);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is null or DBNull ? 0 : Convert.ToInt32(result);
-    }
-
-    public async Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct)
-    {
-        const string sql = """
-            UPDATE public."staging_document_line"
-            SET "EnrichmentSource" = @source,
-                "BorrowedFromArticle" = @ba,
-                "BorrowedFromSupplier" = @bs,
-                "EnrichmentConfirmedBy" = @by,
-                "EnrichmentConfirmedAt" = CASE WHEN @by IS NULL THEN NULL ELSE NOW() END
-            WHERE "Id" = @id;
-            """;
-        await using var conn = await OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("source", (object?)source ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("ba", (object?)borrowedArticle ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("bs", (object?)borrowedSupplier ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("by", (object?)confirmedBy ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("id", lineId);
-        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     public async Task RecordEnrichmentResultAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier,
