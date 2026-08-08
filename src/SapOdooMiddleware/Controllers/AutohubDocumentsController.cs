@@ -305,8 +305,11 @@ public class AutohubDocumentsController : ControllerBase
 
         var row = await _review.GetByIdAsync(lineId, ct);
         if (row is null) return NotFound();
-        if (row.ReviewStatus != "needs_manufacturer")
-            return Conflict(new { error = $"Line is '{row.ReviewStatus}', not 'needs_manufacturer'." });
+        // Resolvable from any actionable state — a needs_manufacturer hold OR during review (pending /
+        // create_new / needs_manual), so the operator can assign the marque without a create round-trip
+        // first. Only a terminal line (already created / matched / skipped) is off-limits.
+        if (row.ReviewStatus is "created" or "matched" or "skip")
+            return Conflict(new { error = $"Line is '{row.ReviewStatus}' — nothing to resolve." });
 
         var payloadJson = await _review.GetEnrichmentPayloadAsync(lineId, ct);
         if (string.IsNullOrWhiteSpace(payloadJson))

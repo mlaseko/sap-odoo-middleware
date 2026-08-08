@@ -215,7 +215,7 @@
         var pill = SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.LinePill(l.ReviewStatus);
         <tr class="line-row @(l.IsPromotional ? "promo" : null)" data-line-id="@l.Id"
             data-suggested-code="@l.SuggestedDonorItemCode" data-suggested-supplier="@l.SuggestedDonorSupplier"
-            data-source="@l.EnrichmentSource">
+            data-source="@l.EnrichmentSource" data-review-status="@l.ReviewStatus">
             <td class="num">@l.LineNumber</td>
             <td class="col-art">@l.SupplierArticleNumber</td>
             <td class="col-oems" title="@oems">@oems</td>
@@ -471,13 +471,37 @@
         return html;
     }
 
-    function enrichmentHtml(enr) {
+    // When DGX already resolved the marque (voted/learned), the operator CONFIRMS the answer rather than
+    // selecting blind — in shadow the line still holds under the GEN-guard, but the answer is attached.
+    function marqueConfirmHtml(mr) {
+        const method = mr.method ? ' <span class="mq-share">(' + esc(mr.method) + ')</span>' : '';
+        const ev = mr.evidence ? '<p class="mq-reason">' + esc(mr.evidence) + '</p>' : '';
+        return '<div class="ld-marque">' +
+            '<h3>Manufacturer (marque)</h3>' +
+            '<p class="mq-reason">✓ DGX resolved this to <strong>' + esc(mr.prefix) + '</strong>' + method + ' — confirm to create under it.</p>' +
+            ev +
+            '<input type="hidden" class="mq-prefill" value="' + esc(mr.prefix) + '">' +
+            '<div class="mq-actions"><button type="button" class="btn btn-sm mq-resolve">Confirm ' + esc(mr.prefix) + '</button>' +
+            '<span class="mq-status"></span></div>' +
+            '</div>';
+    }
+
+    // Marque section for a line: confirm when DGX resolved it (has a prefix), pick when it couldn't.
+    function marqueSectionHtml(mr) {
+        return (mr.resolved === true && mr.prefix) ? marqueConfirmHtml(mr) : marquePickerHtml(mr);
+    }
+
+    function enrichmentHtml(enr, reviewStatus) {
         const d = enr.item_data || {};
         const bf = enr.borrowed_from;
         const noData = !enr.item_data;
-        // A held line leads with the marque picker — that's the one action the operator must take here.
+        // Lead with the marque section (pick or confirm) while the line is still actionable — not once it's
+        // been created/matched/skipped. The resolve endpoint accepts any of those actionable states.
         const mr = enr.manufacturer_resolution;
-        let head = (mr && mr.resolved === false) ? marquePickerHtml(mr) : '';
+        // Only in the inline review panel (which passes the line's status) — and not once terminal. Callers
+        // that pass no status (e.g. the borrowed-enrichment confirm modal) deliberately suppress the section.
+        const actionable = !!reviewStatus && reviewStatus !== 'created' && reviewStatus !== 'matched' && reviewStatus !== 'skip';
+        let head = (mr && actionable) ? marqueSectionHtml(mr) : '';
         // Enrichment already happened during extraction — show its outcome, don't imply it's pending.
         let html = head + '<h3>Item enrichment</h3>';
         html += '<p>Enrichment: <strong>' + (noData ? 'no catalog match found' : 'done') + '</strong>' +
@@ -796,7 +820,8 @@
             const r = await fetch(base + '/lines/' + lineId + '/enrichment', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} });
             if (r.status === 204) { box.innerHTML = '<em>No enrichment data (matched directly or not yet enriched).</em>'; return; }
             if (!r.ok) throw new Error('HTTP ' + r.status);
-            box.innerHTML = enrichmentHtml(await r.json());
+            const reviewStatus = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]')?.dataset.reviewStatus || '';
+            box.innerHTML = enrichmentHtml(await r.json(), reviewStatus);
             wireMarqueResolve(lineId, box);
         } catch (e) {
             box.dataset.loaded = 'false';
@@ -809,7 +834,7 @@
         const btn = box.querySelector('.mq-resolve');
         if (!btn) return;
         btn.addEventListener('click', async () => {
-            const picked = box.querySelector('input[name="mq"]:checked') || box.querySelector('.mq-freetext');
+            const picked = box.querySelector('input[name="mq"]:checked') || box.querySelector('.mq-prefill') || box.querySelector('.mq-freetext');
             const code = picked ? (picked.value || '').trim() : '';
             const status = box.querySelector('.mq-status');
             if (!code) { if (status) status.textContent = 'Pick a marque first.'; return; }
