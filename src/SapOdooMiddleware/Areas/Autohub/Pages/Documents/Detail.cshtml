@@ -30,6 +30,10 @@
     #lines-table th.col-oems, #lines-table td.col-oems { min-width: 170px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #lines-table th.col-art, #lines-table td.col-art { white-space: nowrap; }
     #lines-table td .unit { color: var(--muted-2); font-size: 12px; }
+    /* Status column: pack the status + source + flag pills as an even, wrapping cluster instead of
+       inline spans with ad-hoc margins (which stacked unevenly). Primary status leads; the rest wrap. */
+    #lines-table td.status-cell { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-width: 116px; }
+    #lines-table td.status-cell .pill { margin: 0; }
     #lines-table tr.line-row { cursor: pointer; }
     #lines-table tr.line-row:hover { background: rgba(255,255,255,.04); }
     #lines-table tr.line-row.expanded { background: var(--accent-soft); }
@@ -229,16 +233,16 @@
                 @{ var sb = SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.SourceBadge(l.MatchStrategy); }
                 @if (sb.Label.Length > 0)
                 {
-                    <span class="pill @sb.Css" title="@l.MatchStrategy" style="margin-left:4px;">@sb.Label</span>
+                    <span class="pill @sb.Css" title="@l.MatchStrategy">@sb.Label</span>
                 }
                 @if (l.NeedsReview)
                 {
-                    <span class="pill pill-orange" style="margin-left:4px;"
+                    <span class="pill pill-orange"
                           title="Borrowed part type unverified (@l.SelectedComponentVerdict) — review/choose the donor">⚠ review</span>
                 }
                 @if (l.NeedsMarque && l.ReviewStatus != "needs_manufacturer" && l.ReviewStatus != "created")
                 {
-                    <span class="pill pill-orange" style="margin-left:4px;"
+                    <span class="pill pill-orange"
                           title="DGX couldn't auto-resolve the manufacturer — expand the line to assign the marque before creating">⚑ marque</span>
                 }
             </td>
