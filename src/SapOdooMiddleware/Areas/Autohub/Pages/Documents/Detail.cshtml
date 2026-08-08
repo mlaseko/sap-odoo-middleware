@@ -356,6 +356,11 @@
         let s;
         try { s = await api('GET', '/review-summary'); } catch (e) { return; }
         const b = s.by_status || {};
+        // Marque-labelling progress: how many still need a confirm (DGX resolved) vs a pick (DGX couldn't).
+        const toConfirm = s.marque_to_confirm || 0, toPick = s.marque_to_pick || 0;
+        const marque = (toConfirm + toPick) > 0
+            ? ' &nbsp;|&nbsp; ⚑ Marque: <span class="rc">' + toConfirm + ' to confirm</span> · <span class="rc">' + toPick + ' to pick</span>'
+            : '';
         document.getElementById('review-counts').innerHTML =
             '📋 Review: <span class="rc">' + (b.matched || 0) + ' matched</span> · ' +
             '<span class="rc">' + (b.created || 0) + ' created</span> · ' +
@@ -364,7 +369,7 @@
             '<span class="rc">' + (b.needs_manual || 0) + ' needs manual</span> · ' +
             '<span class="rc">' + (b.needs_confirmation || 0) + ' confirm</span> · ' +
             '<span class="rc">' + (b.pending || 0) + ' pending</span> · ' +
-            '<span class="rc">' + (b.create_failed || 0) + ' failed</span>';
+            '<span class="rc">' + (b.create_failed || 0) + ' failed</span>' + marque;
         // Background-enrichment indicator: visible while DGX is still enriching this document's lines.
         const awaiting = s.awaiting_enrichment || 0;
         const ei = document.getElementById('enrich-indicator');

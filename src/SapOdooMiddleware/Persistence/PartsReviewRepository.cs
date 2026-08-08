@@ -78,6 +78,12 @@ public interface IPartsReviewRepository
     Task MarkEditedAsync(Guid lineId, string editedBy, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
 
+    /// <summary>
+    /// Marque-labelling progress for the review header: how many still-actionable lines are awaiting an
+    /// operator confirm (DGX resolved them) vs a pick (DGX could not). Excludes already-queued/terminal lines.
+    /// </summary>
+    Task<(int ToConfirm, int ToPick)> GetMarqueProgressAsync(Guid documentId, CancellationToken ct);
+
     /// <summary>Count of lines still awaiting background enrichment (pending, not-yet-enriched, non-promotional) for one document.</summary>
     Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct);
     Task SetEnrichmentAsync(Guid lineId, string? source, string? borrowedArticle, string? borrowedSupplier, string? confirmedBy, CancellationToken ct);
@@ -386,6 +392,27 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct)) counts[r.GetString(0)] = (int)r.GetInt64(1);
         return counts;
+    }
+
+    public async Task<(int ToConfirm, int ToPick)> GetMarqueProgressAsync(Guid documentId, CancellationToken ct)
+    {
+        // Still-actionable lines only (not queued for creation / terminal). resolved=true → awaiting confirm;
+        // resolved=false → awaiting a pick. Text compare on the jsonb node (shape-tolerant, never cast).
+        const string sql = """
+            SELECT
+              count(*) FILTER (WHERE "EnrichmentPayloadJson"#>>'{manufacturer_resolution,resolved}' = 'true')  AS to_confirm,
+              count(*) FILTER (WHERE "EnrichmentPayloadJson"#>>'{manufacturer_resolution,resolved}' = 'false') AS to_pick
+            FROM public."staging_document_line"
+            WHERE "DocumentId" = @doc
+              AND "IsPromotional" = false
+              AND "ReviewStatus" NOT IN ('created','matched','skip','create_new');
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct)) return (0, 0);
+        return ((int)r.GetInt64(0), (int)r.GetInt64(1));
     }
 
     public async Task<int> CountAwaitingEnrichmentAsync(Guid documentId, CancellationToken ct)
