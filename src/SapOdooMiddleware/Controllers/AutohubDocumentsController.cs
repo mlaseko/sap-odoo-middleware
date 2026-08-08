@@ -354,11 +354,16 @@ public class AutohubDocumentsController : ControllerBase
             return StatusCode(StatusCodes.Status502BadGateway, new { error = $"DGX returned no usable prefix for '{code}'." });
 
         var merged = ManufacturerResolutionMerge.Apply(held, pkg);
+        // Optional operator override of the SAP item group. DGX's package sets the group from the donor;
+        // when the operator supplies a positive group here it wins, so a wrong borrowed group (e.g. 105)
+        // can be corrected on the same panel as the marque. Line stays create_new — minted on Bulk Create.
+        if (body!.ItemsGroupCode is > 0 && merged.ItemData is { } md)
+            merged = merged with { ItemData = md with { SuggestedItmsGrpCod = body.ItemsGroupCode } };
         await _review.ApplyManufacturerResolutionAsync(lineId, JsonSerializer.Serialize(merged), ct);
         return Ok(await _review.GetByIdAsync(lineId, ct));
     }
 
-    public sealed record ResolveManufacturerBody(string? ManufacturerCode);
+    public sealed record ResolveManufacturerBody(string? ManufacturerCode, int? ItemsGroupCode);
 
     /// <summary>
     /// Bulk-accept DGX's resolved marque for every resolved:true line in the document — applies each line's

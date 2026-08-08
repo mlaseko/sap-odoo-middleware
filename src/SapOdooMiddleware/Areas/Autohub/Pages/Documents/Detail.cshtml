@@ -64,6 +64,11 @@
     .mq-free input { margin-left: 8px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elev); color: var(--text); }
     .mq-actions { display: flex; gap: 10px; align-items: center; }
     .mq-status { font-size: 12px; color: var(--muted); }
+    .ld-override { margin: 0 0 12px; }
+    .ov-form { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; max-width: 360px; }
+    .ov-row { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+    .ov-row input { padding: 5px 8px; }
+    .ov-status { font-size: 12px; color: var(--muted); }
     .line-detail .kv th { text-align: left; color: var(--muted); padding-right: 10px; font-weight: 600; vertical-align: top; }
     .ld-saved { color: var(--success); }
     .ld-borrowed { color: var(--warning); }
@@ -518,6 +523,25 @@
         return (mr.resolved === true && mr.prefix) ? marqueConfirmHtml(mr, lineId) : marquePickerHtml(mr, lineId);
     }
 
+    // Override for a line that already has a real marque/group (resolved or borrowed): a collapsed control
+    // to correct a wrong auto-assigned marque (SKU prefix) or SAP item group. Saving posts to the same
+    // resolve-manufacturer endpoint (marque via DGX + optional group override) and keeps the line queued.
+    function marqueOverrideHtml(mr, d, lineId) {
+        const curPrefix = ((mr && mr.prefix) || d.suggested_sku_prefix || '').toString();
+        const curGroup  = (d.suggested_itms_grp_cod != null) ? String(d.suggested_itms_grp_cod) : '';
+        return '<div class="ld-override">' +
+            '<button type="button" class="btn btn-sm ov-toggle">✎ Change marque / group</button>' +
+            '<div class="ov-form" style="display:none;">' +
+              '<label class="ov-row"><span>Marque (SKU prefix)</span>' +
+                '<input type="text" class="ov-marque" value="' + esc(curPrefix) + '" placeholder="e.g. BM, MB, VAG"></label>' +
+              '<label class="ov-row"><span>SAP item group</span>' +
+                '<input type="number" class="ov-group" value="' + esc(curGroup) + '" placeholder="e.g. 105"></label>' +
+              '<div class="mq-actions"><button type="button" class="btn btn-sm ov-save">Save override</button>' +
+                '<span class="ov-status"></span></div>' +
+            '</div>' +
+            '</div>';
+    }
+
     function enrichmentHtml(enr, reviewStatus, lineId) {
         const d = enr.item_data || {};
         const bf = enr.borrowed_from;
@@ -534,7 +558,12 @@
         // stale 'GEN'. Held/GEN lines (including create_new ones queued with GEN) still get the picker.
         const prefixUnresolved = !d.suggested_sku_prefix ||
             String(d.suggested_sku_prefix).trim().toUpperCase() === 'GEN';
-        let head = (mr && actionable && prefixUnresolved) ? marqueSectionHtml(mr, lineId) : '';
+        // Unresolved (blank/GEN) → the pick/confirm picker, expanded (the operator must act). Already
+        // resolved with a real prefix → a collapsed "Change marque / group" override, so a wrong auto-
+        // assigned marque (VAG→BM) or SAP group (105) can still be corrected without re-uploading.
+        let head = '';
+        if (mr && actionable && prefixUnresolved) head = marqueSectionHtml(mr, lineId);
+        else if (actionable && !prefixUnresolved && !noData) head = marqueOverrideHtml(mr, d, lineId);
         // Enrichment already happened during extraction — show its outcome, don't imply it's pending.
         let html = head + '<h3>Item enrichment</h3>';
         html += '<p>Enrichment: <strong>' + (noData ? 'no catalog match found' : 'done') + '</strong>' +
@@ -545,6 +574,9 @@
         if (bf) {
             html += '<p class="ld-borrowed">Borrowed from article <strong>' + esc(bf.article_number) + '</strong>' +
                     (bf.supplier_name ? ' (' + esc(bf.supplier_name) + ')' : '') + '. Please verify the fit below.</p>';
+            // Per-line sign-off for a cross-supplier borrow: marks the line confirmed (stays queued) so Bulk
+            // Create's borrow gate passes. "Confirm all & Create" remains the bulk equivalent.
+            if (actionable) html += '<div class="mq-actions"><button type="button" class="btn btn-sm ld-confirm-borrow">Confirm borrow (keep queued)</button><span class="cb-status"></span></div>';
         }
         html += '<table class="kv">';
         html += '<tr><th>Description</th><td>' + esc(d.primary_description) + '</td></tr>';
@@ -856,6 +888,8 @@
             const reviewStatus = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]')?.dataset.reviewStatus || '';
             box.innerHTML = enrichmentHtml(await r.json(), reviewStatus, lineId);
             wireMarqueResolve(lineId, box);
+            wireMarqueOverride(lineId, box);
+            wireBorrowConfirm(lineId, box);
         } catch (e) {
             box.dataset.loaded = 'false';
             box.innerHTML = '<em class="ld-error">Could not load enrichment: ' + esc(e.message) + '</em>';
@@ -892,6 +926,64 @@
                 // the stale 'GEN') and the now-resolved picker drops away.
                 box.dataset.loaded = 'false';
                 await loadEnrichment(lineId, detailRowFor(lineId));
+                refreshSummary();
+            } catch (e) {
+                if (status) status.textContent = 'Failed: ' + e.message;
+                btn.disabled = false;
+            }
+        });
+    }
+
+    // Override an already-resolved line's marque and/or SAP item group, then re-render. Posts to the same
+    // resolve-manufacturer endpoint (marque re-resolved via DGX + optional operator group override); the
+    // line stays create_new so it mints on the next Bulk Create.
+    function wireMarqueOverride(lineId, box) {
+        const toggle = box.querySelector('.ov-toggle');
+        if (!toggle) return;
+        const form = box.querySelector('.ov-form');
+        toggle.addEventListener('click', () => { form.style.display = (form.style.display === 'none') ? '' : 'none'; });
+        const save = box.querySelector('.ov-save');
+        save.addEventListener('click', async () => {
+            const marque = (box.querySelector('.ov-marque')?.value || '').trim();
+            const groupRaw = (box.querySelector('.ov-group')?.value || '').trim();
+            const status = box.querySelector('.ov-status');
+            if (!marque) { if (status) status.textContent = 'Enter a marque.'; return; }
+            const body = { manufacturer_code: marque };
+            if (groupRaw) {
+                const g = parseInt(groupRaw, 10);
+                if (!isFinite(g) || g <= 0) { if (status) status.textContent = 'Item group must be a positive number.'; return; }
+                body.items_group_code = g;
+            }
+            save.disabled = true;
+            if (status) status.textContent = 'Saving…';
+            try {
+                const updated = await api('POST', '/lines/' + lineId + '/resolve-manufacturer', body);
+                const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
+                if (row) setRowPill(row, (updated && updated.reviewStatus) || 'create_new');
+                box.dataset.loaded = 'false';
+                await loadEnrichment(lineId, detailRowFor(lineId));
+                refreshSummary();
+            } catch (e) {
+                if (status) status.textContent = 'Failed: ' + e.message;
+                save.disabled = false;
+            }
+        });
+    }
+
+    // Per-line sign-off for a cross-supplier borrow: marks the line confirmed (stays create_new) so Bulk
+    // Create's borrow gate passes — the per-line equivalent of "Confirm all & Create".
+    function wireBorrowConfirm(lineId, box) {
+        const btn = box.querySelector('.ld-confirm-borrow');
+        if (!btn) return;
+        const status = box.querySelector('.cb-status');
+        btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            if (status) status.textContent = 'Confirming…';
+            try {
+                const updated = await api('POST', '/lines/' + lineId + '/create-new', { confirmed: true });
+                const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
+                if (row) setRowPill(row, (updated && updated.reviewStatus) || 'create_new');
+                if (status) status.textContent = '✓ Confirmed — will create on Bulk Create.';
                 refreshSummary();
             } catch (e) {
                 if (status) status.textContent = 'Failed: ' + e.message;
