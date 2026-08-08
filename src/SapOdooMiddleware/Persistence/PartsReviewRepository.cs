@@ -16,7 +16,10 @@ public sealed record PartsReviewLineRow(
     string? SuggestedDonorItemCode, long? SuggestedDonorOitmId, string? SuggestedDonorSupplier,
     // Donor-scoring review flags, computed from EnrichmentPayloadJson->audit (null/absent → no review).
     bool NeedsReview, string? SelectedComponentVerdict, string? SelectedName, string? SelectedSupplier,
-    bool HasDonorCandidates);
+    bool HasDonorCandidates,
+    // True when DGX couldn't auto-resolve the marque (manufacturer_resolution.resolved = false) — the line
+    // will need a marque assignment before it can mint. Absent block → false.
+    bool NeedsMarque);
 
 /// <summary>A 'create_new' line reduced to what provisioning needs (incl. the persisted enrichment).</summary>
 public sealed record PartsProvisioningLine(
@@ -126,7 +129,9 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         "\"EnrichmentPayloadJson\"#>>'{audit,selection,selected_name}'," +
         "\"EnrichmentPayloadJson\"#>>'{audit,selection,selected_supplier}'," +
         "COALESCE(CASE WHEN jsonb_typeof(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}') = 'array' " +
-        "THEN jsonb_array_length(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}') END, 0) > 0";
+        "THEN jsonb_array_length(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}') END, 0) > 0," +
+        // NeedsMarque — DGX couldn't resolve the manufacturer. Text compare only (shape-tolerant, never cast).
+        "COALESCE((\"EnrichmentPayloadJson\"#>>'{manufacturer_resolution,resolved}') = 'false', false)";
 
     private readonly ICompanyContext _company;
     public PartsReviewRepository(ICompanyContext company) => _company = company;
@@ -624,7 +629,8 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         SelectedComponentVerdict: r.IsDBNull(27) ? null : r.GetString(27),
         SelectedName:            r.IsDBNull(28) ? null : r.GetString(28),
         SelectedSupplier:        r.IsDBNull(29) ? null : r.GetString(29),
-        HasDonorCandidates:      !r.IsDBNull(30) && r.GetBoolean(30));
+        HasDonorCandidates:      !r.IsDBNull(30) && r.GetBoolean(30),
+        NeedsMarque:             !r.IsDBNull(31) && r.GetBoolean(31));
 
     private static List<string> ParseOems(NpgsqlDataReader r, int ordinal)
     {
