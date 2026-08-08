@@ -260,25 +260,21 @@ public class AutohubDocumentsController : ControllerBase
 
     /// <summary>Reject a (borrowed) enrichment: move the line to 'needs_manual' so the operator can match-by-search (Q9).</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/reject")]
-    public async Task<IActionResult> RejectLine(Guid documentId, Guid lineId, CancellationToken ct)
-    {
-        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
-        await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
-        return Ok(await _review.GetByIdAsync(lineId, ct));
-    }
+    public Task<IActionResult> RejectLine(Guid documentId, Guid lineId, CancellationToken ct)
+        => SetNeedsManualAsync(documentId, lineId, ct);
 
     /// <summary>Reopen a skipped line back to 'needs_manual' so the operator can match/create it (undo bulk-skip).</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/reopen")]
-    public async Task<IActionResult> ReopenLine(Guid documentId, Guid lineId, CancellationToken ct)
-    {
-        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
-        await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
-        return Ok(await _review.GetByIdAsync(lineId, ct));
-    }
+    public Task<IActionResult> ReopenLine(Guid documentId, Guid lineId, CancellationToken ct)
+        => SetNeedsManualAsync(documentId, lineId, ct);
 
     /// <summary>Flag a line 'needs_manual' (operator will match / manual-create / skip it). Available from any status.</summary>
     [HttpPost("{documentId:guid}/lines/{lineId:guid}/needs-manual")]
-    public async Task<IActionResult> MarkNeedsManual(Guid documentId, Guid lineId, CancellationToken ct)
+    public Task<IActionResult> MarkNeedsManual(Guid documentId, Guid lineId, CancellationToken ct)
+        => SetNeedsManualAsync(documentId, lineId, ct);
+
+    /// <summary>Shared body for reject / reopen / needs-manual — all three move a line to 'needs_manual'.</summary>
+    private async Task<IActionResult> SetNeedsManualAsync(Guid documentId, Guid lineId, CancellationToken ct)
     {
         if (await GuardLine(documentId, lineId, ct) is { } err) return err;
         await _review.SetReviewStatusAsync(lineId, "needs_manual", null, ct);
