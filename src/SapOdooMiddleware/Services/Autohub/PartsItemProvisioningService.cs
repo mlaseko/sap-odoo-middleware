@@ -75,13 +75,22 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         // Idempotency guard: if a SAP item already exists for this (supplier, article), match it instead of
         // minting a duplicate. Protects against a re-upload / re-run of the same invoice, and against two
         // lines for the same part in one batch (the first mirrors to oitm, the second matches it).
+        // The Neon code is only trusted when it ALSO exists in SAP — a mirror row whose SAP item was never
+        // durably created (old-build bug) or was later removed must NOT short-circuit to a phantom match;
+        // in that case fall through and create a real item.
         if (await FindExistingItemCodeAsync(article!, line.Brand, ct) is { } existingCode)
         {
-            _logger.LogInformation(
-                "Line {LineId}: SAP item {Code} already exists for {Article}/{Supplier}; matching instead of creating a duplicate.",
+            if (await _sap.ItemExistsAsync(existingCode))
+            {
+                _logger.LogInformation(
+                    "Line {LineId}: SAP item {Code} already exists for {Article}/{Supplier}; matching instead of creating a duplicate.",
+                    line.Id, existingCode, article, line.Brand);
+                await _review.SetReviewStatusAsync(line.Id, "matched", existingCode, ct);
+                return new PartsProvisioningOutcome("created", existingCode, null);
+            }
+            _logger.LogWarning(
+                "Line {LineId}: Neon mirror has {Code} for {Article}/{Supplier} but it is NOT in SAP (phantom); creating a real item instead of matching.",
                 line.Id, existingCode, article, line.Brand);
-            await _review.SetReviewStatusAsync(line.Id, "matched", existingCode, ct);
-            return new PartsProvisioningOutcome("created", existingCode, null);
         }
 
         var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
