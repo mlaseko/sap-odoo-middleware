@@ -26,12 +26,18 @@ public sealed class AutoMatchService : IAutoMatchService
 {
     private readonly IOitmMatchRepository _oitm;
     private readonly IOemFilterService _filter;
+    private readonly SapOdooMiddleware.Services.IAutohubSapB1Service _sap;
     private readonly ILogger<AutoMatchService> _logger;
 
-    public AutoMatchService(IOitmMatchRepository oitm, IOemFilterService filter, ILogger<AutoMatchService> logger)
+    public AutoMatchService(
+        IOitmMatchRepository oitm,
+        IOemFilterService filter,
+        SapOdooMiddleware.Services.IAutohubSapB1Service sap,
+        ILogger<AutoMatchService> logger)
     {
         _oitm = oitm;
         _filter = filter;
+        _sap = sap;
         _logger = logger;
     }
 
@@ -67,7 +73,7 @@ public sealed class AutoMatchService : IAutoMatchService
                         // sharing an LR OEM with another GL#### item) and must fall through to create-new
                         // rather than steal the donor's item_code (our generated primary key).
                         if (ArticleEquals(oem.ArticleNumber, line.SupplierArticleNumber))
-                            return new MatchDecision("matched", oem.ItemCode, "tier1_oem");
+                            return await VerifiedMatchAsync(oem.ItemCode, "tier1_oem", ct);
                         break;   // different article → fall through to Tier 2 / pending
                     case BrandClassifier.MatchKind.VehicleGroupBrand:
                     case BrandClassifier.MatchKind.NoBrandOnInvoice:
@@ -86,12 +92,12 @@ public sealed class AutoMatchService : IAutoMatchService
             if (art is not null)
             {
                 if (string.IsNullOrEmpty(art.SupplierName))
-                    return new MatchDecision("matched", art.ItemCode, "tier2_article");
+                    return await VerifiedMatchAsync(art.ItemCode, "tier2_article", ct);
 
                 switch (BrandClassifier.Classify(effectiveBrand, art.SupplierName))
                 {
                     case BrandClassifier.MatchKind.SameSupplier:
-                        return new MatchDecision("matched", art.ItemCode, "tier2_article");
+                        return await VerifiedMatchAsync(art.ItemCode, "tier2_article", ct);
                     default:
                         // Vehicle-group, no brand, or a different specific supplier on an exact-article
                         // collision — let the operator confirm rather than silently link.
@@ -100,6 +106,32 @@ public sealed class AutoMatchService : IAutoMatchService
             }
         }
 
+        return new MatchDecision("pending", null);
+    }
+
+    /// <summary>
+    /// Verify a candidate item_code actually exists in the Autohub SAP company before auto-matching to it.
+    /// The Neon oitm mirror can hold a code whose SAP item was never durably created (an old-build bug) or
+    /// was later removed — matching to it silently links the line to a phantom SAP item that will never be
+    /// created. If the code isn't in SAP, fall through to 'pending' so enrichment/create handles the line.
+    /// A SAP-service outage is treated as "can't confirm" → pending (never a false match).
+    /// </summary>
+    private async Task<MatchDecision> VerifiedMatchAsync(string itemCode, string strategy, CancellationToken ct)
+    {
+        try
+        {
+            if (await _sap.ItemExistsAsync(itemCode))
+                return new MatchDecision("matched", itemCode, strategy);
+            _logger.LogWarning(
+                "Auto-match: candidate {Code} ({Strategy}) is in Neon but NOT in SAP — skipping match; line stays pending for create.",
+                itemCode, strategy);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Auto-match: could not verify {Code} ({Strategy}) in SAP; leaving line pending rather than risk a phantom match.",
+                itemCode, strategy);
+        }
         return new MatchDecision("pending", null);
     }
 
