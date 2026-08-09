@@ -31,11 +31,22 @@ public sealed record PartsProvisioningLine(
 public sealed record EnrichmentCandidate(
     Guid Id, Guid DocumentId, string? SupplierArticleNumber, List<string> OemNumbers, string? Brand, string? Description);
 
+/// <summary>
+/// The stored data needed to re-create a SAP item under its original code (reconcile of a Neon-mirror
+/// row whose SAP item is missing). Prices are the TZS values persisted when the line was first created.
+/// </summary>
+public sealed record ReconcileLineData(
+    string ItemCode, string? Article, string? Brand, string? Description,
+    decimal? Pl01Tzs, decimal? Pl03Tzs, decimal? Pl05Tzs, string? EnrichmentPayloadJson);
+
 public interface IPartsReviewRepository
 {
     Task<IReadOnlyList<PartsReviewLineRow>> ListByDocumentAsync(Guid documentId, CancellationToken ct);
     Task<PartsReviewLineRow?> GetByIdAsync(Guid lineId, CancellationToken ct);
     Task SetReviewStatusAsync(Guid lineId, string status, string? matchedItemCode, CancellationToken ct);
+
+    /// <summary>The stored create-time data for the most recent 'created' line with this item code (reconcile).</summary>
+    Task<ReconcileLineData?> GetCreatedLineForReconcileAsync(string itemCode, CancellationToken ct);
 
     /// <summary>Flag a line 'needs_confirmation' with the suggested donor SAP item (vehicle-group brand ambiguity).</summary>
     Task SetNeedsConfirmationAsync(Guid lineId, string? suggestedItemCode, long? suggestedOitmId,
@@ -147,6 +158,32 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         var c = new NpgsqlConnection(ConnectionString);
         await c.OpenAsync(ct);
         return c;
+    }
+
+    public async Task<ReconcileLineData?> GetCreatedLineForReconcileAsync(string itemCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT "CreatedSku","SupplierArticleNumber","Brand","Description",
+                   "Pl01Tzs","Pl03Tzs","Pl05Tzs","EnrichmentPayloadJson"
+            FROM public."staging_document_line"
+            WHERE "CreatedSku" = @code AND "ReviewStatus" = 'created'
+            ORDER BY "CreatedAt" DESC
+            LIMIT 1;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("code", itemCode);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct)) return null;
+        return new ReconcileLineData(
+            r.GetString(0),
+            r.IsDBNull(1) ? null : r.GetString(1),
+            r.IsDBNull(2) ? null : r.GetString(2),
+            r.IsDBNull(3) ? null : r.GetString(3),
+            r.IsDBNull(4) ? null : r.GetDecimal(4),
+            r.IsDBNull(5) ? null : r.GetDecimal(5),
+            r.IsDBNull(6) ? null : r.GetDecimal(6),
+            r.IsDBNull(7) ? null : r.GetString(7));
     }
 
     public async Task<IReadOnlyList<PartsReviewLineRow>> ListByDocumentAsync(Guid documentId, CancellationToken ct)
