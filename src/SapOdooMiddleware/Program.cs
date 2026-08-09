@@ -258,6 +258,7 @@ builder.Services.AddScoped<IPartsReviewRepository, PartsReviewRepository>();
 builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
 builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();
 builder.Services.AddScoped<PartsItemCreationService>();
+builder.Services.AddScoped<PartsSapReconciliationService>();   // re-create SAP items missing behind their Neon mirror
 builder.Services.AddSingleton<AutohubSapSetupVerifier>();   // read-only SAP pre-flight (MSSQL)
 builder.Services.AddSingleton<AutohubBulkCreateJobService>();   // async Bulk Create (background, survives proxy timeout)
 
