@@ -13,6 +13,7 @@ public record LubesProvisioningResult(
     decimal? RetailNetPrice         = null,
     decimal? DealerNetPrice         = null,
     decimal? SuperDealerNetPrice    = null,
+    decimal? MaasaiNetPrice         = null,
     string? ReviewReason            = null,
     List<string>? Candidates        = null,
     string? ErrorMessage            = null);

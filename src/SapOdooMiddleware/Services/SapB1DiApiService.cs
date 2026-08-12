@@ -3969,6 +3969,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 items.PriceList.Price    = (double)request.SuperDealerNetPrice;
                 items.PriceList.Currency = "TZS";
 
+                items.PriceList.SetCurrentLine(3);
+                items.PriceList.Price    = (double)request.MaasaiNetPrice;
+                items.PriceList.Currency = "TZS";
+
                 // UDF — set the Odoo category name; the worker stamps U_Odoo_Product_ID later.
                 TrySetUserField(items.UserFields, "U_Odoo_Category",
                     request.OdooCategoryName ?? string.Empty, $"item {request.ItemCode}");
@@ -4134,8 +4138,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 var dealer = (decimal)items.PriceList.Price;
                 items.PriceList.SetCurrentLine(2);
                 var superDealer = (decimal)items.PriceList.Price;
+                items.PriceList.SetCurrentLine(3);
+                var maasai = (decimal)items.PriceList.Price;
 
-                return new SapItemSnapshot(cat, retail, dealer, superDealer);
+                return new SapItemSnapshot(cat, retail, dealer, superDealer, maasai);
             }
             finally
             {
@@ -4180,6 +4186,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 changed |= FillBlankPrice(items, 0, desired.RetailNetPrice);
                 changed |= FillBlankPrice(items, 1, desired.DealerNetPrice);
                 changed |= FillBlankPrice(items, 2, desired.SuperDealerNetPrice);
+                changed |= FillBlankPrice(items, 3, desired.MaasaiNetPrice);
 
                 if (!changed)
                 {

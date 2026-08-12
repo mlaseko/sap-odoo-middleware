@@ -342,6 +342,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         if (prices.Retail      <= 0m)                      missing.Add("RetailNetPrice");
         if (prices.Dealer      <= 0m)                      missing.Add("DealerNetPrice");
         if (prices.SuperDealer <= 0m)                      missing.Add("SuperDealerNetPrice");
+        if (prices.Maasai     <= 0m)                      missing.Add("MaasaiNetPrice");
         if (missing.Count > 0)
             return new LubesProvisioningResult("needs_review", code,
                 ItemName: itemName,
@@ -361,6 +362,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             RetailNetPrice: prices.Retail,
             DealerNetPrice: prices.Dealer,
             SuperDealerNetPrice: prices.SuperDealer,
+            MaasaiNetPrice: prices.Maasai,
             OdooCategoryName: catResult.Name!);
 
         // 6b) Dry-run short-circuit: return everything we WOULD do, write nothing.
@@ -422,7 +424,8 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             ), ct);
 
             await _productRepo.UpsertPricesAsync(
-                code, prices.Retail, prices.Dealer, prices.SuperDealer, ct);
+                code, prices.Retail, prices.Dealer, prices.SuperDealer,
+                prices.Maasai, ct);
         }
         catch (Exception ex)
         {
@@ -460,5 +463,6 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             RetailNetPrice: prices.Retail,
             DealerNetPrice: prices.Dealer,
             SuperDealerNetPrice: prices.SuperDealer,
+            MaasaiNetPrice: prices.Maasai,
             ErrorMessage: errorMessage);
 }

@@ -1,7 +1,7 @@
 namespace SapOdooMiddleware.Pricing;
 
-/// <summary>Three net (excl-VAT) prices in TZS.</summary>
-public record PriceTiers(decimal Retail, decimal Dealer, decimal SuperDealer);
+/// <summary>Four net (excl-VAT) prices in TZS.</summary>
+public record PriceTiers(decimal Retail, decimal Dealer, decimal SuperDealer, decimal Maasai);
 
 public interface IPricingCalculator
 {
@@ -193,6 +193,46 @@ public class PricingCalculator : IPricingCalculator
         },
     };
 
+    // ── PL04 "Maasai" ──────────────────────────────────────────────────────
+    // Maasai price = PL03 (incl-VAT) × ratio, then ceil to 1 000, then ÷ VAT.
+    // 4 bands on the incl-VAT Super-Dealer (PL03) output price:
+    //   A: ≤  50 000    B: 50 001 – 200 000    C: 200 001 – 600 000    D: 600 001+
+    // Ratios derived from 342-item Maasai pricing data (Aug 2026).
+    // "Accessories" maps to "Service" (only 3 items; similar discount profile).
+
+    private static readonly (decimal Lo, decimal Hi)[] MaasaiBandDefs =
+    {
+        (0m,        50_000m),
+        (50_000m,  200_000m),
+        (200_000m, 600_000m),
+        (600_000m, decimal.MaxValue),
+    };
+
+    private static int GetMaasaiBand(decimal spInclVat)
+    {
+        for (int i = 0; i < MaasaiBandDefs.Length; i++)
+            if (spInclVat >= MaasaiBandDefs[i].Lo && spInclVat < MaasaiBandDefs[i].Hi)
+                return i;
+        return MaasaiBandDefs.Length - 1;  // D band fallback
+    }
+
+    // [category] → { bandA, bandB, bandC, bandD } ratios  (PL04 ÷ PL03)
+    private static readonly IReadOnlyDictionary<string, decimal[]> MaasaiRatios
+        = new Dictionary<string, decimal[]>
+    {
+        ["Additives"]                       = new[] { 0.6953m, 0.7121m, 0.6994m, 0.6994m },
+        ["Adhesives & Sealants"]            = new[] { 0.6992m, 0.6992m, 0.6992m, 0.6992m },
+        ["Engine Oils"]                     = new[] { 0.7432m, 0.7636m, 0.8051m, 0.8229m },
+        ["Gear Oils & Transmission Fluids"] = new[] { 0.7190m, 0.7607m, 0.8033m, 0.7933m },
+        ["Greases"]                         = new[] { 0.7598m, 0.7477m, 0.7842m, 0.7561m },
+        ["Oils (Industrial/Other Fluids)"]  = new[] { 0.7692m, 0.7973m, 0.7979m, 0.7965m },
+        ["Pastes"]                          = new[] { 0.6995m, 0.6995m, 0.6995m, 0.6995m },
+        ["Repair Aids"]                     = new[] { 0.6752m, 0.6959m, 0.6856m, 0.6856m },
+        ["Service"]                         = new[] { 0.7066m, 0.7381m, 0.7376m, 0.7134m },
+        ["Vehicle Care"]                    = new[] { 0.7361m, 0.7277m, 0.7777m, 0.7371m },
+        ["Workshop Pro-Line"]               = new[] { 0.6961m, 0.7167m, 0.7017m, 0.7017m },
+    };
+
     // Maps the LM/scraped Category text to a canonical BandRatios key.
     private static readonly IReadOnlyDictionary<string, string> CategoryAliases
         = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -290,11 +330,19 @@ public class PricingCalculator : IPricingCalculator
         if (dealer >= retail) dealer = retail - 5000m;
         if (sp >= dealer)     sp     = dealer - 1000m;
 
+        // ── PL04 Maasai: derived from the converged PL03 (sp) incl-VAT price. ──
+        var maasaiCat = pricingCategory;
+        if (!MaasaiRatios.ContainsKey(maasaiCat))
+            maasaiCat = "Service";   // fallback (covers Accessories + unmapped)
+        var maasaiRatio = MaasaiRatios[maasaiCat][GetMaasaiBand(sp)];
+        var maasai = Math.Ceiling(sp * maasaiRatio / 1000m) * 1000m;
+
         // The HTML tool's rounded values are Incl-VAT (shelf prices).
         // SAP/Odoo price lists store NET (Excl-VAT) prices = Incl / 1.18.
         return new PriceTiers(
             Retail:      retail / VAT,
             Dealer:      dealer / VAT,
-            SuperDealer: sp     / VAT);
+            SuperDealer: sp     / VAT,
+            Maasai:      maasai / VAT);
     }
 }
