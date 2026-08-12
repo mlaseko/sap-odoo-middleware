@@ -247,4 +247,13 @@ public interface ISapB1Service
     /// with recommended actions, holding cost estimates, and priority scores.
     /// </summary>
     Task<List<MovementClockItem>> GetMovementClockAsync();
+
+    /// <summary>
+    /// Returns the full inventory transaction history for a single item from SAP B1.
+    /// Combines OINM-based inventory movements (invoices, deliveries, returns, goods
+    /// receipts/issues, inventory transfers, opening balances) with open Purchase Orders.
+    /// Optionally filtered by date range.
+    /// </summary>
+    Task<List<TransactionHistoryItem>> GetTransactionHistoryAsync(
+        string itemCode, DateOnly? fromDate, DateOnly? toDate, CancellationToken ct);
 }

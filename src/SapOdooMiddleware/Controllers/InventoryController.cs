@@ -13,11 +13,16 @@ namespace SapOdooMiddleware.Controllers;
 public class InventoryController : ControllerBase
 {
     private readonly ISapB1Service _sapService;
+    private readonly IAutohubSapB1Service _autohubSapService;
     private readonly ILogger<InventoryController> _logger;
 
-    public InventoryController(ISapB1Service sapService, ILogger<InventoryController> logger)
+    public InventoryController(
+        ISapB1Service sapService,
+        IAutohubSapB1Service autohubSapService,
+        ILogger<InventoryController> logger)
     {
         _sapService = sapService;
+        _autohubSapService = autohubSapService;
         _logger = logger;
     }
 
@@ -58,6 +63,55 @@ public class InventoryController : ControllerBase
         {
             _logger.LogError(ex, "Inventory valuation total failed for as_of_date={AsOfDate}.", effectiveDate.ToString("yyyy-MM-dd"));
             return StatusCode(500, ApiResponse<InventoryValuationTotalResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// GET /api/inventory/transactionhistory?item_code=BM10001
+    /// Returns the full inventory transaction history for a single item from the
+    /// Autohub SAP B1 company (MOLAS_Live_2021). Combines OINM-based inventory
+    /// movements with open Purchase Orders, ordered by posting date.
+    /// </summary>
+    /// <param name="itemCode">SAP ItemCode (required).</param>
+    /// <param name="fromDate">Optional start date filter (YYYY-MM-DD).</param>
+    /// <param name="toDate">Optional end date filter (YYYY-MM-DD).</param>
+    [HttpGet("transactionhistory")]
+    [ProducesResponseType(typeof(ApiResponse<List<TransactionHistoryItem>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<List<TransactionHistoryItem>>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<List<TransactionHistoryItem>>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> GetTransactionHistory(
+        [FromQuery(Name = "item_code")] string? itemCode,
+        [FromQuery(Name = "from_date")] DateOnly? fromDate = null,
+        [FromQuery(Name = "to_date")] DateOnly? toDate = null,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(itemCode))
+            return BadRequest(ApiResponse<List<TransactionHistoryItem>>.Fail(
+                "item_code query parameter is required."));
+
+        _logger.LogInformation(
+            "Transaction history requested: ItemCode={ItemCode}, From={From}, To={To}",
+            itemCode, fromDate?.ToString("yyyy-MM-dd"), toDate?.ToString("yyyy-MM-dd"));
+
+        try
+        {
+            var history = await _autohubSapService.GetTransactionHistoryAsync(
+                itemCode.Trim(), fromDate, toDate, ct);
+
+            return Ok(ApiResponse<List<TransactionHistoryItem>>.Ok(
+                history,
+                new Dictionary<string, object>
+                {
+                    ["item_code"] = itemCode.Trim(),
+                    ["total_rows"] = history.Count,
+                }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Transaction history failed for ItemCode={ItemCode}", itemCode);
+            return StatusCode(500,
+                ApiResponse<List<TransactionHistoryItem>>.Fail(ex.Message));
         }
     }
 }
