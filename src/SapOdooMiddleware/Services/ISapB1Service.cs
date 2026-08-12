@@ -264,4 +264,12 @@ public interface ISapB1Service
     /// Used by the PL04 backfill to stamp the Maasai price on existing items.
     /// </summary>
     Task SetPriceListPriceAsync(string itemCode, int priceListIndex, decimal netPrice, CancellationToken ct);
+
+    /// <summary>
+    /// Returns ItemCode → ItmsGrpCod for every active item in SAP B1 (OITM).
+    /// Uses a single Recordset query — no per-item overhead. Used by the PL04 backfill
+    /// to resolve pricing categories from the authoritative SAP group code rather than
+    /// relying on Neon's potentially-incomplete copy.
+    /// </summary>
+    Task<Dictionary<string, int>> GetItemGroupCodesAsync(CancellationToken ct);
 }

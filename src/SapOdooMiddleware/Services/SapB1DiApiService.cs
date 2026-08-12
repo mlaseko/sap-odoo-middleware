@@ -5405,6 +5405,42 @@ ORDER BY PostingDate, DocumentNumber";
     // PRICE-LIST BACKFILL
     // ================================
 
+    public async Task<Dictionary<string, int>> GetItemGroupCodesAsync(CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery("SELECT T0.\"ItemCode\", T0.\"ItmsGrpCod\" FROM OITM T0");
+
+                var map = new Dictionary<string, int>();
+                while (!rs.EoF)
+                {
+                    var code = rs.Fields.Item("ItemCode").Value?.ToString();
+                    var grp  = Convert.ToInt32(rs.Fields.Item("ItmsGrpCod").Value);
+                    if (!string.IsNullOrEmpty(code))
+                        map[code] = grp;
+                    rs.MoveNext();
+                }
+
+                _logger.LogInformation("SAP item group codes loaded: {Count} items", map.Count);
+                return map;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task SetPriceListPriceAsync(
         string itemCode, int priceListIndex, decimal netPrice, CancellationToken ct)
     {
