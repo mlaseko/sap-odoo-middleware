@@ -23,7 +23,7 @@ public record NeonProductForBackref(string ItemCode, string OdooProductId);
 
 /// <summary>Item with PL03 price + category info, used by the PL04 backfill.</summary>
 public record NeonPl03Item(
-    string ItemCode, int ItemsGroupCode, string? OdooCategoryName, decimal Pl03NetPrice);
+    string ItemCode, int? ItemsGroupCode, string? OdooCategoryName, decimal Pl03NetPrice);
 
 public interface INeonProductRepository
 {
@@ -207,7 +207,7 @@ public class NeonProductRepository : INeonProductRepository
         {
             results.Add(new NeonPl03Item(
                 ItemCode: reader.GetString(0),
-                ItemsGroupCode: reader.GetInt32(1),
+                ItemsGroupCode: reader.IsDBNull(1) ? null : reader.GetInt32(1),
                 OdooCategoryName: reader.IsDBNull(2) ? null : reader.GetString(2),
                 Pl03NetPrice: reader.GetDecimal(3)));
         }
