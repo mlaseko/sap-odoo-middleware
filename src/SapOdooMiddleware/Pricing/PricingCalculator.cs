@@ -17,6 +17,12 @@ public interface IPricingCalculator
     /// authoritative SAP group rather than the noisy Odoo category so siblings price identically.
     /// </summary>
     string? TryPricingBandForSapGroup(int sapGroupCode);
+
+    /// <summary>
+    /// Compute the Maasai (PL04) NET price from an existing Super-Dealer (PL03) NET price.
+    /// Used by the backfill endpoint to derive PL04 for items that already have PL03.
+    /// </summary>
+    decimal ComputeMaasaiNetFromPl03Net(decimal pl03Net, string pricingCategory);
 }
 
 /// <summary>
@@ -344,5 +350,17 @@ public class PricingCalculator : IPricingCalculator
             Dealer:      dealer / VAT,
             SuperDealer: sp     / VAT,
             Maasai:      maasai / VAT);
+    }
+
+    public decimal ComputeMaasaiNetFromPl03Net(decimal pl03Net, string pricingCategory)
+    {
+        if (pl03Net <= 0m) return 0m;
+        var sp = pl03Net * VAT;   // reconstruct incl-VAT PL03
+        var cat = pricingCategory;
+        if (!MaasaiRatios.ContainsKey(cat))
+            cat = "Service";
+        var ratio = MaasaiRatios[cat][GetMaasaiBand(sp)];
+        var maasai = Math.Ceiling(sp * ratio / 1000m) * 1000m;
+        return maasai / VAT;
     }
 }

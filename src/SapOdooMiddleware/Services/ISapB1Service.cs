@@ -256,4 +256,12 @@ public interface ISapB1Service
     /// </summary>
     Task<List<TransactionHistoryItem>> GetTransactionHistoryAsync(
         string itemCode, DateOnly? fromDate, DateOnly? toDate, CancellationToken ct);
+
+    /// <summary>
+    /// Sets a single price-list price on an existing OITM item in SAP B1.
+    /// <paramref name="priceListIndex"/> is the 0-based index into the DI API PriceList
+    /// collection (0 = PL01, 1 = PL02, 2 = PL03, 3 = PL04).
+    /// Used by the PL04 backfill to stamp the Maasai price on existing items.
+    /// </summary>
+    Task SetPriceListPriceAsync(string itemCode, int priceListIndex, decimal netPrice, CancellationToken ct);
 }

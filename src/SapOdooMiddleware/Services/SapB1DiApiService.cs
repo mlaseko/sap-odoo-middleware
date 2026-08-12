@@ -5400,6 +5400,52 @@ ORDER BY PostingDate, DocumentNumber";
             _lock.Release();
         }
     }
+
+    // ================================
+    // PRICE-LIST BACKFILL
+    // ================================
+
+    public async Task SetPriceListPriceAsync(
+        string itemCode, int priceListIndex, decimal netPrice, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException(
+                        $"SAP item '{itemCode}' not found — cannot set price list.");
+
+                items.PriceList.SetCurrentLine(priceListIndex);
+                items.PriceList.Price    = (double)netPrice;
+                items.PriceList.Currency = "TZS";
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed for {itemCode} PL index {priceListIndex} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP PriceList set: ItemCode={ItemCode}, Index={Index}, NetPrice={Price}",
+                    itemCode, priceListIndex, netPrice);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 }
 
 /// <summary>

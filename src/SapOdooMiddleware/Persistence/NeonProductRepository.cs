@@ -21,6 +21,10 @@ public record NeonProductWrite(
 
 public record NeonProductForBackref(string ItemCode, string OdooProductId);
 
+/// <summary>Item with PL03 price + category info, used by the PL04 backfill.</summary>
+public record NeonPl03Item(
+    string ItemCode, int ItemsGroupCode, string? OdooCategoryName, decimal Pl03NetPrice);
+
 public interface INeonProductRepository
 {
     Task UpsertProductAsync(NeonProductWrite write, CancellationToken ct);
@@ -34,6 +38,13 @@ public interface INeonProductRepository
         int limit, CancellationToken ct);
 
     Task MarkBackrefStampedAsync(string itemCode, CancellationToken ct);
+
+    /// <summary>All items that have a PL03 price in NeonPriceLists, with their category info.</summary>
+    Task<IReadOnlyList<NeonPl03Item>> GetItemsWithPl03Async(CancellationToken ct);
+
+    /// <summary>Upsert a single price list row for one item.</summary>
+    Task UpsertSinglePriceAsync(
+        string itemCode, int priceList, decimal netPrice, CancellationToken ct);
 }
 
 /// <summary>
@@ -173,6 +184,52 @@ public class NeonProductRepository : INeonProductRepository
         await using var conn = await OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("ItemCode", itemCode);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<NeonPl03Item>> GetItemsWithPl03Async(CancellationToken ct)
+    {
+        const string sql = """
+            SELECT p."ItemCode", p."ItemGroupCode", p."OdooCategoryName", pl."Price"
+            FROM public."NeonProducts" p
+            INNER JOIN public."NeonPriceLists" pl
+                ON pl."ItemCode" = p."ItemCode" AND pl."PriceList" = 3
+            WHERE pl."Price" > 0
+            ORDER BY p."ItemCode";
+            """;
+
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+
+        var results = new List<NeonPl03Item>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new NeonPl03Item(
+                ItemCode: reader.GetString(0),
+                ItemsGroupCode: reader.GetInt32(1),
+                OdooCategoryName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                Pl03NetPrice: reader.GetDecimal(3)));
+        }
+        return results;
+    }
+
+    public async Task UpsertSinglePriceAsync(
+        string itemCode, int priceList, decimal netPrice, CancellationToken ct)
+    {
+        const string sql = """
+            INSERT INTO public."NeonPriceLists" ("ItemCode","PriceList","Price","SyncedAt")
+            VALUES (@ItemCode, @PriceList, @Price, now())
+            ON CONFLICT ("ItemCode","PriceList") DO UPDATE SET
+                "Price"    = EXCLUDED."Price",
+                "SyncedAt" = now();
+            """;
+
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("ItemCode", itemCode);
+        cmd.Parameters.AddWithValue("PriceList", priceList);
+        cmd.Parameters.AddWithValue("Price", netPrice);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }
