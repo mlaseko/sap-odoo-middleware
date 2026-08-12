@@ -124,13 +124,19 @@ public class InventoryController : ControllerBase
     }
 
     /// <summary>
-    /// POST /api/inventory/backfill-pl04?dry_run=true
+    /// POST /api/inventory/backfill-pl04?dry_run=true&amp;batch_size=50&amp;offset=0
     /// Derives PL04 (Maasai) net prices from existing PL03 (Super Dealer) prices in Neon,
     /// then writes them to both Neon (PriceList=4) and SAP B1 (price-list index 3).
     /// <para>
     /// Pricing category is resolved from the <b>authoritative SAP item group code</b>
     /// (OITM.ItmsGrpCod via a single bulk Recordset query), with Neon's OdooCategoryName
     /// as a secondary fallback and "Service" as the final default.
+    /// </para>
+    /// <para>
+    /// Use <c>batch_size</c> and <c>offset</c> to page through items in chunks that
+    /// complete within the Cloudflare timeout (100 s). The response includes
+    /// <c>next_offset</c> — pass it as <c>offset</c> on the next call, or null when done.
+    /// Writes are idempotent (upsert), so re-running a batch is safe.
     /// </para>
     /// When <paramref name="dryRun"/> is true the computation runs but no writes are made.
     /// Uses the Lubes SAP connection (not Autohub).
@@ -140,9 +146,17 @@ public class InventoryController : ControllerBase
     [ProducesResponseType(typeof(ApiResponse<Pl04BackfillResponse>), StatusCodes.Status500InternalServerError)]
     public async Task<IActionResult> BackfillPl04(
         [FromQuery(Name = "dry_run")] bool dryRun = false,
+        [FromQuery(Name = "batch_size")] int batchSize = 50,
+        [FromQuery(Name = "offset")] int offset = 0,
         CancellationToken ct = default)
     {
-        _logger.LogInformation("PL04 backfill started (dry_run={DryRun})", dryRun);
+        // Clamp batch_size to a sensible range.
+        batchSize = Math.Clamp(batchSize, 1, 500);
+        if (offset < 0) offset = 0;
+
+        _logger.LogInformation(
+            "PL04 backfill started (dry_run={DryRun}, batch_size={BatchSize}, offset={Offset})",
+            dryRun, batchSize, offset);
 
         try
         {
@@ -151,19 +165,25 @@ public class InventoryController : ControllerBase
             _logger.LogInformation(
                 "Loaded {Count} SAP item group codes", sapGroupCodes.Count);
 
-            // 2. Read PL03 prices from Neon.
-            var pl03Items = await _neonRepo.GetItemsWithPl03Async(ct);
+            // 2. Read PL03 prices from Neon (full list — sorted by ItemCode).
+            var allPl03Items = await _neonRepo.GetItemsWithPl03Async(ct);
+            int totalItems = allPl03Items.Count;
+
+            // 3. Apply offset + batch_size to get the current page.
+            var batch = allPl03Items.Skip(offset).Take(batchSize).ToList();
+
             _logger.LogInformation(
-                "Found {Count} items with PL03 prices in Neon", pl03Items.Count);
+                "Processing batch: offset={Offset}, batch_size={BatchSize}, batch_count={Count}, total={Total}",
+                offset, batchSize, batch.Count, totalItems);
 
             var results = new List<Pl04BackfillItemResult>();
             int successCount = 0, skipCount = 0, failCount = 0;
 
-            foreach (var item in pl03Items)
+            foreach (var item in batch)
             {
                 try
                 {
-                    // 3. Resolve pricing category:
+                    // Resolve pricing category:
                     //    a) SAP group code (authoritative) → TryPricingBandForSapGroup
                     //    b) Neon OdooCategoryName           → ResolvePricingCategory
                     //    c) "Service" default
@@ -180,7 +200,7 @@ public class InventoryController : ControllerBase
 
                     category ??= "Service";
 
-                    // 4. Compute PL04 from PL03.
+                    // Compute PL04 from PL03.
                     decimal pl04Net = _pricing.ComputeMaasaiNetFromPl03Net(
                         item.Pl03NetPrice, category);
 
@@ -193,7 +213,7 @@ public class InventoryController : ControllerBase
                         continue;
                     }
 
-                    // 5. Write to Neon + SAP.
+                    // Write to Neon + SAP.
                     if (!dryRun)
                     {
                         await _neonRepo.UpsertSinglePriceAsync(
@@ -218,10 +238,16 @@ public class InventoryController : ControllerBase
                 }
             }
 
+            int nextOffset = offset + batch.Count;
+            bool hasMore = nextOffset < totalItems;
+
             var response = new Pl04BackfillResponse
             {
                 DryRun = dryRun,
-                TotalItems = pl03Items.Count,
+                TotalItems = totalItems,
+                BatchSize = batchSize,
+                Offset = offset,
+                NextOffset = hasMore ? nextOffset : null,
                 Succeeded = successCount,
                 Skipped = skipCount,
                 Failed = failCount,
@@ -229,8 +255,9 @@ public class InventoryController : ControllerBase
             };
 
             _logger.LogInformation(
-                "PL04 backfill complete: total={Total}, success={Success}, skip={Skip}, fail={Fail}, dry_run={DryRun}",
-                pl03Items.Count, successCount, skipCount, failCount, dryRun);
+                "PL04 backfill batch complete: offset={Offset}, processed={Processed}, " +
+                "success={Success}, skip={Skip}, fail={Fail}, has_more={HasMore}, dry_run={DryRun}",
+                offset, batch.Count, successCount, skipCount, failCount, hasMore, dryRun);
 
             return Ok(ApiResponse<Pl04BackfillResponse>.Ok(response));
         }
@@ -247,6 +274,10 @@ public class Pl04BackfillResponse
 {
     public bool DryRun { get; set; }
     public int TotalItems { get; set; }
+    public int BatchSize { get; set; }
+    public int Offset { get; set; }
+    /// <summary>Pass this as <c>offset</c> on the next call. Null when all items are processed.</summary>
+    public int? NextOffset { get; set; }
     public int Succeeded { get; set; }
     public int Skipped { get; set; }
     public int Failed { get; set; }
