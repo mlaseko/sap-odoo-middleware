@@ -151,32 +151,24 @@ public class InventoryController : ControllerBase
             {
                 try
                 {
-                    // Resolve pricing category: SAP group code first, then Odoo category name
+                    // Resolve pricing category: SAP group code → Odoo category → "Service" fallback
                     string? category = item.ItemsGroupCode.HasValue
                         ? _pricing.TryPricingBandForSapGroup(item.ItemsGroupCode.Value)
                         : null;
-                    if (category == null)
+                    if (category == null && !string.IsNullOrWhiteSpace(item.OdooCategoryName))
                     {
-                        if (string.IsNullOrWhiteSpace(item.OdooCategoryName))
-                        {
-                            results.Add(new Pl04BackfillItemResult(
-                                item.ItemCode, 0m, 0m, "skipped",
-                                "No SAP group mapping and no Odoo category — cannot resolve pricing band"));
-                            skipCount++;
-                            continue;
-                        }
                         try
                         {
                             category = _pricing.ResolvePricingCategory(item.OdooCategoryName);
                         }
-                        catch (InvalidOperationException ex)
+                        catch (InvalidOperationException)
                         {
-                            results.Add(new Pl04BackfillItemResult(
-                                item.ItemCode, 0m, 0m, "skipped", ex.Message));
-                            skipCount++;
-                            continue;
+                            // Unrecognised Odoo category — fall through to default
                         }
                     }
+                    // Default to "Service" when no group/category resolves — conservative
+                    // mid-range ratios; better than skipping the item entirely.
+                    category ??= "Service";
 
                     decimal pl04Net = _pricing.ComputeMaasaiNetFromPl03Net(
                         item.Pl03NetPrice, category);
