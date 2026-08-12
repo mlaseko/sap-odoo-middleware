@@ -27,7 +27,7 @@ public interface INeonProductRepository
 
     Task UpsertPricesAsync(
         string itemCode, decimal retailNet, decimal dealerNet, decimal superDealerNet,
-        CancellationToken ct);
+        decimal maasaiNet, CancellationToken ct);
 
     /// <summary>Items whose Odoo product was created but the SAP UDF is not yet stamped.</summary>
     Task<IReadOnlyList<NeonProductForBackref>> GetItemsAwaitingBackrefAsync(
@@ -115,13 +115,14 @@ public class NeonProductRepository : INeonProductRepository
 
     public async Task UpsertPricesAsync(
         string itemCode, decimal retailNet, decimal dealerNet, decimal superDealerNet,
-        CancellationToken ct)
+        decimal maasaiNet, CancellationToken ct)
     {
         const string sql = """
             INSERT INTO public."NeonPriceLists" ("ItemCode","PriceList","Price","SyncedAt") VALUES
                 (@ItemCode, 1, @Retail,      now()),
                 (@ItemCode, 2, @Dealer,      now()),
-                (@ItemCode, 3, @SuperDealer, now())
+                (@ItemCode, 3, @SuperDealer, now()),
+                (@ItemCode, 4, @Maasai,      now())
             ON CONFLICT ("ItemCode","PriceList") DO UPDATE SET
                 "Price"    = EXCLUDED."Price",
                 "SyncedAt" = now();
@@ -133,6 +134,7 @@ public class NeonProductRepository : INeonProductRepository
         cmd.Parameters.AddWithValue("Retail", retailNet);
         cmd.Parameters.AddWithValue("Dealer", dealerNet);
         cmd.Parameters.AddWithValue("SuperDealer", superDealerNet);
+        cmd.Parameters.AddWithValue("Maasai", maasaiNet);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

@@ -163,7 +163,7 @@ public interface ISapB1Service
     /// <summary>
     /// Creates a Liqui Moly item master (OITM) in SAP B1 via DI API:
     /// item type I, Inventory/Sales/Purchase = Y, UoM group "Packing Units",
-    /// VAT groups O1/I1, net (excl-VAT) TZS prices on price lists 1/2/3, and the
+    /// VAT groups O1/I1, net (excl-VAT) TZS prices on price lists 1/2/3/4, and the
     /// <c>U_Odoo_Category</c> UDF set to the Odoo category name. <c>U_Odoo_Product_ID</c>
     /// is left empty at create and stamped later by the backref worker.
     /// </summary>
