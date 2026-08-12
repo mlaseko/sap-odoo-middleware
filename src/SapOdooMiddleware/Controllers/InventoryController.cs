@@ -152,7 +152,9 @@ public class InventoryController : ControllerBase
                 try
                 {
                     // Resolve pricing category: SAP group code first, then Odoo category name
-                    string? category = _pricing.TryPricingBandForSapGroup(item.ItemsGroupCode);
+                    string? category = item.ItemsGroupCode.HasValue
+                        ? _pricing.TryPricingBandForSapGroup(item.ItemsGroupCode.Value)
+                        : null;
                     if (category == null)
                     {
                         if (string.IsNullOrWhiteSpace(item.OdooCategoryName))
