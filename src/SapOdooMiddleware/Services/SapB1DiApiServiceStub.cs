@@ -166,6 +166,10 @@ internal class SapB1DiApiServiceStub : ISapB1Service
     public Task SetPriceListPriceAsync(string itemCode, int priceListIndex, decimal netPrice, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<Dictionary<string, int>> GetItemGroupCodesAsync(CancellationToken ct) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 }
 
 /// <summary>Non-Windows stub for the Autohub-company SAP connection (<see cref="IAutohubSapB1Service"/>).</summary>

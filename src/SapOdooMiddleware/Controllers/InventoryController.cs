@@ -127,6 +127,11 @@ public class InventoryController : ControllerBase
     /// POST /api/inventory/backfill-pl04?dry_run=true
     /// Derives PL04 (Maasai) net prices from existing PL03 (Super Dealer) prices in Neon,
     /// then writes them to both Neon (PriceList=4) and SAP B1 (price-list index 3).
+    /// <para>
+    /// Pricing category is resolved from the <b>authoritative SAP item group code</b>
+    /// (OITM.ItmsGrpCod via a single bulk Recordset query), with Neon's OdooCategoryName
+    /// as a secondary fallback and "Service" as the final default.
+    /// </para>
     /// When <paramref name="dryRun"/> is true the computation runs but no writes are made.
     /// Uses the Lubes SAP connection (not Autohub).
     /// </summary>
@@ -141,8 +146,15 @@ public class InventoryController : ControllerBase
 
         try
         {
+            // 1. Bulk-load authoritative SAP group codes (one Recordset query).
+            var sapGroupCodes = await _sapService.GetItemGroupCodesAsync(ct);
+            _logger.LogInformation(
+                "Loaded {Count} SAP item group codes", sapGroupCodes.Count);
+
+            // 2. Read PL03 prices from Neon.
             var pl03Items = await _neonRepo.GetItemsWithPl03Async(ct);
-            _logger.LogInformation("Found {Count} items with PL03 prices in Neon", pl03Items.Count);
+            _logger.LogInformation(
+                "Found {Count} items with PL03 prices in Neon", pl03Items.Count);
 
             var results = new List<Pl04BackfillItemResult>();
             int successCount = 0, skipCount = 0, failCount = 0;
@@ -151,57 +163,48 @@ public class InventoryController : ControllerBase
             {
                 try
                 {
-                    // Resolve pricing category: SAP group code first, then Odoo category name
-                    string? category = item.ItemsGroupCode.HasValue
-                        ? _pricing.TryPricingBandForSapGroup(item.ItemsGroupCode.Value)
-                        : null;
-                    if (category == null)
+                    // 3. Resolve pricing category:
+                    //    a) SAP group code (authoritative) → TryPricingBandForSapGroup
+                    //    b) Neon OdooCategoryName           → ResolvePricingCategory
+                    //    c) "Service" default
+                    string? category = null;
+
+                    if (sapGroupCodes.TryGetValue(item.ItemCode, out int sapGrp))
+                        category = _pricing.TryPricingBandForSapGroup(sapGrp);
+
+                    if (category == null && !string.IsNullOrWhiteSpace(item.OdooCategoryName))
                     {
-                        if (string.IsNullOrWhiteSpace(item.OdooCategoryName))
-                        {
-                            results.Add(new Pl04BackfillItemResult(
-                                item.ItemCode, 0m, 0m, "skipped",
-                                "No SAP group mapping and no Odoo category — cannot resolve pricing band"));
-                            skipCount++;
-                            continue;
-                        }
-                        try
-                        {
-                            category = _pricing.ResolvePricingCategory(item.OdooCategoryName);
-                        }
-                        catch (InvalidOperationException ex)
-                        {
-                            results.Add(new Pl04BackfillItemResult(
-                                item.ItemCode, 0m, 0m, "skipped", ex.Message));
-                            skipCount++;
-                            continue;
-                        }
+                        try { category = _pricing.ResolvePricingCategory(item.OdooCategoryName); }
+                        catch (InvalidOperationException) { /* unmapped Odoo category */ }
                     }
 
+                    category ??= "Service";
+
+                    // 4. Compute PL04 from PL03.
                     decimal pl04Net = _pricing.ComputeMaasaiNetFromPl03Net(
                         item.Pl03NetPrice, category);
 
                     if (pl04Net <= 0m)
                     {
                         results.Add(new Pl04BackfillItemResult(
-                            item.ItemCode, item.Pl03NetPrice, 0m, "skipped",
+                            item.ItemCode, item.Pl03NetPrice, 0m, category, "skipped",
                             "Computed PL04 price is zero"));
                         skipCount++;
                         continue;
                     }
 
+                    // 5. Write to Neon + SAP.
                     if (!dryRun)
                     {
-                        // Write to Neon first (fast, low risk)
-                        await _neonRepo.UpsertSinglePriceAsync(item.ItemCode, 4, pl04Net, ct);
+                        await _neonRepo.UpsertSinglePriceAsync(
+                            item.ItemCode, 4, pl04Net, ct);
 
-                        // Write to SAP B1 (PL04 = price-list index 3)
                         await _sapService.SetPriceListPriceAsync(
                             item.ItemCode, 3, pl04Net, ct);
                     }
 
                     results.Add(new Pl04BackfillItemResult(
-                        item.ItemCode, item.Pl03NetPrice, pl04Net,
+                        item.ItemCode, item.Pl03NetPrice, pl04Net, category,
                         dryRun ? "dry_run" : "success", null));
                     successCount++;
                 }
@@ -210,7 +213,7 @@ public class InventoryController : ControllerBase
                     _logger.LogWarning(ex,
                         "PL04 backfill failed for ItemCode={ItemCode}", item.ItemCode);
                     results.Add(new Pl04BackfillItemResult(
-                        item.ItemCode, item.Pl03NetPrice, 0m, "failed", ex.Message));
+                        item.ItemCode, item.Pl03NetPrice, 0m, null, "failed", ex.Message));
                     failCount++;
                 }
             }
@@ -255,5 +258,6 @@ public record Pl04BackfillItemResult(
     string ItemCode,
     decimal Pl03NetPrice,
     decimal Pl04NetPrice,
+    string? PricingCategory,
     string Status,
     string? Error);
