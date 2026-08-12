@@ -5129,6 +5129,277 @@ ORDER BY Priority_Score, Days_Since_Last_Sale DESC";
             _lock.Release();
         }
     }
+
+    public async Task<List<TransactionHistoryItem>> GetTransactionHistoryAsync(
+        string itemCode, DateOnly? fromDate, DateOnly? toDate, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var safeCode = itemCode.Replace("'", "''");
+            var dateFilter = "";
+            if (fromDate.HasValue)
+                dateFilter += $" AND T0.DocDate >= '{fromDate.Value:yyyy-MM-dd}'";
+            if (toDate.HasValue)
+                dateFilter += $" AND T0.DocDate <= '{toDate.Value:yyyy-MM-dd}'";
+            var poDateFilter = dateFilter.Replace("T0.DocDate", "OPOR.DocDate");
+
+            var sql = $@"
+SELECT * FROM (
+    SELECT
+        T0.ItemCode,
+        OITM.U_Item_Name,
+        OITM.U_ItemManufacturer,
+        T0.Dscription AS ItemName,
+        T0.DocDate    AS PostingDate,
+        T0.BASE_REF   AS DocumentNumber,
+
+        CASE T0.TransType
+            WHEN 13 THEN 'A/R Invoice'
+            WHEN 14 THEN 'A/R Credit Memo'
+            WHEN 15 THEN 'Delivery'
+            WHEN 16 THEN 'Sales Return'
+            WHEN 18 THEN 'A/P Invoice'
+            WHEN 19 THEN 'A/P Credit Memo'
+            WHEN 20 THEN 'Goods Receipt PO'
+            WHEN 21 THEN 'Goods Return'
+            WHEN 59 THEN 'Goods Receipt'
+            WHEN 60 THEN 'Goods Issue'
+            WHEN 67 THEN 'Inventory Transfer'
+            WHEN 10000071 THEN 'Inventory Posting'
+            WHEN 310000001 THEN 'Opening Balance'
+            ELSE 'Other - ' + CAST(T0.TransType AS VARCHAR(20))
+        END AS TransactionType,
+
+        CASE
+            WHEN T0.TransType = 13 THEN
+                CASE WHEN OINV.CANCELED = 'Y' THEN 'Canceled'
+                     WHEN OINV.CANCELED = 'C' THEN 'Reversal'
+                     WHEN OINV.DocStatus = 'O' THEN 'Open'
+                     WHEN OINV.DocStatus = 'C' THEN 'Closed'
+                     ELSE 'Unknown' END
+            WHEN T0.TransType = 14 THEN
+                CASE WHEN ORIN.CANCELED = 'Y' THEN 'Canceled'
+                     WHEN ORIN.CANCELED = 'C' THEN 'Reversal'
+                     WHEN ORIN.DocStatus = 'O' THEN 'Open'
+                     WHEN ORIN.DocStatus = 'C' THEN 'Closed'
+                     ELSE 'Unknown' END
+            WHEN T0.TransType = 15 THEN
+                CASE WHEN ODLN.CANCELED = 'Y' THEN 'Canceled'
+                     WHEN ODLN.CANCELED = 'C' THEN 'Reversal'
+                     WHEN ODLN.DocStatus = 'O' THEN 'Open'
+                     WHEN ODLN.DocStatus = 'C' THEN 'Closed'
+                     ELSE 'Unknown' END
+            WHEN T0.TransType = 16 THEN
+                CASE WHEN ORDN.CANCELED = 'Y' THEN 'Canceled'
+                     WHEN ORDN.CANCELED = 'C' THEN 'Reversal'
+                     WHEN ORDN.DocStatus = 'O' THEN 'Open'
+                     WHEN ORDN.DocStatus = 'C' THEN 'Closed'
+                     ELSE 'Unknown' END
+            WHEN T0.TransType = 18 THEN
+                CASE WHEN OPCH.CANCELED = 'Y' THEN 'Canceled'
+                     WHEN OPCH.CANCELED = 'C' THEN 'Reversal'
+                     WHEN OPCH.DocStatus = 'O' THEN 'Open'
+                     WHEN OPCH.DocStatus = 'C' THEN 'Closed'
+                     ELSE 'Unknown' END
+            WHEN T0.TransType = 19 THEN
+                CASE WHEN ORPC.CANCELED = 'Y' THEN 'Canceled'
+                     WHEN ORPC.CANCELED = 'C' THEN 'Reversal'
+                     WHEN ORPC.DocStatus = 'O' THEN 'Open'
+                     WHEN ORPC.DocStatus = 'C' THEN 'Closed'
+                     ELSE 'Unknown' END
+            WHEN T0.TransType = 20 THEN
+                CASE WHEN OPDN.CANCELED = 'Y' THEN 'Canceled'
+                     WHEN OPDN.CANCELED = 'C' THEN 'Reversal'
+                     WHEN OPDN.DocStatus = 'O' THEN 'Open'
+                     WHEN OPDN.DocStatus = 'C' THEN 'Closed'
+                     ELSE 'Unknown' END
+            WHEN T0.TransType = 21 THEN
+                CASE WHEN ORPD.CANCELED = 'Y' THEN 'Canceled'
+                     WHEN ORPD.CANCELED = 'C' THEN 'Reversal'
+                     WHEN ORPD.DocStatus = 'O' THEN 'Open'
+                     WHEN ORPD.DocStatus = 'C' THEN 'Closed'
+                     ELSE 'Unknown' END
+            WHEN T0.TransType IN (59,60,67,10000071,310000001) THEN 'Posted'
+            ELSE 'Unknown'
+        END AS DocumentStatus,
+
+        CASE
+            WHEN T0.TransType = 13 THEN OINV.CardName
+            WHEN T0.TransType = 14 THEN ORIN.CardName
+            WHEN T0.TransType = 15 THEN ODLN.CardName
+            WHEN T0.TransType = 16 THEN ORDN.CardName
+            WHEN T0.TransType = 18 THEN OPCH.CardName
+            WHEN T0.TransType = 19 THEN ORPC.CardName
+            WHEN T0.TransType = 20 THEN OPDN.CardName
+            WHEN T0.TransType = 21 THEN ORPD.CardName
+            ELSE NULL
+        END AS BPName,
+
+        OSLP.SlpName AS SalesEmployee,
+        OUSR.U_NAME  AS PostedByUser,
+        T0.Warehouse,
+
+        T0.InQty              AS QtyIn,
+        T0.OutQty             AS QtyOut,
+        T0.InQty - T0.OutQty  AS NetMovement,
+
+        CAST(NULL AS DECIMAL(19,6)) AS OrderedQty,
+        CAST(NULL AS DECIMAL(19,6)) AS OpenQty
+
+    FROM OINM T0
+
+    LEFT JOIN OITM ON T0.ItemCode = OITM.ItemCode
+
+    LEFT JOIN OINV ON T0.TransType = 13 AND T0.CreatedBy = OINV.DocEntry
+    LEFT JOIN ORIN ON T0.TransType = 14 AND T0.CreatedBy = ORIN.DocEntry
+    LEFT JOIN ODLN ON T0.TransType = 15 AND T0.CreatedBy = ODLN.DocEntry
+    LEFT JOIN ORDN ON T0.TransType = 16 AND T0.CreatedBy = ORDN.DocEntry
+
+    LEFT JOIN OPCH ON T0.TransType = 18 AND T0.CreatedBy = OPCH.DocEntry
+    LEFT JOIN ORPC ON T0.TransType = 19 AND T0.CreatedBy = ORPC.DocEntry
+    LEFT JOIN OPDN ON T0.TransType = 20 AND T0.CreatedBy = OPDN.DocEntry
+    LEFT JOIN ORPD ON T0.TransType = 21 AND T0.CreatedBy = ORPD.DocEntry
+
+    LEFT JOIN OIGN ON T0.TransType = 59 AND T0.CreatedBy = OIGN.DocEntry
+    LEFT JOIN OIGE ON T0.TransType = 60 AND T0.CreatedBy = OIGE.DocEntry
+    LEFT JOIN OWTR ON T0.TransType = 67 AND T0.CreatedBy = OWTR.DocEntry
+    LEFT JOIN OIQR ON T0.TransType = 10000071 AND T0.CreatedBy = OIQR.DocEntry
+
+    LEFT JOIN OSLP ON OSLP.SlpCode = CASE
+        WHEN T0.TransType = 13 THEN OINV.SlpCode
+        WHEN T0.TransType = 14 THEN ORIN.SlpCode
+        WHEN T0.TransType = 15 THEN ODLN.SlpCode
+        WHEN T0.TransType = 16 THEN ORDN.SlpCode
+        WHEN T0.TransType = 18 THEN OPCH.SlpCode
+        WHEN T0.TransType = 19 THEN ORPC.SlpCode
+        WHEN T0.TransType = 20 THEN OPDN.SlpCode
+        WHEN T0.TransType = 21 THEN ORPD.SlpCode
+        ELSE NULL END
+
+    LEFT JOIN OUSR ON OUSR.USERID = CASE
+        WHEN T0.TransType = 13 THEN OINV.UserSign
+        WHEN T0.TransType = 14 THEN ORIN.UserSign
+        WHEN T0.TransType = 15 THEN ODLN.UserSign
+        WHEN T0.TransType = 16 THEN ORDN.UserSign
+        WHEN T0.TransType = 18 THEN OPCH.UserSign
+        WHEN T0.TransType = 19 THEN ORPC.UserSign
+        WHEN T0.TransType = 20 THEN OPDN.UserSign
+        WHEN T0.TransType = 21 THEN ORPD.UserSign
+        WHEN T0.TransType = 59 THEN OIGN.UserSign
+        WHEN T0.TransType = 60 THEN OIGE.UserSign
+        WHEN T0.TransType = 67 THEN OWTR.UserSign
+        WHEN T0.TransType = 10000071 THEN OIQR.UserSign
+        ELSE NULL END
+
+    WHERE T0.ItemCode = '{safeCode}'{dateFilter}
+
+    UNION ALL
+
+    SELECT
+        POR1.ItemCode,
+        OITM_PO.U_Item_Name,
+        OITM_PO.U_ItemManufacturer,
+        POR1.Dscription       AS ItemName,
+        OPOR.DocDate           AS PostingDate,
+        CAST(OPOR.DocNum AS VARCHAR(50)) AS DocumentNumber,
+        'Purchase Order'       AS TransactionType,
+        CASE
+            WHEN OPOR.CANCELED = 'Y' THEN 'Canceled'
+            WHEN OPOR.DocStatus = 'O' THEN 'Open'
+            WHEN OPOR.DocStatus = 'C' THEN 'Closed'
+            ELSE 'Unknown'
+        END AS DocumentStatus,
+        OPOR.CardName          AS BPName,
+        OSLP_PO.SlpName        AS SalesEmployee,
+        OUSR_PO.U_NAME         AS PostedByUser,
+        POR1.WhsCode           AS Warehouse,
+        CAST(0 AS DECIMAL(19,6)) AS QtyIn,
+        CAST(0 AS DECIMAL(19,6)) AS QtyOut,
+        CAST(0 AS DECIMAL(19,6)) AS NetMovement,
+        POR1.Quantity          AS OrderedQty,
+        POR1.OpenQty           AS OpenQty
+    FROM OPOR
+    INNER JOIN POR1     ON OPOR.DocEntry = POR1.DocEntry
+    LEFT  JOIN OITM OITM_PO ON POR1.ItemCode = OITM_PO.ItemCode
+    LEFT  JOIN OSLP OSLP_PO ON OPOR.SlpCode   = OSLP_PO.SlpCode
+    LEFT  JOIN OUSR OUSR_PO ON OPOR.UserSign   = OUSR_PO.USERID
+    WHERE POR1.ItemCode = '{safeCode}'{poDateFilter}
+) X
+ORDER BY PostingDate, DocumentNumber";
+
+            _logger.LogInformation(
+                "Executing transaction history query for ItemCode={ItemCode}", itemCode);
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(sql);
+
+                var items = new List<TransactionHistoryItem>();
+                while (!rs.EoF)
+                {
+                    items.Add(new TransactionHistoryItem
+                    {
+                        ItemCode = Convert.ToString(
+                            rs.Fields.Item("ItemCode").Value) ?? "",
+                        UItemName = Convert.ToString(
+                            rs.Fields.Item("U_Item_Name").Value),
+                        UItemManufacturer = Convert.ToString(
+                            rs.Fields.Item("U_ItemManufacturer").Value),
+                        ItemName = Convert.ToString(
+                            rs.Fields.Item("ItemName").Value),
+                        PostingDate = Convert.ToDateTime(
+                            rs.Fields.Item("PostingDate").Value),
+                        DocumentNumber = Convert.ToString(
+                            rs.Fields.Item("DocumentNumber").Value),
+                        TransactionType = Convert.ToString(
+                            rs.Fields.Item("TransactionType").Value) ?? "",
+                        DocumentStatus = Convert.ToString(
+                            rs.Fields.Item("DocumentStatus").Value) ?? "",
+                        BpName = Convert.ToString(
+                            rs.Fields.Item("BPName").Value),
+                        SalesEmployee = Convert.ToString(
+                            rs.Fields.Item("SalesEmployee").Value),
+                        PostedByUser = Convert.ToString(
+                            rs.Fields.Item("PostedByUser").Value),
+                        Warehouse = Convert.ToString(
+                            rs.Fields.Item("Warehouse").Value),
+                        QtyIn = Convert.ToDecimal(
+                            rs.Fields.Item("QtyIn").Value),
+                        QtyOut = Convert.ToDecimal(
+                            rs.Fields.Item("QtyOut").Value),
+                        NetMovement = Convert.ToDecimal(
+                            rs.Fields.Item("NetMovement").Value),
+                        OrderedQty = rs.Fields.Item("OrderedQty").Value is DBNull
+                            ? null
+                            : Convert.ToDecimal(
+                                rs.Fields.Item("OrderedQty").Value),
+                        OpenQty = rs.Fields.Item("OpenQty").Value is DBNull
+                            ? null
+                            : Convert.ToDecimal(
+                                rs.Fields.Item("OpenQty").Value),
+                    });
+                    rs.MoveNext();
+                }
+
+                _logger.LogInformation(
+                    "Transaction history for {ItemCode}: {Count} rows",
+                    itemCode, items.Count);
+                return items;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 }
 
 /// <summary>
