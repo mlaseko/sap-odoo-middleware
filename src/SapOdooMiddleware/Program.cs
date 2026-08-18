@@ -270,6 +270,8 @@ builder.Services.AddScoped<ILubesInventoryForecastService, LubesInventoryForecas
 // and caches the OWHS warehouse list in-process.
 builder.Services.AddSingleton<IAutohubInventorySqlService, AutohubInventorySqlService>();
 builder.Services.AddSingleton<IBinResolver, BinResolver>();
+// Numbering series per inventory doc type (spec §6.4) — defaults in code, overridable in config.
+builder.Services.Configure<AutohubInventorySettings>(builder.Configuration.GetSection(AutohubInventorySettings.SectionName));
 
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();

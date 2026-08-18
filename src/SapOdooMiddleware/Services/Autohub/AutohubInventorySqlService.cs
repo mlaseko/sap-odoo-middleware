@@ -38,10 +38,11 @@ public interface IAutohubInventorySqlService
         string? fromWhs, string? toWhs, CancellationToken ct);
 
     /// <summary>
-    /// Idempotency probe: DocEntry of an already-posted document carrying this U_AppRef GUID,
-    /// or null. <paramref name="headerTable"/> must be one of OIGN/OWTQ/OWTR/OINC/OIQR.
+    /// Idempotency probe: DocEntry/DocNum of an already-posted document carrying this U_AppRef
+    /// GUID, or null. <paramref name="headerTable"/> must be one of OIGN/OWTQ/OWTR/OINC/OIQR.
     /// </summary>
-    Task<int?> FindDocEntryByAppRefAsync(string headerTable, string appRef, CancellationToken ct);
+    Task<(int DocEntry, int DocNum)?> FindDocEntryByAppRefAsync(
+        string headerTable, string appRef, CancellationToken ct);
 }
 
 /// <summary>
@@ -63,6 +64,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     private List<WarehouseInfo>? _warehouseCache;
     private DateTime _warehouseCacheAt = DateTime.MinValue;
     private readonly SemaphoreSlim _cacheLock = new(1, 1);
+    private bool _warnedMissingDbLogin;
 
     public AutohubInventorySqlService(
         IOptions<CompaniesOptions> companies,
@@ -312,7 +314,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
 
     // ── Idempotency ──────────────────────────────────────────────────
 
-    public async Task<int?> FindDocEntryByAppRefAsync(
+    public async Task<(int DocEntry, int DocNum)?> FindDocEntryByAppRefAsync(
         string headerTable, string appRef, CancellationToken ct)
     {
         if (!AllowedAppRefTables.Contains(headerTable))
@@ -321,12 +323,14 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 nameof(headerTable));
 
         // Table name is whitelisted above — safe to interpolate.
-        var sql = $"SELECT DocEntry FROM {headerTable.ToUpperInvariant()} WHERE U_AppRef = @appRef;";
+        var sql = $"SELECT DocEntry, DocNum FROM {headerTable.ToUpperInvariant()} WHERE U_AppRef = @appRef;";
         await using var conn = await OpenAsync(ct);
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@appRef", appRef);
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result is null or DBNull ? null : Convert.ToInt32(result);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        return (reader.GetInt32(0), reader.GetInt32(1));
     }
 
     // ── Connection plumbing ──────────────────────────────────────────
@@ -352,6 +356,17 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         if (!cfg.SapB1.DbServerType.Contains("MSSQL", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException(
                 $"Inventory reads support MSSQL only (DbServerType={cfg.SapB1.DbServerType}).");
+
+        if (string.IsNullOrWhiteSpace(cfg.SapB1.DbUserName) && !_warnedMissingDbLogin)
+        {
+            _warnedMissingDbLogin = true;
+            _logger.LogWarning(
+                "Companies:Autohub:SapB1:DbUserName is not set — falling back to the DI API user " +
+                "'{UserName}', which usually is NOT a SQL Server login. If SQL Server rejects the " +
+                "login (error 18456), set DbUserName/DbPassword to a real SQL login in the external " +
+                "appsettings.Production.json.",
+                cfg.SapB1.UserName);
+        }
 
         return BuildSapConnectionString(cfg.SapB1);
     }

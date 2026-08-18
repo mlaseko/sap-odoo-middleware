@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SAPbobsCOM;
 using SapOdooMiddleware.Configuration;
+using SapOdooMiddleware.Models.Inventory;
 using SapOdooMiddleware.Models.Sap;
 using System.Runtime.InteropServices;
 
@@ -5475,6 +5476,154 @@ ORDER BY PostingDate, DocumentNumber";
             finally
             {
                 Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ================================
+    // INVENTORY APP (Autohub)
+    // ================================
+
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateInventoryTransferRequestAsync(
+        TransferRequestCreate request, int series, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var tr = (StockTransfer)_company!.GetBusinessObject(BoObjectTypes.oInventoryTransferRequest);
+            try
+            {
+                if (series > 0) tr.Series = series;
+                tr.FromWarehouse = request.FromWhs;
+                tr.ToWarehouse   = request.ToWhs;
+                tr.DocDate       = request.DocDate ?? DateTime.Today;
+                tr.DueDate       = request.DocDate ?? DateTime.Today;
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    tr.Comments = request.Comments;
+                tr.UserFields.Fields.Item("U_AppRef").Value = request.AppRef;
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0) tr.Lines.Add();
+                    var line = request.Lines[i];
+                    tr.Lines.ItemCode          = line.ItemCode;
+                    tr.Lines.Quantity          = line.Quantity;
+                    tr.Lines.FromWarehouseCode = request.FromWhs;
+                    tr.Lines.WarehouseCode     = request.ToWhs;
+                }
+
+                int result = tr.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                tr.GetByKey(docEntry);
+                int docNum = tr.DocNum;
+
+                _logger.LogInformation(
+                    "SAP Transfer Request created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "From={From}, To={To}, Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, request.FromWhs, request.ToWhs, request.Lines.Count, request.AppRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(tr);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateInventoryTransferAsync(
+        TransferCreate request, int series, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var t = (StockTransfer)_company!.GetBusinessObject(BoObjectTypes.oStockTransfer);
+            try
+            {
+                if (series > 0) t.Series = series;
+                t.FromWarehouse = request.FromWhs;
+                t.ToWarehouse   = request.ToWhs;
+                t.DocDate       = request.DocDate ?? DateTime.Today;
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    t.Comments = request.Comments;
+                t.UserFields.Fields.Item("U_AppRef").Value = request.AppRef;
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0) t.Lines.Add();
+                    var line = request.Lines[i];
+
+                    t.Lines.ItemCode          = line.ItemCode;
+                    t.Lines.Quantity          = line.Quantity;
+                    t.Lines.FromWarehouseCode = request.FromWhs;
+                    t.Lines.WarehouseCode     = request.ToWhs;
+
+                    // Base ref: SAP decrements/closes the request's open quantity (spec §4).
+                    if (line.BaseRequestEntry.HasValue && line.BaseRequestLine.HasValue)
+                    {
+                        t.Lines.BaseType  = InvBaseDocTypeEnum.InventoryTransferRequest;
+                        t.Lines.BaseEntry = line.BaseRequestEntry.Value;
+                        t.Lines.BaseLine  = line.BaseRequestLine.Value;
+                    }
+
+                    // Bin allocations: only the bin-managed side(s) carry rows (spec §9.2).
+                    if (line.FromBinAbs.HasValue)
+                    {
+                        t.Lines.BinAllocations.BinActionType = BinActionTypeEnum.batFromWarehouse;
+                        t.Lines.BinAllocations.BinAbsEntry   = line.FromBinAbs.Value;
+                        t.Lines.BinAllocations.Quantity      = line.Quantity;
+                        t.Lines.BinAllocations.Add();
+                    }
+                    if (line.ToBinAbs.HasValue)
+                    {
+                        t.Lines.BinAllocations.BinActionType = BinActionTypeEnum.batToWarehouse;
+                        t.Lines.BinAllocations.BinAbsEntry   = line.ToBinAbs.Value;
+                        t.Lines.BinAllocations.Quantity      = line.Quantity;
+                        t.Lines.BinAllocations.Add();
+                    }
+                }
+
+                int result = t.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                t.GetByKey(docEntry);
+                int docNum = t.DocNum;
+
+                _logger.LogInformation(
+                    "SAP Inventory Transfer created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "From={From}, To={To}, Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, request.FromWhs, request.ToWhs, request.Lines.Count, request.AppRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(t);
             }
         }
         finally
