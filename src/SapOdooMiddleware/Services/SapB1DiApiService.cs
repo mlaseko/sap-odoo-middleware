@@ -5792,7 +5792,16 @@ ORDER BY PostingDate, DocumentNumber";
                 foreach (var l in lines)
                 {
                     var pl = posting.InventoryPostingLines.Add();
-                    pl.BaseType = InventoryPostingLineBaseTypeEnum.iplbtInventoryCounting;
+                    // This DI API build does not expose the base-type enum
+                    // (InventoryPostingLineBaseTypeEnum — the spec §9.5 version caveat), so
+                    // set BaseType late-bound: COM coerces the raw object type
+                    // (1470000065 = Inventory Counting) into whatever this typelib declares.
+                    pl.GetType().InvokeMember(
+                        "BaseType",
+                        System.Reflection.BindingFlags.SetProperty,
+                        binder: null,
+                        target: pl,
+                        args: new object[] { 1470000065 });
                     pl.BaseEntry = countingDocEntry;
                     pl.BaseLine = l.LineNum;
                     pl.CountedQuantity = l.CountedQty;

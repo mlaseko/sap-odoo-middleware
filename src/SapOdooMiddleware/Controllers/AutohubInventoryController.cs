@@ -179,8 +179,8 @@ public class AutohubInventoryController : ControllerBase
         ValidateAppRef(request.AppRef, errors);
         if (string.IsNullOrWhiteSpace(request.FromWhs)) errors.Add("from_whs is required.");
         if (string.IsNullOrWhiteSpace(request.ToWhs)) errors.Add("to_whs is required.");
-        if (!string.IsNullOrWhiteSpace(request.FromWhs) &&
-            string.Equals(request.FromWhs.Trim(), request.ToWhs?.Trim(), StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(request.FromWhs) && !string.IsNullOrWhiteSpace(request.ToWhs) &&
+            string.Equals(request.FromWhs.Trim(), request.ToWhs.Trim(), StringComparison.OrdinalIgnoreCase))
             errors.Add("from_whs and to_whs must differ for a transfer request.");
         if (request.Lines.Count == 0) errors.Add("At least one line is required.");
         for (int i = 0; i < request.Lines.Count; i++)
