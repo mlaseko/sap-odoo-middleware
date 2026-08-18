@@ -63,6 +63,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     private List<WarehouseInfo>? _warehouseCache;
     private DateTime _warehouseCacheAt = DateTime.MinValue;
     private readonly SemaphoreSlim _cacheLock = new(1, 1);
+    private bool _warnedMissingDbLogin;
 
     public AutohubInventorySqlService(
         IOptions<CompaniesOptions> companies,
@@ -352,6 +353,17 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         if (!cfg.SapB1.DbServerType.Contains("MSSQL", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException(
                 $"Inventory reads support MSSQL only (DbServerType={cfg.SapB1.DbServerType}).");
+
+        if (string.IsNullOrWhiteSpace(cfg.SapB1.DbUserName) && !_warnedMissingDbLogin)
+        {
+            _warnedMissingDbLogin = true;
+            _logger.LogWarning(
+                "Companies:Autohub:SapB1:DbUserName is not set — falling back to the DI API user " +
+                "'{UserName}', which usually is NOT a SQL Server login. If SQL Server rejects the " +
+                "login (error 18456), set DbUserName/DbPassword to a real SQL login in the external " +
+                "appsettings.Production.json.",
+                cfg.SapB1.UserName);
+        }
 
         return BuildSapConnectionString(cfg.SapB1);
     }
