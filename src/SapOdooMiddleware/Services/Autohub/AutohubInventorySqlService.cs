@@ -33,9 +33,19 @@ public interface IAutohubInventorySqlService
     /// <summary>BinCode for an OBIN AbsEntry, or null when the bin does not exist.</summary>
     Task<string?> GetBinCodeAsync(int binAbs, CancellationToken ct);
 
+    /// <summary>BinCode + owning warehouse for an OBIN AbsEntry, or null when the bin does not exist.</summary>
+    Task<(string BinCode, string WhsCode)?> GetBinInfoAsync(int binAbs, CancellationToken ct);
+
+    /// <summary>All active bins of one warehouse (for the free destination picker), by BinCode.</summary>
+    Task<List<WarehouseBin>> GetWarehouseBinsAsync(string whsCode, CancellationToken ct);
+
     /// <summary>Open transfer request lines with item details (spec §8.1), oldest first.</summary>
     Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
         string? fromWhs, string? toWhs, CancellationToken ct);
+
+    /// <summary>Open purchase order lines awaiting receipt (for the GRPO receiving screen), oldest first.</summary>
+    Task<List<OpenPurchaseOrderLine>> GetOpenPurchaseOrderLinesAsync(
+        string? cardCode, string? itemCode, CancellationToken ct);
 
     /// <summary>
     /// Idempotency probe: DocEntry/DocNum of an already-posted document carrying this U_AppRef
@@ -62,6 +72,13 @@ public interface IAutohubInventorySqlService
 
     /// <summary>Variance review lines (spec §8.4), sorted by absolute variance value descending.</summary>
     Task<List<CountingVarianceLine>> GetCountingVarianceAsync(int docEntry, CancellationToken ct);
+
+    /// <summary>
+    /// Default-bin seed candidates (spec §10): the top stocked non-system bin per
+    /// item-warehouse, with the current OITW.DftBinAbs for skip/overwrite decisions.
+    /// Ordered by ItemCode so a re-run processes items deterministically.
+    /// </summary>
+    Task<List<DefaultBinSeedRow>> GetDefaultBinSeedRowsAsync(CancellationToken ct);
 }
 
 /// <summary>
@@ -71,9 +88,10 @@ public interface IAutohubInventorySqlService
 /// </summary>
 public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
 {
-    // U_AppRef idempotency probes are limited to the five inventory header tables.
+    // U_AppRef idempotency probes are limited to the inventory header tables
+    // (the five from spec §6.3 plus OPDN for GRPO).
     private static readonly HashSet<string> AllowedAppRefTables =
-        new(StringComparer.OrdinalIgnoreCase) { "OIGN", "OWTQ", "OWTR", "OINC", "OIQR" };
+        new(StringComparer.OrdinalIgnoreCase) { "OIGN", "OWTQ", "OWTR", "OINC", "OIQR", "OPDN" };
 
     private static readonly TimeSpan WarehouseCacheTtl = TimeSpan.FromMinutes(5);
 
@@ -280,6 +298,46 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         return result is null or DBNull ? null : (string)result;
     }
 
+    public async Task<(string BinCode, string WhsCode)?> GetBinInfoAsync(int binAbs, CancellationToken ct)
+    {
+        const string sql = "SELECT BinCode, WhsCode FROM OBIN WHERE AbsEntry = @abs;";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@abs", binAbs);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        return (reader.GetString(0), reader.GetString(1));
+    }
+
+    public async Task<List<WarehouseBin>> GetWarehouseBinsAsync(string whsCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT AbsEntry, BinCode, ISNULL(SysBin, 'N'), ISNULL(Disabled, 'N')
+            FROM OBIN
+            WHERE WhsCode = @whs
+            ORDER BY BinCode;
+            """;
+
+        var list = new List<WarehouseBin>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@whs", whsCode);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (reader.GetString(3) == "Y")
+                continue;   // disabled bins are not valid targets
+            list.Add(new WarehouseBin
+            {
+                BinAbs = reader.GetInt32(0),
+                BinCode = reader.GetString(1),
+                SysBin = reader.GetString(2) == "Y",
+            });
+        }
+        return list;
+    }
+
     // ── Transfer requests ────────────────────────────────────────────
 
     public async Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
@@ -326,6 +384,55 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 Manufacturer = reader.IsDBNull(9) ? null : reader.GetString(9),
                 Quantity = (double)reader.GetDecimal(10),
                 OpenQty = (double)reader.GetDecimal(11),
+            });
+        }
+        return list;
+    }
+
+    // ── Purchase orders (GRPO receiving screen) ──────────────────────
+
+    public async Task<List<OpenPurchaseOrderLine>> GetOpenPurchaseOrderLinesAsync(
+        string? cardCode, string? itemCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
+                   T1.LineNum, T1.ItemCode,
+                   I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
+                   T1.Quantity, T1.OpenQty, T1.WhsCode
+            FROM OPOR T0
+            JOIN POR1 T1 ON T1.DocEntry = T0.DocEntry
+            JOIN OITM I ON I.ItemCode = T1.ItemCode
+            WHERE T0.DocStatus = 'O' AND T1.LineStatus = 'O' AND T1.OpenQty > 0
+              AND (@card IS NULL OR T0.CardCode = @card)
+              AND (@item IS NULL OR T1.ItemCode = @item)
+            ORDER BY T0.DocDate, T0.DocNum, T1.LineNum;
+            """;
+
+        var list = new List<OpenPurchaseOrderLine>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@card", System.Data.SqlDbType.NVarChar, 15).Value =
+            (object?)cardCode ?? DBNull.Value;
+        cmd.Parameters.Add("@item", System.Data.SqlDbType.NVarChar, 50).Value =
+            (object?)itemCode ?? DBNull.Value;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new OpenPurchaseOrderLine
+            {
+                DocEntry = reader.GetInt32(0),
+                DocNum = reader.GetInt32(1),
+                DocDate = reader.IsDBNull(2) ? "" : reader.GetDateTime(2).ToString("yyyy-MM-dd"),
+                CardCode = reader.GetString(3),
+                CardName = reader.IsDBNull(4) ? null : reader.GetString(4),
+                LineNum = reader.GetInt32(5),
+                ItemCode = reader.GetString(6),
+                ItemName = reader.IsDBNull(7) ? null : reader.GetString(7),
+                ArticleNumber = reader.IsDBNull(8) ? null : reader.GetString(8),
+                Manufacturer = reader.IsDBNull(9) ? null : reader.GetString(9),
+                Quantity = (double)reader.GetDecimal(10),
+                OpenQty = (double)reader.GetDecimal(11),
+                WhsCode = reader.IsDBNull(12) ? "" : reader.GetString(12),
             });
         }
         return list;
@@ -535,6 +642,42 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         return list;
     }
 
+    // ── Default-bin seeding (spec §10) ───────────────────────────────
+
+    public async Task<List<DefaultBinSeedRow>> GetDefaultBinSeedRowsAsync(CancellationToken ct)
+    {
+        const string sql = """
+            SELECT x.ItemCode, x.WhsCode, x.BinAbs, W.DftBinAbs
+            FROM (
+              SELECT Q.ItemCode, Q.WhsCode, Q.BinAbs,
+                     ROW_NUMBER() OVER (PARTITION BY Q.ItemCode, Q.WhsCode
+                                        ORDER BY Q.OnHandQty DESC) AS rn
+              FROM OIBQ Q
+              JOIN OBIN B ON B.AbsEntry = Q.BinAbs
+              WHERE Q.OnHandQty > 0 AND B.SysBin = 'N'
+            ) x
+            JOIN OITW W ON W.ItemCode = x.ItemCode AND W.WhsCode = x.WhsCode
+            WHERE x.rn = 1
+            ORDER BY x.ItemCode, x.WhsCode;
+            """;
+
+        var list = new List<DefaultBinSeedRow>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new DefaultBinSeedRow
+            {
+                ItemCode = reader.GetString(0),
+                WhsCode = reader.GetString(1),
+                BinAbs = reader.GetInt32(2),
+                CurrentDftBinAbs = reader.IsDBNull(3) ? null : reader.GetInt32(3),
+            });
+        }
+        return list;
+    }
+
     // ── Idempotency ──────────────────────────────────────────────────
 
     public async Task<(int DocEntry, int DocNum)?> FindDocEntryByAppRefAsync(
@@ -542,7 +685,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     {
         if (!AllowedAppRefTables.Contains(headerTable))
             throw new ArgumentException(
-                $"Table '{headerTable}' is not an inventory header table (OIGN/OWTQ/OWTR/OINC/OIQR).",
+                $"Table '{headerTable}' is not an inventory header table (OIGN/OWTQ/OWTR/OINC/OIQR/OPDN).",
                 nameof(headerTable));
 
         // Table name is whitelisted above — safe to interpolate.

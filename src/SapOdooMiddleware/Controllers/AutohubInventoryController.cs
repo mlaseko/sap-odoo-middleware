@@ -23,6 +23,7 @@ public class AutohubInventoryController : ControllerBase
     private readonly IBinResolver _binResolver;
     private readonly IAutohubSapB1Service _sap;
     private readonly AutohubInventorySettings _settings;
+    private readonly DefaultBinSeedJobService _binSeed;
     private readonly ILogger<AutohubInventoryController> _logger;
 
     public AutohubInventoryController(
@@ -30,12 +31,14 @@ public class AutohubInventoryController : ControllerBase
         IBinResolver binResolver,
         IAutohubSapB1Service sap,
         IOptions<AutohubInventorySettings> settings,
+        DefaultBinSeedJobService binSeed,
         ILogger<AutohubInventoryController> logger)
     {
         _sql = sql;
         _binResolver = binResolver;
         _sap = sap;
         _settings = settings.Value;
+        _binSeed = binSeed;
         _logger = logger;
     }
 
@@ -130,6 +133,41 @@ public class AutohubInventoryController : ControllerBase
         {
             // Unknown warehouse etc. — caller error, not a server fault.
             return BadRequest(ApiResponse<BinResolution>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/warehouse-bins?whs_code=001
+    /// ALL active bins of a warehouse, by BinCode — the free bin-picker list for when
+    /// the user wants a bin the resolver didn't suggest (e.g. an empty destination bin).
+    /// System bins are included but flagged (<c>sys_bin</c>) so the UI can de-emphasize
+    /// them. For stock-holding bins of a specific item, use <c>GET /bins</c> instead.
+    /// </summary>
+    [HttpGet("warehouse-bins")]
+    [ProducesResponseType(typeof(ApiResponse<List<WarehouseBin>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<List<WarehouseBin>>), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetWarehouseBins(
+        [FromQuery(Name = "whs_code")] string? whsCode,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(whsCode))
+            return BadRequest(ApiResponse<List<WarehouseBin>>.Fail("whs_code query parameter is required."));
+
+        try
+        {
+            await ValidateWarehousesExistAsync(new[] { whsCode.Trim() }, ct);
+            if (!await _sql.IsBinManagedAsync(whsCode.Trim(), ct))
+                return BadRequest(ApiResponse<List<WarehouseBin>>.Fail(
+                    $"Warehouse {whsCode.Trim()} has no bins."));
+
+            var bins = await _sql.GetWarehouseBinsAsync(whsCode.Trim(), ct);
+            return Ok(ApiResponse<List<WarehouseBin>>.Ok(
+                bins,
+                new Dictionary<string, object> { ["total_bins"] = bins.Count }));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
+        {
+            return BadRequest(ApiResponse<List<WarehouseBin>>.Fail(ex.Message));
         }
     }
 
@@ -620,6 +658,403 @@ public class AutohubInventoryController : ControllerBase
             return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
         }
     }
+
+    // ── Goods Receipt + default bin (Phase 4) ────────────────────────
+
+    /// <summary>
+    /// POST /api/autohub/inv/goods-receipts
+    /// Creates a Goods Receipt (OIGN) — standalone, non-PO stock-in (spec §5.1).
+    /// Destination bins are decided server-side: for a bin-managed warehouse with no
+    /// bin supplied, the resolver auto-selects (default bin → consolidate into stocked
+    /// bin), otherwise the request is rejected with guidance to <c>GET /bins</c>.
+    /// <c>unit_cost</c> is optional per line — omitted, SAP uses the item cost.
+    /// Idempotent on <c>app_ref</c>.
+    /// </summary>
+    [HttpPost("goods-receipts")]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CreateGoodsReceipt(
+        [FromBody] GoodsReceiptCreate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (string.IsNullOrWhiteSpace(request.WhsCode)) errors.Add("whs_code is required.");
+        if (request.Lines.Count == 0) errors.Add("At least one line is required.");
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            var l = request.Lines[i];
+            if (string.IsNullOrWhiteSpace(l.ItemCode))
+                errors.Add($"lines[{i}]: item_code is required.");
+            if (l.Quantity <= 0)
+                errors.Add($"lines[{i}]: quantity must be greater than zero.");
+            if (l.UnitCost is < 0)
+                errors.Add($"lines[{i}]: unit_cost cannot be negative.");
+        }
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+        request.WhsCode = request.WhsCode.Trim();
+        request.AppRef = request.AppRef.Trim();
+
+        try
+        {
+            await ValidateWarehousesExistAsync(new[] { request.WhsCode }, ct);
+
+            // Idempotency: same app_ref already posted → return it, don't double-post.
+            var existing = await _sql.FindDocEntryByAppRefAsync("OIGN", request.AppRef, ct);
+            if (existing is not null)
+            {
+                _logger.LogInformation(
+                    "Goods receipt app_ref={AppRef} already posted as DocEntry={DocEntry} — returning existing.",
+                    request.AppRef, existing.Value.DocEntry);
+                return Ok(ApiResponse<InventoryDocResult>.Ok(new InventoryDocResult
+                {
+                    DocEntry = existing.Value.DocEntry,
+                    DocNum = existing.Value.DocNum,
+                    AlreadyExisted = true,
+                }));
+            }
+
+            // Destination bin handling — same server-side rule as transfers.
+            bool binManaged = await _sql.IsBinManagedAsync(request.WhsCode, ct);
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var line = request.Lines[i];
+                line.ItemCode = line.ItemCode.Trim();
+
+                if (!binManaged)
+                {
+                    line.BinAbs = null;
+                    continue;
+                }
+                if (line.BinAbs.HasValue) continue;
+
+                var res = await _binResolver.ResolveAsync(
+                    line.ItemCode, request.WhsCode, BinDirection.Destination, ct);
+                if (res.Resolution == "auto")
+                    line.BinAbs = res.Auto!.BinAbs;
+                else
+                    errors.Add(
+                        $"lines[{i}] ({line.ItemCode}): destination bin required in warehouse {request.WhsCode} " +
+                        $"(resolver: {res.Resolution}) — pick one via GET /api/autohub/inv/bins.");
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            var result = await _sap.CreateGoodsReceiptAsync(
+                request, _settings.GoodsReceiptSeries, ct);
+            return Ok(ApiResponse<InventoryDocResult>.Ok(result));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
+        {
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Goods receipt creation failed (app_ref={AppRef}, whs={Whs})",
+                request.AppRef, request.WhsCode);
+            return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// PUT /api/autohub/inv/default-bin
+    /// Sets an item's default bin in one warehouse (OITW.DftBinAbs) — the app's
+    /// "save as default bin for this item" action after a scan (spec §7 rung 3).
+    /// The destination resolver auto-selects this bin from then on. Defaults suggest,
+    /// never block.
+    /// </summary>
+    [HttpPut("default-bin")]
+    [ProducesResponseType(typeof(ApiResponse<DefaultBinUpdate>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<DefaultBinUpdate>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<DefaultBinUpdate>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> SetDefaultBin(
+        [FromBody] DefaultBinUpdate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        if (string.IsNullOrWhiteSpace(request.ItemCode)) errors.Add("item_code is required.");
+        if (string.IsNullOrWhiteSpace(request.WhsCode)) errors.Add("whs_code is required.");
+        if (request.BinAbs <= 0) errors.Add("bin_abs is required.");
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<DefaultBinUpdate>.Fail(errors));
+
+        request.ItemCode = request.ItemCode.Trim();
+        request.WhsCode = request.WhsCode.Trim();
+
+        try
+        {
+            await ValidateWarehousesExistAsync(new[] { request.WhsCode }, ct);
+            if (!await _sql.IsBinManagedAsync(request.WhsCode, ct))
+                return BadRequest(ApiResponse<DefaultBinUpdate>.Fail(
+                    $"Warehouse {request.WhsCode} has no bins — a default bin cannot be set."));
+
+            var bin = await _sql.GetBinInfoAsync(request.BinAbs, ct);
+            if (bin is null)
+                return BadRequest(ApiResponse<DefaultBinUpdate>.Fail(
+                    $"Bin AbsEntry {request.BinAbs} does not exist."));
+            if (!string.Equals(bin.Value.WhsCode, request.WhsCode, StringComparison.OrdinalIgnoreCase))
+                return BadRequest(ApiResponse<DefaultBinUpdate>.Fail(
+                    $"Bin {bin.Value.BinCode} belongs to warehouse {bin.Value.WhsCode}, not {request.WhsCode}."));
+
+            await _sap.SetItemDefaultBinAsync(request.ItemCode, request.WhsCode, request.BinAbs, ct);
+
+            return Ok(ApiResponse<DefaultBinUpdate>.Ok(
+                request,
+                new Dictionary<string, object> { ["bin_code"] = bin.Value.BinCode }));
+        }
+        catch (InvalidOperationException ex) when (
+            ex.Message.Contains("does not exist") || ex.Message.Contains("not found") ||
+            ex.Message.Contains("no warehouse-info row"))
+        {
+            return BadRequest(ApiResponse<DefaultBinUpdate>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Default bin update failed (item={Item}, whs={Whs}, bin={Bin})",
+                request.ItemCode, request.WhsCode, request.BinAbs);
+            return StatusCode(500, ApiResponse<DefaultBinUpdate>.Fail(ex.Message));
+        }
+    }
+
+    // ── GRPO: receive against purchase orders (Phase 4) ──────────────
+
+    /// <summary>
+    /// GET /api/autohub/inv/purchase-orders?card_code=V00001&amp;item_code=BM10001
+    /// Open purchase order lines awaiting receipt (the GRPO receiving screen), oldest
+    /// first, with item name, article number, manufacturer, open quantity, and the
+    /// PO line's warehouse (the default receiving destination).
+    /// </summary>
+    [HttpGet("purchase-orders")]
+    [ProducesResponseType(typeof(ApiResponse<List<OpenPurchaseOrderLine>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetOpenPurchaseOrders(
+        [FromQuery(Name = "card_code")] string? cardCode = null,
+        [FromQuery(Name = "item_code")] string? itemCode = null,
+        CancellationToken ct = default)
+    {
+        var lines = await _sql.GetOpenPurchaseOrderLinesAsync(
+            NormalizeWhs(cardCode), NormalizeWhs(itemCode), ct);
+
+        return Ok(ApiResponse<List<OpenPurchaseOrderLine>>.Ok(
+            lines,
+            new Dictionary<string, object>
+            {
+                ["total_lines"] = lines.Count,
+                ["total_documents"] = lines.Select(l => l.DocEntry).Distinct().Count(),
+            }));
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/grpo
+    /// Creates a Goods Receipt PO (OPDN) by copying from open purchase order lines.
+    /// Base refs update the PO's open quantities and vendor liability; SAP closes
+    /// fully received lines (partials allowed). Every line must reference an open PO
+    /// line of the given vendor and receive at most its open quantity. Destination
+    /// bins resolve server-side like all other documents. Idempotent on <c>app_ref</c>.
+    /// </summary>
+    [HttpPost("grpo")]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CreateGrpo(
+        [FromBody] GrpoCreate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (string.IsNullOrWhiteSpace(request.CardCode)) errors.Add("card_code is required.");
+        if (request.Lines.Count == 0) errors.Add("At least one line is required.");
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            var l = request.Lines[i];
+            if (l.PoDocEntry <= 0) errors.Add($"lines[{i}]: po_doc_entry is required.");
+            if (l.PoLineNum < 0) errors.Add($"lines[{i}]: po_line_num cannot be negative.");
+            if (l.Quantity <= 0) errors.Add($"lines[{i}]: quantity must be greater than zero.");
+        }
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+        request.CardCode = request.CardCode.Trim();
+        request.AppRef = request.AppRef.Trim();
+
+        try
+        {
+            // Idempotency: same app_ref already posted → return it, don't double-post.
+            var existing = await _sql.FindDocEntryByAppRefAsync("OPDN", request.AppRef, ct);
+            if (existing is not null)
+            {
+                _logger.LogInformation(
+                    "GRPO app_ref={AppRef} already posted as DocEntry={DocEntry} — returning existing.",
+                    request.AppRef, existing.Value.DocEntry);
+                return Ok(ApiResponse<InventoryDocResult>.Ok(new InventoryDocResult
+                {
+                    DocEntry = existing.Value.DocEntry,
+                    DocNum = existing.Value.DocNum,
+                    AlreadyExisted = true,
+                }));
+            }
+
+            // Validate every line against the vendor's open PO lines.
+            var openLines = await _sql.GetOpenPurchaseOrderLinesAsync(request.CardCode, null, ct);
+            var openByRef = openLines.ToDictionary(l => (l.DocEntry, l.LineNum));
+
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var line = request.Lines[i];
+                if (!openByRef.TryGetValue((line.PoDocEntry, line.PoLineNum), out var poLine))
+                {
+                    errors.Add(
+                        $"lines[{i}]: PO {line.PoDocEntry} line {line.PoLineNum} is not an open " +
+                        $"purchase order line of vendor {request.CardCode}.");
+                    continue;
+                }
+                if (line.Quantity > poLine.OpenQty)
+                    errors.Add(
+                        $"lines[{i}] ({poLine.ItemCode}): quantity {line.Quantity} exceeds the PO line's " +
+                        $"open quantity {poLine.OpenQty}.");
+
+                // Receiving warehouse: explicit override or the PO line's warehouse.
+                line.WhsCode = string.IsNullOrWhiteSpace(line.WhsCode)
+                    ? poLine.WhsCode
+                    : line.WhsCode.Trim();
+                if (string.IsNullOrWhiteSpace(line.WhsCode))
+                    errors.Add($"lines[{i}] ({poLine.ItemCode}): no warehouse on the PO line — supply whs_code.");
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            // Destination bin handling per line, using each line's receiving warehouse.
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var line = request.Lines[i];
+                var poLine = openByRef[(line.PoDocEntry, line.PoLineNum)];
+
+                if (!await _sql.IsBinManagedAsync(line.WhsCode!, ct))
+                {
+                    line.BinAbs = null;
+                    continue;
+                }
+                if (line.BinAbs.HasValue) continue;
+
+                var res = await _binResolver.ResolveAsync(
+                    poLine.ItemCode, line.WhsCode!, BinDirection.Destination, ct);
+                if (res.Resolution == "auto")
+                    line.BinAbs = res.Auto!.BinAbs;
+                else
+                    errors.Add(
+                        $"lines[{i}] ({poLine.ItemCode}): destination bin required in warehouse {line.WhsCode} " +
+                        $"(resolver: {res.Resolution}) — pick one via GET /api/autohub/inv/bins.");
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            var result = await _sap.CreateGrpoAsync(request, _settings.GrpoSeries, ct);
+            return Ok(ApiResponse<InventoryDocResult>.Ok(result));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
+        {
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "GRPO creation failed (app_ref={AppRef}, card_code={CardCode})",
+                request.AppRef, request.CardCode);
+            return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+    }
+
+    // ── Default-bin seeding job (Phase 5, spec §10) ──────────────────
+
+    /// <summary>
+    /// POST /api/autohub/inv/default-bin-seed?dry_run=true&amp;overwrite=false&amp;limit=0
+    /// One-time seeding of item default bins (OITW.DftBinAbs) from where stock sits
+    /// today — the resolver's rung 1 then auto-selects from day one.
+    /// <para>
+    /// <c>dry_run=true</c> returns the analysis immediately (no writes): how many
+    /// pairs would be set, already correct, or differently defaulted, plus a sample.
+    /// A live run starts a BACKGROUND job (poll GET for progress). Spike first with
+    /// <c>limit=5</c>, verify in the B1 client, then run without limit after hours.
+    /// Re-running with <c>overwrite=false</c> (default) only fills empty defaults,
+    /// so an interrupted run just continues.
+    /// </para>
+    /// </summary>
+    [HttpPost("default-bin-seed")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> StartDefaultBinSeed(
+        [FromQuery(Name = "dry_run")] bool dryRun = true,
+        [FromQuery(Name = "overwrite")] bool overwrite = false,
+        [FromQuery(Name = "limit")] int limit = 0,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (dryRun)
+            {
+                var analysis = await _binSeed.AnalyzeAsync(overwrite, ct);
+                return Ok(ApiResponse<object>.Ok(analysis));
+            }
+
+            var job = _binSeed.Start(overwrite, Math.Max(0, limit));
+            return Ok(ApiResponse<object>.Ok(SeedJobSnapshot(job)));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Default-bin seed start failed (dry_run={DryRun})", dryRun);
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/default-bin-seed
+    /// Progress/result of the latest seeding run (in-memory; empty after a service restart).
+    /// </summary>
+    [HttpGet("default-bin-seed")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    public IActionResult GetDefaultBinSeedStatus()
+    {
+        var job = _binSeed.Current;
+        if (job is null)
+            return NotFound(ApiResponse<object>.Fail(
+                "No seeding run since service start. POST /default-bin-seed to begin (dry_run=true first)."));
+        return Ok(ApiResponse<object>.Ok(SeedJobSnapshot(job)));
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/default-bin-seed/stop
+    /// Gracefully stops the running seeding job after the current item. Already-written
+    /// defaults stay (they're the correct end state); a later run continues the rest.
+    /// </summary>
+    [HttpPost("default-bin-seed/stop")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status400BadRequest)]
+    public IActionResult StopDefaultBinSeed()
+    {
+        if (!_binSeed.Stop())
+            return BadRequest(ApiResponse<object>.Fail("No seeding job is currently running."));
+        return Ok(ApiResponse<object>.Ok(SeedJobSnapshot(_binSeed.Current!)));
+    }
+
+    /// <summary>Job DTO — Status is a volatile field, so map it explicitly for JSON.</summary>
+    private static object SeedJobSnapshot(DefaultBinSeedJob job) => new
+    {
+        job.JobId,
+        Status = job.Status,
+        job.StartedAt,
+        job.FinishedAt,
+        job.Overwrite,
+        job.Limit,
+        job.TotalItems,
+        job.ProcessedItems,
+        job.UpdatedItems,
+        job.UnchangedItems,
+        job.FailedItems,
+        job.Error,
+        job.Failures,
+    };
 
     // ── Write helpers ────────────────────────────────────────────────
 

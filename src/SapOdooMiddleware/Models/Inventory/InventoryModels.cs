@@ -84,6 +84,15 @@ public class BinOption
     public decimal OnHandQty { get; set; }
 }
 
+/// <summary>One bin of a warehouse (for the free bin-picker list).</summary>
+public class WarehouseBin
+{
+    public int BinAbs { get; set; }
+    public string BinCode { get; set; } = "";
+    /// <summary>True for the SYSTEM-BIN-LOCATION (usually not a sensible manual pick).</summary>
+    public bool SysBin { get; set; }
+}
+
 // ── Transfer Request ─────────────────────────────────────────────────
 
 /// <summary>Open transfer request line (from OWTQ/WTQ1 + OITM).</summary>
