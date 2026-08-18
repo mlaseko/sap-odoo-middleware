@@ -252,6 +252,12 @@ builder.Services.AddSingleton<AutohubBulkCreateJobService>();   // async Bulk Cr
 // Read-only Lubes inventory coverage/forecast report (direct SQL over the default Lubes SAP company).
 builder.Services.AddScoped<ILubesInventoryForecastService, LubesInventoryForecastService>();
 
+// --- Autohub inventory app (reads via direct SQL; writes via DI API in later phases) ---
+// Singleton: resolves the Autohub tenant config directly (same pattern as the SKU refresher)
+// and caches the OWHS warehouse list in-process.
+builder.Services.AddSingleton<IAutohubInventorySqlService, AutohubInventorySqlService>();
+builder.Services.AddSingleton<IBinResolver, BinResolver>();
+
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();
 
