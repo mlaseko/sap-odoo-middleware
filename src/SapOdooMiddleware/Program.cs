@@ -259,6 +259,8 @@ builder.Services.AddSingleton<IAutohubInventorySqlService, AutohubInventorySqlSe
 builder.Services.AddSingleton<IBinResolver, BinResolver>();
 // Numbering series per inventory doc type (spec §6.4) — defaults in code, overridable in config.
 builder.Services.Configure<AutohubInventorySettings>(builder.Configuration.GetSection(AutohubInventorySettings.SectionName));
+// One-time default-bin seeding job (spec §10) — background runner + dry-run analysis.
+builder.Services.AddSingleton<DefaultBinSeedJobService>();
 
 // --- Razor Pages (operator UI under /documents; no Blazor) ---
 builder.Services.AddRazorPages();

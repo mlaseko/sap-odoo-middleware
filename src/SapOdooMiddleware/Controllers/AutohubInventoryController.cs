@@ -23,6 +23,7 @@ public class AutohubInventoryController : ControllerBase
     private readonly IBinResolver _binResolver;
     private readonly IAutohubSapB1Service _sap;
     private readonly AutohubInventorySettings _settings;
+    private readonly DefaultBinSeedJobService _binSeed;
     private readonly ILogger<AutohubInventoryController> _logger;
 
     public AutohubInventoryController(
@@ -30,12 +31,14 @@ public class AutohubInventoryController : ControllerBase
         IBinResolver binResolver,
         IAutohubSapB1Service sap,
         IOptions<AutohubInventorySettings> settings,
+        DefaultBinSeedJobService binSeed,
         ILogger<AutohubInventoryController> logger)
     {
         _sql = sql;
         _binResolver = binResolver;
         _sap = sap;
         _settings = settings.Value;
+        _binSeed = binSeed;
         _logger = logger;
     }
 
@@ -926,6 +929,97 @@ public class AutohubInventoryController : ControllerBase
             return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
         }
     }
+
+    // ── Default-bin seeding job (Phase 5, spec §10) ──────────────────
+
+    /// <summary>
+    /// POST /api/autohub/inv/default-bin-seed?dry_run=true&amp;overwrite=false&amp;limit=0
+    /// One-time seeding of item default bins (OITW.DftBinAbs) from where stock sits
+    /// today — the resolver's rung 1 then auto-selects from day one.
+    /// <para>
+    /// <c>dry_run=true</c> returns the analysis immediately (no writes): how many
+    /// pairs would be set, already correct, or differently defaulted, plus a sample.
+    /// A live run starts a BACKGROUND job (poll GET for progress). Spike first with
+    /// <c>limit=5</c>, verify in the B1 client, then run without limit after hours.
+    /// Re-running with <c>overwrite=false</c> (default) only fills empty defaults,
+    /// so an interrupted run just continues.
+    /// </para>
+    /// </summary>
+    [HttpPost("default-bin-seed")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> StartDefaultBinSeed(
+        [FromQuery(Name = "dry_run")] bool dryRun = true,
+        [FromQuery(Name = "overwrite")] bool overwrite = false,
+        [FromQuery(Name = "limit")] int limit = 0,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (dryRun)
+            {
+                var analysis = await _binSeed.AnalyzeAsync(overwrite, ct);
+                return Ok(ApiResponse<object>.Ok(analysis));
+            }
+
+            var job = _binSeed.Start(overwrite, Math.Max(0, limit));
+            return Ok(ApiResponse<object>.Ok(SeedJobSnapshot(job)));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Default-bin seed start failed (dry_run={DryRun})", dryRun);
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/default-bin-seed
+    /// Progress/result of the latest seeding run (in-memory; empty after a service restart).
+    /// </summary>
+    [HttpGet("default-bin-seed")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    public IActionResult GetDefaultBinSeedStatus()
+    {
+        var job = _binSeed.Current;
+        if (job is null)
+            return NotFound(ApiResponse<object>.Fail(
+                "No seeding run since service start. POST /default-bin-seed to begin (dry_run=true first)."));
+        return Ok(ApiResponse<object>.Ok(SeedJobSnapshot(job)));
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/default-bin-seed/stop
+    /// Gracefully stops the running seeding job after the current item. Already-written
+    /// defaults stay (they're the correct end state); a later run continues the rest.
+    /// </summary>
+    [HttpPost("default-bin-seed/stop")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status400BadRequest)]
+    public IActionResult StopDefaultBinSeed()
+    {
+        if (!_binSeed.Stop())
+            return BadRequest(ApiResponse<object>.Fail("No seeding job is currently running."));
+        return Ok(ApiResponse<object>.Ok(SeedJobSnapshot(_binSeed.Current!)));
+    }
+
+    /// <summary>Job DTO — Status is a volatile field, so map it explicitly for JSON.</summary>
+    private static object SeedJobSnapshot(DefaultBinSeedJob job) => new
+    {
+        job.JobId,
+        Status = job.Status,
+        job.StartedAt,
+        job.FinishedAt,
+        job.Overwrite,
+        job.Limit,
+        job.TotalItems,
+        job.ProcessedItems,
+        job.UpdatedItems,
+        job.UnchangedItems,
+        job.FailedItems,
+        job.Error,
+        job.Failures,
+    };
 
     // ── Write helpers ────────────────────────────────────────────────
 

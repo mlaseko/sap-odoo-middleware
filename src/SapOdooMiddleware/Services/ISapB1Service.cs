@@ -350,4 +350,13 @@ public interface ISapB1Service
     /// liability, closing fully received lines. Partial receipts supported.
     /// </summary>
     Task<InventoryDocResult> CreateGrpoAsync(GrpoCreate request, int series, CancellationToken ct);
+
+    /// <summary>
+    /// Sets the item's default bin across multiple warehouses in ONE
+    /// <c>Items.Update()</c> (the spec §10 seeding-job shape — one update per item,
+    /// not per warehouse). Warehouses whose default already equals the target are
+    /// left untouched. Returns true when an Update was actually performed.
+    /// </summary>
+    Task<bool> SetItemDefaultBinsAsync(
+        string itemCode, IReadOnlyDictionary<string, int> binByWhs, CancellationToken ct);
 }

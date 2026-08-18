@@ -69,6 +69,13 @@ public interface IAutohubInventorySqlService
 
     /// <summary>Variance review lines (spec §8.4), sorted by absolute variance value descending.</summary>
     Task<List<CountingVarianceLine>> GetCountingVarianceAsync(int docEntry, CancellationToken ct);
+
+    /// <summary>
+    /// Default-bin seed candidates (spec §10): the top stocked non-system bin per
+    /// item-warehouse, with the current OITW.DftBinAbs for skip/overwrite decisions.
+    /// Ordered by ItemCode so a re-run processes items deterministically.
+    /// </summary>
+    Task<List<DefaultBinSeedRow>> GetDefaultBinSeedRowsAsync(CancellationToken ct);
 }
 
 /// <summary>
@@ -599,6 +606,42 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 VarianceValue = reader.IsDBNull(10) ? 0m : reader.GetDecimal(10),
                 Counted = !reader.IsDBNull(11) && reader.GetString(11) == "Y",
                 LineStatus = reader.IsDBNull(12) ? "" : reader.GetString(12),
+            });
+        }
+        return list;
+    }
+
+    // ── Default-bin seeding (spec §10) ───────────────────────────────
+
+    public async Task<List<DefaultBinSeedRow>> GetDefaultBinSeedRowsAsync(CancellationToken ct)
+    {
+        const string sql = """
+            SELECT x.ItemCode, x.WhsCode, x.BinAbs, W.DftBinAbs
+            FROM (
+              SELECT Q.ItemCode, Q.WhsCode, Q.BinAbs,
+                     ROW_NUMBER() OVER (PARTITION BY Q.ItemCode, Q.WhsCode
+                                        ORDER BY Q.OnHandQty DESC) AS rn
+              FROM OIBQ Q
+              JOIN OBIN B ON B.AbsEntry = Q.BinAbs
+              WHERE Q.OnHandQty > 0 AND B.SysBin = 'N'
+            ) x
+            JOIN OITW W ON W.ItemCode = x.ItemCode AND W.WhsCode = x.WhsCode
+            WHERE x.rn = 1
+            ORDER BY x.ItemCode, x.WhsCode;
+            """;
+
+        var list = new List<DefaultBinSeedRow>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new DefaultBinSeedRow
+            {
+                ItemCode = reader.GetString(0),
+                WhsCode = reader.GetString(1),
+                BinAbs = reader.GetInt32(2),
+                CurrentDftBinAbs = reader.IsDBNull(3) ? null : reader.GetInt32(3),
             });
         }
         return list;

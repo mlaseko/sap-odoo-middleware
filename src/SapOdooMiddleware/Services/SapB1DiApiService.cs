@@ -6068,6 +6068,55 @@ ORDER BY PostingDate, DocumentNumber";
             _lock.Release();
         }
     }
+
+    /// <inheritdoc/>
+    public async Task<bool> SetItemDefaultBinsAsync(
+        string itemCode, IReadOnlyDictionary<string, int> binByWhs, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var item = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!item.GetByKey(itemCode))
+                    throw new InvalidOperationException($"SAP item '{itemCode}' not found.");
+
+                bool touched = false;
+                for (int i = 0; i < item.WhsInfo.Count; i++)
+                {
+                    item.WhsInfo.SetCurrentLine(i);
+                    if (binByWhs.TryGetValue(item.WhsInfo.WarehouseCode, out int binAbs)
+                        && item.WhsInfo.DefaultBin != binAbs)
+                    {
+                        item.WhsInfo.DefaultBin = binAbs;
+                        touched = true;
+                    }
+                }
+
+                if (!touched)
+                    return false;
+
+                if (item.Update() != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed seeding default bins for {itemCode} [{errCode}]: {errMsg}");
+                }
+                return true;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(item);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 }
 
 /// <summary>
