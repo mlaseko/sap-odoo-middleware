@@ -1,3 +1,4 @@
+using SapOdooMiddleware.Models.Inventory;
 using SapOdooMiddleware.Models.Sap;
 
 namespace SapOdooMiddleware.Services;
@@ -272,4 +273,28 @@ public interface ISapB1Service
     /// relying on Neon's potentially-incomplete copy.
     /// </summary>
     Task<Dictionary<string, int>> GetItemGroupCodesAsync(CancellationToken ct);
+
+    // ================================
+    // INVENTORY APP (Autohub) — resolved via IAutohubSapB1Service
+    // ================================
+
+    /// <summary>
+    /// Creates an Inventory Transfer Request (OWTQ, object 1250000001) — intent only,
+    /// no stock movement, no bin allocations. <paramref name="series"/> is set explicitly
+    /// on the document; the request's AppRef GUID is written to the U_AppRef UDF for
+    /// idempotency. Returns the new DocEntry/DocNum.
+    /// </summary>
+    Task<InventoryDocResult> CreateInventoryTransferRequestAsync(
+        TransferRequestCreate request, int series, CancellationToken ct);
+
+    /// <summary>
+    /// Creates an Inventory Transfer (OWTR, object 67). Lines drawn from a transfer
+    /// request carry BaseType 1250000001 + BaseEntry/BaseLine so SAP decrements and
+    /// closes the request's open quantities (partial fulfillment supported). Bin
+    /// allocations are added per line for whichever side(s) are bin-managed
+    /// (batFromWarehouse for the source bin, batToWarehouse for the destination bin).
+    /// Same-warehouse putaway (FromWhs == ToWhs with both allocation rows) is supported.
+    /// </summary>
+    Task<InventoryDocResult> CreateInventoryTransferAsync(
+        TransferCreate request, int series, CancellationToken ct);
 }
