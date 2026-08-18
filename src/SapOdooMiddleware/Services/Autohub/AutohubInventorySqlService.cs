@@ -36,6 +36,9 @@ public interface IAutohubInventorySqlService
     /// <summary>BinCode + owning warehouse for an OBIN AbsEntry, or null when the bin does not exist.</summary>
     Task<(string BinCode, string WhsCode)?> GetBinInfoAsync(int binAbs, CancellationToken ct);
 
+    /// <summary>All active bins of one warehouse (for the free destination picker), by BinCode.</summary>
+    Task<List<WarehouseBin>> GetWarehouseBinsAsync(string whsCode, CancellationToken ct);
+
     /// <summary>Open transfer request lines with item details (spec §8.1), oldest first.</summary>
     Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
         string? fromWhs, string? toWhs, CancellationToken ct);
@@ -305,6 +308,34 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         if (!await reader.ReadAsync(ct))
             return null;
         return (reader.GetString(0), reader.GetString(1));
+    }
+
+    public async Task<List<WarehouseBin>> GetWarehouseBinsAsync(string whsCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT AbsEntry, BinCode, ISNULL(SysBin, 'N'), ISNULL(Disabled, 'N')
+            FROM OBIN
+            WHERE WhsCode = @whs
+            ORDER BY BinCode;
+            """;
+
+        var list = new List<WarehouseBin>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@whs", whsCode);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (reader.GetString(3) == "Y")
+                continue;   // disabled bins are not valid targets
+            list.Add(new WarehouseBin
+            {
+                BinAbs = reader.GetInt32(0),
+                BinCode = reader.GetString(1),
+                SysBin = reader.GetString(2) == "Y",
+            });
+        }
+        return list;
     }
 
     // ── Transfer requests ────────────────────────────────────────────

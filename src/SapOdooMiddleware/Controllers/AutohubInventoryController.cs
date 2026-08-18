@@ -137,6 +137,41 @@ public class AutohubInventoryController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/autohub/inv/warehouse-bins?whs_code=001
+    /// ALL active bins of a warehouse, by BinCode — the free bin-picker list for when
+    /// the user wants a bin the resolver didn't suggest (e.g. an empty destination bin).
+    /// System bins are included but flagged (<c>sys_bin</c>) so the UI can de-emphasize
+    /// them. For stock-holding bins of a specific item, use <c>GET /bins</c> instead.
+    /// </summary>
+    [HttpGet("warehouse-bins")]
+    [ProducesResponseType(typeof(ApiResponse<List<WarehouseBin>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<List<WarehouseBin>>), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetWarehouseBins(
+        [FromQuery(Name = "whs_code")] string? whsCode,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(whsCode))
+            return BadRequest(ApiResponse<List<WarehouseBin>>.Fail("whs_code query parameter is required."));
+
+        try
+        {
+            await ValidateWarehousesExistAsync(new[] { whsCode.Trim() }, ct);
+            if (!await _sql.IsBinManagedAsync(whsCode.Trim(), ct))
+                return BadRequest(ApiResponse<List<WarehouseBin>>.Fail(
+                    $"Warehouse {whsCode.Trim()} has no bins."));
+
+            var bins = await _sql.GetWarehouseBinsAsync(whsCode.Trim(), ct);
+            return Ok(ApiResponse<List<WarehouseBin>>.Ok(
+                bins,
+                new Dictionary<string, object> { ["total_bins"] = bins.Count }));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
+        {
+            return BadRequest(ApiResponse<List<WarehouseBin>>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// GET /api/autohub/inv/transfer-requests?from_whs=003&amp;to_whs=001
     /// Open transfer request lines (OWTQ/WTQ1, spec §8.1) for the fulfillment screen,
     /// oldest first, with item name, article number, and manufacturer per line.
