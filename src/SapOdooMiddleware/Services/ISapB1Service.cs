@@ -297,4 +297,32 @@ public interface ISapB1Service
     /// </summary>
     Task<InventoryDocResult> CreateInventoryTransferAsync(
         TransferCreate request, int series, CancellationToken ct);
+
+    /// <summary>
+    /// Creates an Inventory Counting session (OINC, object 1470000065) via
+    /// <c>InventoryCountingsService</c> with one line per seed (item + warehouse +
+    /// optional BinEntry). SAP snapshots the system quantity per line at creation.
+    /// Counted quantities are left empty for later capture.
+    /// </summary>
+    Task<InventoryDocResult> CreateInventoryCountingAsync(
+        DateTime countDate, string appRef, List<CountingLineSeed> lines, int series, CancellationToken ct);
+
+    /// <summary>
+    /// Updates counted quantities on an existing Inventory Counting via
+    /// <c>InventoryCountingsService.Update</c>: sets CountedQuantity + Counted=Y on the
+    /// lines in <paramref name="updates"/>, and appends <paramref name="additions"/> as
+    /// new counted lines (unexpected finds) in <paramref name="additionsWhsCode"/>.
+    /// </summary>
+    Task UpdateInventoryCountingLinesAsync(
+        int docEntry, List<CountingLineUpdate> updates, List<CountingLineAddition> additions,
+        string additionsWhsCode, CancellationToken ct);
+
+    /// <summary>
+    /// Creates an Inventory Posting (OIQR, object 10000071) from reviewer-approved
+    /// counting lines via <c>InventoryPostingsService</c>, with base refs
+    /// (BaseEntry = counting DocEntry, BaseLine = counting LineNum) so SAP posts the
+    /// stock/GL adjustments and closes those counting lines.
+    /// </summary>
+    Task<InventoryDocResult> CreateInventoryPostingAsync(
+        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series, CancellationToken ct);
 }

@@ -321,6 +321,306 @@ public class AutohubInventoryController : ControllerBase
         }
     }
 
+    // ── Counting → Posting (Phase 3) ─────────────────────────────────
+
+    /// <summary>Max generated lines per counting session — keeps sessions small
+    /// (an aisle or shelf run, spec §5.3) and the DI API update fast.</summary>
+    private const int MaxCountingLines = 500;
+
+    /// <summary>
+    /// POST /api/autohub/inv/countings
+    /// Creates a counting session (OINC). Scope: warehouse + bin_from/bin_to range or
+    /// explicit bin_abs_list for bin warehouses; just the warehouse for non-bin whs 01.
+    /// One line is generated per item-per-bin with stock; SAP snapshots system
+    /// quantities at creation. Idempotent on <c>app_ref</c>.
+    /// </summary>
+    [HttpPost("countings")]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CreateCounting(
+        [FromBody] CountingCreate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (string.IsNullOrWhiteSpace(request.WhsCode)) errors.Add("whs_code is required.");
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+        request.WhsCode = request.WhsCode.Trim();
+        request.AppRef = request.AppRef.Trim();
+
+        try
+        {
+            await ValidateWarehousesExistAsync(new[] { request.WhsCode }, ct);
+            bool binManaged = await _sql.IsBinManagedAsync(request.WhsCode, ct);
+
+            bool hasRange = !string.IsNullOrWhiteSpace(request.BinFrom) && !string.IsNullOrWhiteSpace(request.BinTo);
+            bool hasList = request.BinAbsList is { Count: > 0 };
+            if (binManaged && !hasRange && !hasList)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(
+                    $"Warehouse {request.WhsCode} is bin-managed — provide bin_from/bin_to or bin_abs_list to scope the session."));
+            if (!binManaged && (hasRange || hasList))
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(
+                    $"Warehouse {request.WhsCode} has no bins — omit bin_from/bin_to/bin_abs_list."));
+
+            // Idempotency: same app_ref already posted → return it.
+            var existing = await _sql.FindDocEntryByAppRefAsync("OINC", request.AppRef, ct);
+            if (existing is not null)
+                return Ok(ApiResponse<InventoryDocResult>.Ok(new InventoryDocResult
+                {
+                    DocEntry = existing.Value.DocEntry,
+                    DocNum = existing.Value.DocNum,
+                    AlreadyExisted = true,
+                }));
+
+            var seeds = binManaged
+                ? await _sql.GetBinCountingSeedsAsync(
+                    request.WhsCode, request.BinFrom?.Trim(), request.BinTo?.Trim(), request.BinAbsList, ct)
+                : await _sql.GetNonBinCountingSeedsAsync(request.WhsCode, ct);
+
+            if (seeds.Count == 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(
+                    "No stocked lines in the requested scope — nothing to count."));
+            if (seeds.Count > MaxCountingLines)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(
+                    $"Scope generates {seeds.Count} lines (max {MaxCountingLines}). " +
+                    "Narrow the bin range — design around small sessions (an aisle or shelf run)."));
+
+            var result = await _sap.CreateInventoryCountingAsync(
+                request.CountDate ?? DateTime.Today, request.AppRef, seeds,
+                _settings.CountingSeries, ct);
+
+            return Ok(ApiResponse<InventoryDocResult>.Ok(
+                result,
+                new Dictionary<string, object> { ["generated_lines"] = seeds.Count }));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
+        {
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Counting session creation failed (app_ref={AppRef}, whs={Whs})",
+                request.AppRef, request.WhsCode);
+            return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/countings?status=open
+    /// Counting session headers with counted-line progress, newest first.
+    /// <c>status</c>: <c>open</c> (default) or <c>all</c>.
+    /// </summary>
+    [HttpGet("countings")]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingSessionSummary>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListCountings(
+        [FromQuery(Name = "status")] string status = "open",
+        CancellationToken ct = default)
+    {
+        bool openOnly = !string.Equals(status?.Trim(), "all", StringComparison.OrdinalIgnoreCase);
+        var sessions = await _sql.GetCountingSessionsAsync(openOnly, ct);
+        return Ok(ApiResponse<List<CountingSessionSummary>>.Ok(sessions));
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/countings/{docEntry}
+    /// All lines of one counting session for the count-capture screen (expected items
+    /// per bin with system quantity, item name, article number, manufacturer).
+    /// </summary>
+    [HttpGet("countings/{docEntry:int}")]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingLineDetail>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingLineDetail>>), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetCountingLines(int docEntry, CancellationToken ct)
+    {
+        var lines = await _sql.GetCountingLinesAsync(docEntry, ct);
+        if (lines.Count == 0)
+            return NotFound(ApiResponse<List<CountingLineDetail>>.Fail(
+                $"Counting document {docEntry} not found (or has no lines)."));
+
+        return Ok(ApiResponse<List<CountingLineDetail>>.Ok(
+            lines,
+            new Dictionary<string, object>
+            {
+                ["total_lines"] = lines.Count,
+                ["counted_lines"] = lines.Count(l => l.Counted),
+            }));
+    }
+
+    /// <summary>
+    /// PATCH /api/autohub/inv/countings/{docEntry}/lines
+    /// Captures counted quantities: <c>updates</c> set counted qty (0 is a valid count)
+    /// on existing lines; <c>additions</c> append unexpected finds — items found in a
+    /// bin but not on the list (how misplaced stock is caught). Returns the refreshed lines.
+    /// </summary>
+    [HttpPatch("countings/{docEntry:int}/lines")]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingLineDetail>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingLineDetail>>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingLineDetail>>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingLineDetail>>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> UpdateCountingLines(
+        int docEntry, [FromBody] CountingUpdateRequest request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        if (request.Updates.Count == 0 && request.Additions.Count == 0)
+            errors.Add("Provide at least one entry in updates or additions.");
+        for (int i = 0; i < request.Updates.Count; i++)
+            if (request.Updates[i].CountedQty < 0)
+                errors.Add($"updates[{i}]: counted_qty cannot be negative.");
+        for (int i = 0; i < request.Additions.Count; i++)
+        {
+            if (string.IsNullOrWhiteSpace(request.Additions[i].ItemCode))
+                errors.Add($"additions[{i}]: item_code is required.");
+            if (request.Additions[i].CountedQty <= 0)
+                errors.Add($"additions[{i}]: counted_qty must be greater than zero.");
+        }
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<List<CountingLineDetail>>.Fail(errors));
+
+        try
+        {
+            var lines = await _sql.GetCountingLinesAsync(docEntry, ct);
+            if (lines.Count == 0)
+                return NotFound(ApiResponse<List<CountingLineDetail>>.Fail(
+                    $"Counting document {docEntry} not found (or has no lines)."));
+
+            var byLineNum = lines.ToDictionary(l => l.LineNum);
+            foreach (var upd in request.Updates)
+            {
+                if (!byLineNum.TryGetValue(upd.LineNum, out var line))
+                    errors.Add($"line_num {upd.LineNum} does not exist on counting {docEntry}.");
+                else if (line.LineStatus == "C")
+                    errors.Add($"line_num {upd.LineNum} is already closed (posted) — recounts need a new session.");
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<List<CountingLineDetail>>.Fail(errors));
+
+            string whsCode = lines[0].WhsCode;
+            await _sap.UpdateInventoryCountingLinesAsync(
+                docEntry, request.Updates, request.Additions, whsCode, ct);
+
+            var refreshed = await _sql.GetCountingLinesAsync(docEntry, ct);
+            return Ok(ApiResponse<List<CountingLineDetail>>.Ok(
+                refreshed,
+                new Dictionary<string, object>
+                {
+                    ["total_lines"] = refreshed.Count,
+                    ["counted_lines"] = refreshed.Count(l => l.Counted),
+                }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Counting line update failed (doc_entry={DocEntry})", docEntry);
+            return StatusCode(500, ApiResponse<List<CountingLineDetail>>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/countings/{docEntry}/variance
+    /// Variance review (spec §8.4): system vs counted vs variance value, sorted by
+    /// absolute variance value so expensive discrepancies surface first. The approval
+    /// gate before posting.
+    /// </summary>
+    [HttpGet("countings/{docEntry:int}/variance")]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingVarianceLine>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<List<CountingVarianceLine>>), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetCountingVariance(int docEntry, CancellationToken ct)
+    {
+        var lines = await _sql.GetCountingVarianceAsync(docEntry, ct);
+        if (lines.Count == 0)
+            return NotFound(ApiResponse<List<CountingVarianceLine>>.Fail(
+                $"Counting document {docEntry} not found (or has no lines)."));
+
+        return Ok(ApiResponse<List<CountingVarianceLine>>.Ok(
+            lines,
+            new Dictionary<string, object>
+            {
+                ["total_lines"] = lines.Count,
+                ["counted_lines"] = lines.Count(l => l.Counted),
+                ["total_variance_value"] = lines.Where(l => l.Counted).Sum(l => l.VarianceValue),
+            }));
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/postings
+    /// Creates the Inventory Posting (OIQR) from reviewer-approved counting lines.
+    /// Base refs make SAP post the stock/GL adjustments and close those counting lines;
+    /// lines left out of <c>line_nums</c> stay open for recount. Every requested line
+    /// must be counted and still open. Idempotent on <c>app_ref</c>.
+    /// </summary>
+    [HttpPost("postings")]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CreatePosting(
+        [FromBody] PostingCreate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (request.CountingDocEntry <= 0) errors.Add("counting_doc_entry is required.");
+        if (request.LineNums.Count == 0) errors.Add("line_nums must contain at least one line.");
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+        request.AppRef = request.AppRef.Trim();
+        var lineNums = request.LineNums.Distinct().ToList();
+
+        try
+        {
+            // Idempotency: same app_ref already posted → return it.
+            var existing = await _sql.FindDocEntryByAppRefAsync("OIQR", request.AppRef, ct);
+            if (existing is not null)
+                return Ok(ApiResponse<InventoryDocResult>.Ok(new InventoryDocResult
+                {
+                    DocEntry = existing.Value.DocEntry,
+                    DocNum = existing.Value.DocNum,
+                    AlreadyExisted = true,
+                }));
+
+            var lines = await _sql.GetCountingLinesAsync(request.CountingDocEntry, ct);
+            if (lines.Count == 0)
+                return NotFound(ApiResponse<InventoryDocResult>.Fail(
+                    $"Counting document {request.CountingDocEntry} not found (or has no lines)."));
+
+            var byLineNum = lines.ToDictionary(l => l.LineNum);
+            var postLines = new List<CountingPostLine>(lineNums.Count);
+            foreach (var num in lineNums)
+            {
+                if (!byLineNum.TryGetValue(num, out var line))
+                    errors.Add($"line_num {num} does not exist on counting {request.CountingDocEntry}.");
+                else if (line.LineStatus == "C")
+                    errors.Add($"line_num {num} is already closed (posted).");
+                else if (!line.Counted)
+                    errors.Add($"line_num {num} ({line.ItemCode}) has not been counted yet.");
+                else
+                    postLines.Add(new CountingPostLine
+                    {
+                        LineNum = num,
+                        CountedQty = (double)(line.CountedQty ?? 0m),
+                    });
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            var result = await _sap.CreateInventoryPostingAsync(
+                request.CountingDocEntry, postLines, request.AppRef,
+                _settings.PostingSeries, ct);
+
+            return Ok(ApiResponse<InventoryDocResult>.Ok(
+                result,
+                new Dictionary<string, object> { ["posted_lines"] = postLines.Count }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Inventory posting failed (app_ref={AppRef}, counting={Counting})",
+                request.AppRef, request.CountingDocEntry);
+            return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+    }
+
     // ── Write helpers ────────────────────────────────────────────────
 
     private static void ValidateAppRef(string? appRef, List<string> errors)

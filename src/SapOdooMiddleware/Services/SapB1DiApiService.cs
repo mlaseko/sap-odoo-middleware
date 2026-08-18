@@ -5631,6 +5631,236 @@ ORDER BY PostingDate, DocumentNumber";
             _lock.Release();
         }
     }
+
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateInventoryCountingAsync(
+        DateTime countDate, string appRef, List<CountingLineSeed> lines, int series, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var cs = _company!.GetCompanyService();
+            InventoryCountingsService? svc = null;
+            InventoryCounting? counting = null;
+            try
+            {
+                svc = (InventoryCountingsService)cs.GetBusinessService(
+                    ServiceTypes.InventoryCountingsService);
+                counting = (InventoryCounting)svc.GetDataInterface(
+                    InventoryCountingsServiceDataInterfaces.icsInventoryCounting);
+
+                counting.CountDate = countDate;
+                if (series > 0) counting.Series = series;
+                counting.UserFields.Item("U_AppRef").Value = appRef;
+
+                foreach (var seed in lines)
+                {
+                    var line = counting.InventoryCountingLines.Add();
+                    line.ItemCode = seed.ItemCode;
+                    line.WarehouseCode = seed.WhsCode;
+                    if (seed.BinEntry.HasValue)
+                        line.BinEntry = seed.BinEntry.Value;
+                    // Counted qty left empty; counters fill in later (spec §9.3).
+                }
+
+                var result = svc.Add(counting);
+                int docEntry = result.DocumentEntry;
+                int docNum = QueryDocNumByEntry("OINC", docEntry);
+
+                _logger.LogInformation(
+                    "SAP Inventory Counting created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, lines.Count, appRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            catch (COMException ex)
+            {
+                throw WrapServiceError("InventoryCountingsService.Add", ex);
+            }
+            finally
+            {
+                if (counting is not null) try { Marshal.ReleaseComObject(counting); } catch { /* ignored */ }
+                if (svc is not null) try { Marshal.ReleaseComObject(svc); } catch { /* ignored */ }
+                try { Marshal.ReleaseComObject(cs); } catch { /* ignored */ }
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task UpdateInventoryCountingLinesAsync(
+        int docEntry, List<CountingLineUpdate> updates, List<CountingLineAddition> additions,
+        string additionsWhsCode, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var cs = _company!.GetCompanyService();
+            InventoryCountingsService? svc = null;
+            InventoryCounting? counting = null;
+            try
+            {
+                svc = (InventoryCountingsService)cs.GetBusinessService(
+                    ServiceTypes.InventoryCountingsService);
+
+                var prms = (InventoryCountingParams)svc.GetDataInterface(
+                    InventoryCountingsServiceDataInterfaces.icsInventoryCountingParams);
+                prms.DocumentEntry = docEntry;
+                counting = svc.Get(prms);
+
+                var byLineNum = updates.ToDictionary(u => u.LineNum);
+                int applied = 0;
+                for (int i = 0; i < counting.InventoryCountingLines.Count; i++)
+                {
+                    var line = counting.InventoryCountingLines.Item(i);
+                    if (byLineNum.TryGetValue(line.LineNumber, out var upd))
+                    {
+                        line.CountedQuantity = upd.CountedQty;
+                        line.Counted = BoYesNoEnum.tYES;
+                        applied++;
+                    }
+                }
+                if (applied != updates.Count)
+                    throw new InvalidOperationException(
+                        $"Counting {docEntry}: only {applied} of {updates.Count} line updates matched " +
+                        "existing line numbers — check line_num values.");
+
+                foreach (var add in additions)
+                {
+                    var nl = counting.InventoryCountingLines.Add();
+                    nl.ItemCode = add.ItemCode;
+                    nl.WarehouseCode = additionsWhsCode;
+                    if (add.BinAbs.HasValue)
+                        nl.BinEntry = add.BinAbs.Value;
+                    nl.CountedQuantity = add.CountedQty;
+                    nl.Counted = BoYesNoEnum.tYES;
+                }
+
+                svc.Update(counting);
+
+                _logger.LogInformation(
+                    "SAP Inventory Counting updated: DocEntry={DocEntry}, Updates={Updates}, Additions={Additions}",
+                    docEntry, updates.Count, additions.Count);
+            }
+            catch (COMException ex)
+            {
+                throw WrapServiceError("InventoryCountingsService.Update", ex);
+            }
+            finally
+            {
+                if (counting is not null) try { Marshal.ReleaseComObject(counting); } catch { /* ignored */ }
+                if (svc is not null) try { Marshal.ReleaseComObject(svc); } catch { /* ignored */ }
+                try { Marshal.ReleaseComObject(cs); } catch { /* ignored */ }
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateInventoryPostingAsync(
+        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var cs = _company!.GetCompanyService();
+            InventoryPostingsService? svc = null;
+            InventoryPosting? posting = null;
+            try
+            {
+                svc = (InventoryPostingsService)cs.GetBusinessService(
+                    ServiceTypes.InventoryPostingsService);
+                posting = (InventoryPosting)svc.GetDataInterface(
+                    InventoryPostingsServiceDataInterfaces.ipsInventoryPosting);
+
+                if (series > 0) posting.Series = series;
+                posting.UserFields.Item("U_AppRef").Value = appRef;
+
+                foreach (var l in lines)
+                {
+                    var pl = posting.InventoryPostingLines.Add();
+                    pl.BaseType = InventoryPostingLineBaseTypeEnum.iplbtInventoryCounting;
+                    pl.BaseEntry = countingDocEntry;
+                    pl.BaseLine = l.LineNum;
+                    pl.CountedQuantity = l.CountedQty;
+                }
+
+                var result = svc.Add(posting);
+                int docEntry = result.DocumentEntry;
+                int docNum = QueryDocNumByEntry("OIQR", docEntry);
+
+                _logger.LogInformation(
+                    "SAP Inventory Posting created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "BaseCounting={Counting}, Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, countingDocEntry, lines.Count, appRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            catch (COMException ex)
+            {
+                throw WrapServiceError("InventoryPostingsService.Add", ex);
+            }
+            finally
+            {
+                if (posting is not null) try { Marshal.ReleaseComObject(posting); } catch { /* ignored */ }
+                if (svc is not null) try { Marshal.ReleaseComObject(svc); } catch { /* ignored */ }
+                try { Marshal.ReleaseComObject(cs); } catch { /* ignored */ }
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Reads DocNum for a freshly created service-based document (OINC/OIQR) — the
+    /// service Add() only returns DocumentEntry. Caller already holds <see cref="_lock"/>.
+    /// </summary>
+    private int QueryDocNumByEntry(string headerTable, int docEntry)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery($"SELECT \"DocNum\" FROM {headerTable} WHERE \"DocEntry\" = {docEntry}");
+            return rs.EoF ? 0 : Convert.ToInt32(rs.Fields.Item("DocNum").Value);
+        }
+        catch
+        {
+            return 0;   // DocNum is informational — never fail the post over it
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+    }
+
+    /// <summary>
+    /// CompanyService calls surface SAP errors as COMException; enrich with GetLastError
+    /// detail when available so the caller sees the real SAP message.
+    /// </summary>
+    private InvalidOperationException WrapServiceError(string operation, COMException ex)
+    {
+        int errCode = 0;
+        string errMsg = string.Empty;
+        try { _company!.GetLastError(out errCode, out errMsg); } catch { /* ignored */ }
+
+        var detail = string.IsNullOrWhiteSpace(errMsg) ? ex.Message : $"{errMsg} ({ex.Message})";
+        return new InvalidOperationException($"SAP {operation} failed [{errCode}]: {detail}", ex);
+    }
 }
 
 /// <summary>
