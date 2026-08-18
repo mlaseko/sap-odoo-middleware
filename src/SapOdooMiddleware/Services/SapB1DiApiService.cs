@@ -5870,6 +5870,204 @@ ORDER BY PostingDate, DocumentNumber";
         var detail = string.IsNullOrWhiteSpace(errMsg) ? ex.Message : $"{errMsg} ({ex.Message})";
         return new InvalidOperationException($"SAP {operation} failed [{errCode}]: {detail}", ex);
     }
+
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateGoodsReceiptAsync(
+        GoodsReceiptCreate request, int series, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var gr = (Documents)_company!.GetBusinessObject(BoObjectTypes.oInventoryGenEntry);
+            try
+            {
+                if (series > 0) gr.Series = series;
+                gr.DocDate = request.DocDate ?? DateTime.Today;
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    gr.Comments = request.Comments;
+                gr.UserFields.Fields.Item("U_AppRef").Value = request.AppRef;
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0) gr.Lines.Add();
+                    var line = request.Lines[i];
+
+                    gr.Lines.ItemCode      = line.ItemCode;
+                    gr.Lines.Quantity      = line.Quantity;
+                    gr.Lines.WarehouseCode = request.WhsCode;
+                    if (line.UnitCost.HasValue)
+                        gr.Lines.UnitPrice = line.UnitCost.Value;   // omitted → item cost (spec §9.1)
+
+                    if (line.BinAbs.HasValue)
+                    {
+                        gr.Lines.BinAllocations.BinAbsEntry = line.BinAbs.Value;
+                        gr.Lines.BinAllocations.Quantity    = line.Quantity;
+                        gr.Lines.BinAllocations.Add();
+                    }
+                }
+
+                int result = gr.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                gr.GetByKey(docEntry);
+                int docNum = gr.DocNum;
+
+                _logger.LogInformation(
+                    "SAP Goods Receipt created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "Whs={Whs}, Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, request.WhsCode, request.Lines.Count, request.AppRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(gr);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task SetItemDefaultBinAsync(
+        string itemCode, string whsCode, int binAbs, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var item = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!item.GetByKey(itemCode))
+                    throw new InvalidOperationException($"SAP item '{itemCode}' not found.");
+
+                bool found = false;
+                for (int i = 0; i < item.WhsInfo.Count; i++)
+                {
+                    item.WhsInfo.SetCurrentLine(i);
+                    if (!string.Equals(item.WhsInfo.WarehouseCode, whsCode, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    found = true;
+                    if (item.WhsInfo.DefaultBin == binAbs)
+                    {
+                        _logger.LogInformation(
+                            "Default bin unchanged: ItemCode={ItemCode}, Whs={Whs}, BinAbs={BinAbs}",
+                            itemCode, whsCode, binAbs);
+                        return;
+                    }
+
+                    item.WhsInfo.DefaultBin = binAbs;
+                    if (item.Update() != 0)
+                    {
+                        _company.GetLastError(out int errCode, out string errMsg);
+                        throw new InvalidOperationException(
+                            $"SAP Items.Update failed setting default bin for {itemCode}/{whsCode} [{errCode}]: {errMsg}");
+                    }
+
+                    _logger.LogInformation(
+                        "Default bin set: ItemCode={ItemCode}, Whs={Whs}, BinAbs={BinAbs}",
+                        itemCode, whsCode, binAbs);
+                    break;
+                }
+
+                if (!found)
+                    throw new InvalidOperationException(
+                        $"Item '{itemCode}' has no warehouse-info row for warehouse '{whsCode}' — " +
+                        "the item has never been assigned to that warehouse in SAP.");
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(item);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateGrpoAsync(
+        GrpoCreate request, int series, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var grpo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oPurchaseDeliveryNotes);
+            try
+            {
+                if (series > 0) grpo.Series = series;
+                grpo.CardCode = request.CardCode;
+                grpo.DocDate = request.DocDate ?? DateTime.Today;
+                grpo.DocDueDate = request.DocDate ?? DateTime.Today;
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    grpo.Comments = request.Comments;
+                grpo.UserFields.Fields.Item("U_AppRef").Value = request.AppRef;
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0) grpo.Lines.Add();
+                    var line = request.Lines[i];
+
+                    // Copy-from-PO: base refs make SAP decrement the PO's open quantity
+                    // and book vendor liability; item/price flow from the base line.
+                    grpo.Lines.BaseType  = 22;   // oPurchaseOrders
+                    grpo.Lines.BaseEntry = line.PoDocEntry;
+                    grpo.Lines.BaseLine  = line.PoLineNum;
+                    grpo.Lines.Quantity  = line.Quantity;
+                    if (!string.IsNullOrWhiteSpace(line.WhsCode))
+                        grpo.Lines.WarehouseCode = line.WhsCode;
+
+                    if (line.BinAbs.HasValue)
+                    {
+                        grpo.Lines.BinAllocations.BinAbsEntry = line.BinAbs.Value;
+                        grpo.Lines.BinAllocations.Quantity    = line.Quantity;
+                        grpo.Lines.BinAllocations.Add();
+                    }
+                }
+
+                int result = grpo.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                grpo.GetByKey(docEntry);
+                int docNum = grpo.DocNum;
+
+                _logger.LogInformation(
+                    "SAP GRPO created: DocEntry={DocEntry}, DocNum={DocNum}, CardCode={CardCode}, " +
+                    "Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, request.CardCode, request.Lines.Count, request.AppRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(grpo);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 }
 
 /// <summary>

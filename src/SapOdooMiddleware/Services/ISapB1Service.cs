@@ -325,4 +325,29 @@ public interface ISapB1Service
     /// </summary>
     Task<InventoryDocResult> CreateInventoryPostingAsync(
         int countingDocEntry, List<CountingPostLine> lines, string appRef, int series, CancellationToken ct);
+
+    /// <summary>
+    /// Creates a Goods Receipt (OIGN, object 59, <c>oInventoryGenEntry</c>) — standalone
+    /// non-PO stock-in. UnitPrice is set per line only when a unit cost is supplied
+    /// (otherwise SAP uses the item cost). Lines carry a single destination bin
+    /// allocation when a bin is set.
+    /// </summary>
+    Task<InventoryDocResult> CreateGoodsReceiptAsync(
+        GoodsReceiptCreate request, int series, CancellationToken ct);
+
+    /// <summary>
+    /// Sets the item's default bin in one warehouse (OITW.DftBinAbs via
+    /// <c>Items.WhsInfo.DefaultBin</c>). Used by the app's "save as default bin for
+    /// this item" action so the destination resolver auto-selects it next time.
+    /// No-op when the default is already this bin.
+    /// </summary>
+    Task SetItemDefaultBinAsync(string itemCode, string whsCode, int binAbs, CancellationToken ct);
+
+    /// <summary>
+    /// Creates a Goods Receipt PO (OPDN, object 20, <c>oPurchaseDeliveryNotes</c>)
+    /// drawn from open purchase order lines: every line carries BaseType 22 +
+    /// BaseEntry/BaseLine so SAP updates the PO's open quantities and vendor
+    /// liability, closing fully received lines. Partial receipts supported.
+    /// </summary>
+    Task<InventoryDocResult> CreateGrpoAsync(GrpoCreate request, int series, CancellationToken ct);
 }

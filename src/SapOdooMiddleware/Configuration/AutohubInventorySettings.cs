@@ -25,4 +25,8 @@ public class AutohubInventorySettings
 
     /// <summary>Series for Inventory Postings (object 10000071, OIQR). Phase 3.</summary>
     public int PostingSeries { get; set; } = 38;
+
+    /// <summary>Series for Goods Receipt POs (object 20, OPDN). 0 = let SAP use the
+    /// default series (discovery found a single series for all objects except transfers).</summary>
+    public int GrpoSeries { get; set; } = 0;
 }
