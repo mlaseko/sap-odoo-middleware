@@ -43,6 +43,25 @@ public interface IAutohubInventorySqlService
     /// </summary>
     Task<(int DocEntry, int DocNum)?> FindDocEntryByAppRefAsync(
         string headerTable, string appRef, CancellationToken ct);
+
+    /// <summary>
+    /// Generates counting line seeds for a bin warehouse (spec §8.3): one line per
+    /// item-per-bin with stock, scoped by a BinCode range or an explicit bin list.
+    /// </summary>
+    Task<List<CountingLineSeed>> GetBinCountingSeedsAsync(
+        string whsCode, string? binFrom, string? binTo, List<int>? binAbsList, CancellationToken ct);
+
+    /// <summary>Counting line seeds for the non-bin warehouse (01): one line per item with OITW stock.</summary>
+    Task<List<CountingLineSeed>> GetNonBinCountingSeedsAsync(string whsCode, CancellationToken ct);
+
+    /// <summary>Counting session headers with counted-line progress, newest first.</summary>
+    Task<List<CountingSessionSummary>> GetCountingSessionsAsync(bool openOnly, CancellationToken ct);
+
+    /// <summary>All lines of one counting session for the count-capture screen.</summary>
+    Task<List<CountingLineDetail>> GetCountingLinesAsync(int docEntry, CancellationToken ct);
+
+    /// <summary>Variance review lines (spec §8.4), sorted by absolute variance value descending.</summary>
+    Task<List<CountingVarianceLine>> GetCountingVarianceAsync(int docEntry, CancellationToken ct);
 }
 
 /// <summary>
@@ -307,6 +326,210 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 Manufacturer = reader.IsDBNull(9) ? null : reader.GetString(9),
                 Quantity = (double)reader.GetDecimal(10),
                 OpenQty = (double)reader.GetDecimal(11),
+            });
+        }
+        return list;
+    }
+
+    // ── Counting sessions ────────────────────────────────────────────
+
+    public async Task<List<CountingLineSeed>> GetBinCountingSeedsAsync(
+        string whsCode, string? binFrom, string? binTo, List<int>? binAbsList, CancellationToken ct)
+    {
+        // Spec §8.3: one line per item-per-bin with stock in scope.
+        var sql = """
+            SELECT Q.ItemCode, Q.WhsCode, Q.BinAbs
+            FROM OIBQ Q
+            JOIN OBIN B ON B.AbsEntry = Q.BinAbs
+            WHERE Q.WhsCode = @whs
+              AND Q.OnHandQty <> 0
+            """;
+
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand();
+        cmd.Connection = conn;
+        cmd.Parameters.AddWithValue("@whs", whsCode);
+
+        if (binAbsList is { Count: > 0 })
+        {
+            var names = new List<string>(binAbsList.Count);
+            for (int i = 0; i < binAbsList.Count; i++)
+            {
+                names.Add($"@b{i}");
+                cmd.Parameters.AddWithValue($"@b{i}", binAbsList[i]);
+            }
+            sql += $"\n  AND Q.BinAbs IN ({string.Join(", ", names)})";
+        }
+        else
+        {
+            sql += "\n  AND B.BinCode BETWEEN @binFrom AND @binTo";
+            cmd.Parameters.AddWithValue("@binFrom", binFrom ?? "");
+            cmd.Parameters.AddWithValue("@binTo", binTo ?? "");
+        }
+
+        sql += "\nORDER BY B.BinCode, Q.ItemCode;";
+        cmd.CommandText = sql;
+
+        var list = new List<CountingLineSeed>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new CountingLineSeed
+            {
+                ItemCode = reader.GetString(0),
+                WhsCode = reader.GetString(1),
+                BinEntry = reader.GetInt32(2),
+            });
+        }
+        return list;
+    }
+
+    public async Task<List<CountingLineSeed>> GetNonBinCountingSeedsAsync(
+        string whsCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT W.ItemCode, W.WhsCode
+            FROM OITW W
+            WHERE W.WhsCode = @whs AND W.OnHand <> 0
+            ORDER BY W.ItemCode;
+            """;
+
+        var list = new List<CountingLineSeed>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@whs", whsCode);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new CountingLineSeed
+            {
+                ItemCode = reader.GetString(0),
+                WhsCode = reader.GetString(1),
+                BinEntry = null,
+            });
+        }
+        return list;
+    }
+
+    public async Task<List<CountingSessionSummary>> GetCountingSessionsAsync(
+        bool openOnly, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT H.DocEntry, H.DocNum, H.CountDate, H.Status,
+                   MIN(L.WhsCode) AS WhsCode,
+                   COUNT(*) AS TotalLines,
+                   SUM(CASE WHEN L.Counted = 'Y' THEN 1 ELSE 0 END) AS CountedLines
+            FROM OINC H
+            JOIN INC1 L ON L.DocEntry = H.DocEntry
+            WHERE (@openOnly = 0 OR H.Status = 'O')
+            GROUP BY H.DocEntry, H.DocNum, H.CountDate, H.Status
+            ORDER BY H.DocEntry DESC;
+            """;
+
+        var list = new List<CountingSessionSummary>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@openOnly", openOnly ? 1 : 0);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new CountingSessionSummary
+            {
+                DocEntry = reader.GetInt32(0),
+                DocNum = reader.GetInt32(1),
+                CountDate = reader.IsDBNull(2) ? "" : reader.GetDateTime(2).ToString("yyyy-MM-dd"),
+                Status = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                WhsCode = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                TotalLines = reader.GetInt32(5),
+                CountedLines = reader.IsDBNull(6) ? 0 : reader.GetInt32(6),
+            });
+        }
+        return list;
+    }
+
+    public async Task<List<CountingLineDetail>> GetCountingLinesAsync(
+        int docEntry, CancellationToken ct)
+    {
+        // INC1.InWhsQty / CountQty are the standard schema (spec §8.4 caveat: verify
+        // with SELECT TOP 1 * FROM INC1 against this SAP version if either errors).
+        const string sql = """
+            SELECT L.LineNum, L.ItemCode, I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
+                   L.WhsCode, L.BinEntry, B.BinCode,
+                   L.InWhsQty, L.CountQty, L.Counted, L.LineStatus
+            FROM INC1 L
+            JOIN OITM I ON I.ItemCode = L.ItemCode
+            LEFT JOIN OBIN B ON B.AbsEntry = L.BinEntry
+            WHERE L.DocEntry = @doc
+            ORDER BY B.BinCode, L.ItemCode;
+            """;
+
+        var list = new List<CountingLineDetail>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@doc", docEntry);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new CountingLineDetail
+            {
+                LineNum = reader.GetInt32(0),
+                ItemCode = reader.GetString(1),
+                ItemName = reader.IsDBNull(2) ? null : reader.GetString(2),
+                ArticleNumber = reader.IsDBNull(3) ? null : reader.GetString(3),
+                Manufacturer = reader.IsDBNull(4) ? null : reader.GetString(4),
+                WhsCode = reader.IsDBNull(5) ? "" : reader.GetString(5),
+                BinEntry = reader.IsDBNull(6) ? null : reader.GetInt32(6),
+                BinCode = reader.IsDBNull(7) ? null : reader.GetString(7),
+                SystemQty = reader.IsDBNull(8) ? 0m : reader.GetDecimal(8),
+                CountedQty = reader.IsDBNull(9) ? null : reader.GetDecimal(9),
+                Counted = !reader.IsDBNull(10) && reader.GetString(10) == "Y",
+                LineStatus = reader.IsDBNull(11) ? "" : reader.GetString(11),
+            });
+        }
+        return list;
+    }
+
+    public async Task<List<CountingVarianceLine>> GetCountingVarianceAsync(
+        int docEntry, CancellationToken ct)
+    {
+        // Spec §8.4 — most expensive discrepancies first.
+        const string sql = """
+            SELECT L.LineNum, L.ItemCode, I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
+                   L.WhsCode, B.BinCode,
+                   L.InWhsQty, L.CountQty,
+                   ISNULL(L.CountQty, 0) - L.InWhsQty AS VarianceQty,
+                   (ISNULL(L.CountQty, 0) - L.InWhsQty) * ISNULL(W.AvgPrice, 0) AS VarianceValue,
+                   L.Counted, L.LineStatus
+            FROM INC1 L
+            JOIN OITM I ON I.ItemCode = L.ItemCode
+            JOIN OITW W ON W.ItemCode = L.ItemCode AND W.WhsCode = L.WhsCode
+            LEFT JOIN OBIN B ON B.AbsEntry = L.BinEntry
+            WHERE L.DocEntry = @doc
+            ORDER BY ABS((ISNULL(L.CountQty, 0) - L.InWhsQty) * ISNULL(W.AvgPrice, 0)) DESC;
+            """;
+
+        var list = new List<CountingVarianceLine>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@doc", docEntry);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new CountingVarianceLine
+            {
+                LineNum = reader.GetInt32(0),
+                ItemCode = reader.GetString(1),
+                ItemName = reader.IsDBNull(2) ? null : reader.GetString(2),
+                ArticleNumber = reader.IsDBNull(3) ? null : reader.GetString(3),
+                Manufacturer = reader.IsDBNull(4) ? null : reader.GetString(4),
+                WhsCode = reader.IsDBNull(5) ? "" : reader.GetString(5),
+                BinCode = reader.IsDBNull(6) ? null : reader.GetString(6),
+                SystemQty = reader.IsDBNull(7) ? 0m : reader.GetDecimal(7),
+                CountedQty = reader.IsDBNull(8) ? null : reader.GetDecimal(8),
+                VarianceQty = reader.IsDBNull(9) ? 0m : reader.GetDecimal(9),
+                VarianceValue = reader.IsDBNull(10) ? 0m : reader.GetDecimal(10),
+                Counted = !reader.IsDBNull(11) && reader.GetString(11) == "Y",
+                LineStatus = reader.IsDBNull(12) ? "" : reader.GetString(12),
             });
         }
         return list;
