@@ -21,6 +21,14 @@ public class CountingCreate
     public List<int>? BinAbsList { get; set; }
     /// <summary>Count date (defaults to today).</summary>
     public DateTime? CountDate { get; set; }
+    /// <summary>
+    /// OPTIONAL cross-check only — the SAP branch (Business Place) id the caller
+    /// believes applies. The middleware always resolves the real branch from
+    /// <see cref="WhsCode"/> (OWHS.BPLid) as the source of truth; when this field is
+    /// supplied and differs from the resolved branch, the request is rejected (422).
+    /// Omit it to let the middleware handle branches entirely.
+    /// </summary>
+    public int? BranchId { get; set; }
 }
 
 /// <summary>One generated counting line: item + warehouse (+ bin for bin warehouses).</summary>
