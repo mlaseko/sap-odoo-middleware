@@ -5864,26 +5864,61 @@ ORDER BY PostingDate, DocumentNumber";
     }
 
     /// <summary>
-    /// Sets the header branch (BPLID) on a service data interface via IDispatch late
-    /// binding: property casing (BPLID/BPLId) varies between DI API builds and IDispatch
-    /// name lookup is case-insensitive, so this works on any build that has the property.
+    /// The branch property's name varies by object family and DI API build:
+    /// service objects (InventoryCounting/InventoryPosting) usually expose "BranchID",
+    /// some builds "BPLID", marketing documents "BPL_IDAssignedToInvoice".
+    /// Tried in that order via IDispatch (case-insensitive), so whichever this
+    /// typelib declares is hit without a compile-time dependency.
     /// </summary>
+    private static readonly string[] BranchPropertyCandidates =
+        { "BranchID", "BPLID", "BPL_IDAssignedToInvoice" };
+
+    /// <summary>Sets the header branch on a service data interface via IDispatch late binding.</summary>
     private static void SetBranchLateBound(object serviceObject, int bplId)
     {
-        try
+        foreach (var name in BranchPropertyCandidates)
         {
-            serviceObject.GetType().InvokeMember(
-                "BPLID",
-                System.Reflection.BindingFlags.SetProperty,
-                binder: null,
-                target: serviceObject,
-                args: new object[] { bplId });
+            try
+            {
+                serviceObject.GetType().InvokeMember(
+                    name,
+                    System.Reflection.BindingFlags.SetProperty,
+                    binder: null,
+                    target: serviceObject,
+                    args: new object[] { bplId });
+                return;
+            }
+            catch (Exception ex) when (IsUnknownComName(ex))
+            {
+                // This build doesn't declare the property under this name — try the next.
+            }
+            catch (Exception ex)
+            {
+                // The property exists but the assignment itself failed — surface that.
+                throw new InvalidOperationException(
+                    $"Failed to set the branch ({name}={bplId}) on the SAP document: {ex.Message}", ex);
+            }
         }
-        catch (Exception ex)
+
+        throw new InvalidOperationException(
+            $"Could not set the branch (BPLId={bplId}): none of the known property names " +
+            $"({string.Join(", ", BranchPropertyCandidates)}) exist on this DI API build's object. " +
+            "Check the object's members in IntelliSense/typelib and add the correct name.");
+    }
+
+    /// <summary>True when the exception (or its inner) is IDispatch DISP_E_UNKNOWNNAME (0x80020006).</summary>
+    private static bool IsUnknownComName(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException!)
         {
-            throw new InvalidOperationException(
-                $"Failed to set the branch (BPLID={bplId}) on {serviceObject.GetType().Name}: {ex.Message}", ex);
+            if (e is COMException com && unchecked((uint)com.ErrorCode) == 0x80020006u)
+                return true;
+            if (e is MissingMemberException)
+                return true;
+            if (e.InnerException is null)
+                break;
         }
+        return false;
     }
 
     /// <summary>
