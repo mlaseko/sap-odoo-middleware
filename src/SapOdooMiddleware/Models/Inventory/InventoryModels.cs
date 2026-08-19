@@ -84,6 +84,15 @@ public class BinOption
     public decimal OnHandQty { get; set; }
 }
 
+/// <summary>A warehouse's SAP branch (Business Place) assignment — OWHS.BPLid + OBPL.</summary>
+public class WarehouseBranch
+{
+    public int BplId { get; set; }
+    public string? BranchName { get; set; }
+    /// <summary>False when OBPL marks the branch disabled.</summary>
+    public bool Active { get; set; }
+}
+
 /// <summary>One bin of a warehouse (for the free bin-picker list).</summary>
 public class WarehouseBin
 {
