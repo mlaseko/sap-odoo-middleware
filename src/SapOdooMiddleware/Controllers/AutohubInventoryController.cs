@@ -432,6 +432,13 @@ public class AutohubInventoryController : ControllerBase
             if (branchError is not null)
                 return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
 
+            // Optional cross-check: a caller-supplied branch_id must agree with the
+            // warehouse's resolved branch — the resolved value is the source of truth.
+            if (request.BranchId.HasValue && request.BranchId.Value != bplId)
+                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(
+                    $"branch_id {request.BranchId.Value} does not match warehouse " +
+                    $"{request.WhsCode}'s assigned branch ({bplId})."));
+
             var result = await _sap.CreateInventoryCountingAsync(
                 request.CountDate ?? DateTime.Today, request.AppRef, seeds,
                 _settings.CountingSeries, bplId, ct);
