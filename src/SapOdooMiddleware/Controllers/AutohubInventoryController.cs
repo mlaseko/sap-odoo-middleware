@@ -425,9 +425,16 @@ public class AutohubInventoryController : ControllerBase
                     $"Scope generates {seeds.Count} lines (max {MaxCountingLines}). " +
                     "Narrow the bin range — design around small sessions (an aisle or shelf run)."));
 
+            // Branch (OINC.BPLId) is mandatory on service-created documents when
+            // SAP's multi-branch feature is enabled — resolve it from the warehouse,
+            // and fail with a clear message instead of SAP's -5002.
+            var (bplId, branchError) = await ResolveActiveBranchAsync(request.WhsCode, ct);
+            if (branchError is not null)
+                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
+
             var result = await _sap.CreateInventoryCountingAsync(
                 request.CountDate ?? DateTime.Today, request.AppRef, seeds,
-                _settings.CountingSeries, ct);
+                _settings.CountingSeries, bplId, ct);
 
             return Ok(ApiResponse<InventoryDocResult>.Ok(
                 result,
@@ -642,9 +649,15 @@ public class AutohubInventoryController : ControllerBase
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
 
+            // Same branch requirement as counting creation (OIQR.BPLId) — derive it
+            // from the counting's warehouse.
+            var (bplId, branchError) = await ResolveActiveBranchAsync(lines[0].WhsCode, ct);
+            if (branchError is not null)
+                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
+
             var result = await _sap.CreateInventoryPostingAsync(
                 request.CountingDocEntry, postLines, request.AppRef,
-                _settings.PostingSeries, ct);
+                _settings.PostingSeries, bplId, ct);
 
             return Ok(ApiResponse<InventoryDocResult>.Ok(
                 result,
@@ -1065,6 +1078,28 @@ public class AutohubInventoryController : ControllerBase
             errors.Add("app_ref is required (app-generated GUID for idempotency).");
         else if (appRef.Trim().Length > 40)
             errors.Add("app_ref must be at most 40 characters (U_AppRef UDF size).");
+    }
+
+    /// <summary>
+    /// Resolves the warehouse's active SAP branch (OWHS.BPLid + OBPL) for documents
+    /// that require a header branch. Returns (bplId, null) on success, (null, message)
+    /// when the warehouse has no branch or the branch is inactive — callers return
+    /// 422 with the message instead of letting SAP fail with -5002.
+    /// </summary>
+    private async Task<(int? BplId, string? Error)> ResolveActiveBranchAsync(
+        string whsCode, CancellationToken ct)
+    {
+        var branch = await _sql.GetWarehouseBranchAsync(whsCode, ct);
+        if (branch is null)
+            return (null,
+                $"Warehouse {whsCode} is not assigned to a SAP branch. " +
+                "Configure OWHS.BPLid before creating this document.");
+        if (!branch.Active)
+            return (null,
+                $"Warehouse {whsCode} is assigned to branch {branch.BplId} " +
+                $"('{branch.BranchName}') which is not active in SAP (OBPL). " +
+                "Activate the branch or reassign the warehouse.");
+        return (branch.BplId, null);
     }
 
     private async Task ValidateWarehousesExistAsync(string[] whsCodes, CancellationToken ct)

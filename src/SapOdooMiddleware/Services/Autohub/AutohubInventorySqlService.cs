@@ -39,6 +39,13 @@ public interface IAutohubInventorySqlService
     /// <summary>All active bins of one warehouse (for the free destination picker), by BinCode.</summary>
     Task<List<WarehouseBin>> GetWarehouseBinsAsync(string whsCode, CancellationToken ct);
 
+    /// <summary>
+    /// The warehouse's SAP branch assignment (OWHS.BPLid joined to OBPL), or null when
+    /// the warehouse has no branch configured. Required on service-created documents
+    /// (Inventory Counting/Posting) when SAP's multi-branch feature is enabled.
+    /// </summary>
+    Task<WarehouseBranch?> GetWarehouseBranchAsync(string whsCode, CancellationToken ct);
+
     /// <summary>Open transfer request lines with item details (spec §8.1), oldest first.</summary>
     Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
         string? fromWhs, string? toWhs, CancellationToken ct);
@@ -387,6 +394,36 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             });
         }
         return list;
+    }
+
+    // ── Branch (Business Place) resolution ───────────────────────────
+
+    public async Task<WarehouseBranch?> GetWarehouseBranchAsync(string whsCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT W.BPLid, B.BPLId, B.BPLName, ISNULL(B.Disabled, 'N')
+            FROM OWHS W
+            LEFT JOIN OBPL B ON B.BPLId = W.BPLid
+            WHERE W.WhsCode = @whs;
+            """;
+
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@whs", whsCode);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;                       // warehouse does not exist
+        if (reader.IsDBNull(0))
+            return null;                       // warehouse has no branch assigned
+
+        bool branchRowExists = !reader.IsDBNull(1);
+        return new WarehouseBranch
+        {
+            BplId = reader.GetInt32(0),
+            BranchName = reader.IsDBNull(2) ? null : reader.GetString(2),
+            // Active only when the OBPL row exists and is not disabled.
+            Active = branchRowExists && reader.GetString(3) == "N",
+        };
     }
 
     // ── Purchase orders (GRPO receiving screen) ──────────────────────

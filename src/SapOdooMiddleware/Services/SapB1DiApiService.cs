@@ -5634,7 +5634,8 @@ ORDER BY PostingDate, DocumentNumber";
 
     /// <inheritdoc/>
     public async Task<InventoryDocResult> CreateInventoryCountingAsync(
-        DateTime countDate, string appRef, List<CountingLineSeed> lines, int series, CancellationToken ct)
+        DateTime countDate, string appRef, List<CountingLineSeed> lines, int series,
+        int? bplId, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
@@ -5653,6 +5654,8 @@ ORDER BY PostingDate, DocumentNumber";
 
                 counting.CountDate = countDate;
                 if (series > 0) counting.Series = series;
+                if (bplId is > 0)
+                    SetBranchLateBound(counting, bplId.Value);   // OINC.BPLId — mandatory in multi-branch companies
                 counting.UserFields.Item("U_AppRef").Value = appRef;
 
                 foreach (var seed in lines)
@@ -5769,7 +5772,8 @@ ORDER BY PostingDate, DocumentNumber";
 
     /// <inheritdoc/>
     public async Task<InventoryDocResult> CreateInventoryPostingAsync(
-        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series, CancellationToken ct)
+        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
+        int? bplId, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
@@ -5787,6 +5791,8 @@ ORDER BY PostingDate, DocumentNumber";
                     InventoryPostingsServiceDataInterfaces.ipsInventoryPosting);
 
                 if (series > 0) posting.Series = series;
+                if (bplId is > 0)
+                    SetBranchLateBound(posting, bplId.Value);    // OIQR.BPLId — mandatory in multi-branch companies
                 posting.UserFields.Item("U_AppRef").Value = appRef;
 
                 foreach (var l in lines)
@@ -5854,6 +5860,29 @@ ORDER BY PostingDate, DocumentNumber";
         finally
         {
             Marshal.ReleaseComObject(rs);
+        }
+    }
+
+    /// <summary>
+    /// Sets the header branch (BPLID) on a service data interface via IDispatch late
+    /// binding: property casing (BPLID/BPLId) varies between DI API builds and IDispatch
+    /// name lookup is case-insensitive, so this works on any build that has the property.
+    /// </summary>
+    private static void SetBranchLateBound(object serviceObject, int bplId)
+    {
+        try
+        {
+            serviceObject.GetType().InvokeMember(
+                "BPLID",
+                System.Reflection.BindingFlags.SetProperty,
+                binder: null,
+                target: serviceObject,
+                args: new object[] { bplId });
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Failed to set the branch (BPLID={bplId}) on {serviceObject.GetType().Name}: {ex.Message}", ex);
         }
     }
 

@@ -303,9 +303,12 @@ public interface ISapB1Service
     /// <c>InventoryCountingsService</c> with one line per seed (item + warehouse +
     /// optional BinEntry). SAP snapshots the system quantity per line at creation.
     /// Counted quantities are left empty for later capture.
+    /// <paramref name="bplId"/> sets the header branch (OINC.BPLId) — required when
+    /// SAP's multi-branch feature is enabled.
     /// </summary>
     Task<InventoryDocResult> CreateInventoryCountingAsync(
-        DateTime countDate, string appRef, List<CountingLineSeed> lines, int series, CancellationToken ct);
+        DateTime countDate, string appRef, List<CountingLineSeed> lines, int series,
+        int? bplId, CancellationToken ct);
 
     /// <summary>
     /// Updates counted quantities on an existing Inventory Counting via
@@ -322,9 +325,12 @@ public interface ISapB1Service
     /// counting lines via <c>InventoryPostingsService</c>, with base refs
     /// (BaseEntry = counting DocEntry, BaseLine = counting LineNum) so SAP posts the
     /// stock/GL adjustments and closes those counting lines.
+    /// <paramref name="bplId"/> sets the header branch (OIQR.BPLId) — required when
+    /// SAP's multi-branch feature is enabled.
     /// </summary>
     Task<InventoryDocResult> CreateInventoryPostingAsync(
-        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series, CancellationToken ct);
+        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
+        int? bplId, CancellationToken ct);
 
     /// <summary>
     /// Creates a Goods Receipt (OIGN, object 59, <c>oInventoryGenEntry</c>) — standalone
