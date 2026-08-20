@@ -63,13 +63,17 @@ public interface IAutohubInventorySqlService
 
     /// <summary>
     /// Generates counting line seeds for a bin warehouse (spec §8.3): one line per
-    /// item-per-bin with stock, scoped by a BinCode range or an explicit bin list.
+    /// item-per-bin with stock. Scope by a BinCode range or an explicit bin list,
+    /// and/or by specific item codes (item-only scope spans the whole warehouse).
     /// </summary>
     Task<List<CountingLineSeed>> GetBinCountingSeedsAsync(
-        string whsCode, string? binFrom, string? binTo, List<int>? binAbsList, CancellationToken ct);
+        string whsCode, string? binFrom, string? binTo, List<int>? binAbsList,
+        List<string>? itemCodes, CancellationToken ct);
 
-    /// <summary>Counting line seeds for the non-bin warehouse (01): one line per item with OITW stock.</summary>
-    Task<List<CountingLineSeed>> GetNonBinCountingSeedsAsync(string whsCode, CancellationToken ct);
+    /// <summary>Counting line seeds for the non-bin warehouse (01): one line per item with
+    /// OITW stock, optionally filtered to specific item codes.</summary>
+    Task<List<CountingLineSeed>> GetNonBinCountingSeedsAsync(
+        string whsCode, List<string>? itemCodes, CancellationToken ct);
 
     /// <summary>Counting session headers with counted-line progress, newest first.</summary>
     Task<List<CountingSessionSummary>> GetCountingSessionsAsync(bool openOnly, CancellationToken ct);
@@ -478,7 +482,8 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     // ── Counting sessions ────────────────────────────────────────────
 
     public async Task<List<CountingLineSeed>> GetBinCountingSeedsAsync(
-        string whsCode, string? binFrom, string? binTo, List<int>? binAbsList, CancellationToken ct)
+        string whsCode, string? binFrom, string? binTo, List<int>? binAbsList,
+        List<string>? itemCodes, CancellationToken ct)
     {
         // Spec §8.3: one line per item-per-bin with stock in scope.
         var sql = """
@@ -504,11 +509,24 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             }
             sql += $"\n  AND Q.BinAbs IN ({string.Join(", ", names)})";
         }
-        else
+        else if (!string.IsNullOrWhiteSpace(binFrom) && !string.IsNullOrWhiteSpace(binTo))
         {
             sql += "\n  AND B.BinCode BETWEEN @binFrom AND @binTo";
-            cmd.Parameters.AddWithValue("@binFrom", binFrom ?? "");
-            cmd.Parameters.AddWithValue("@binTo", binTo ?? "");
+            cmd.Parameters.AddWithValue("@binFrom", binFrom);
+            cmd.Parameters.AddWithValue("@binTo", binTo);
+        }
+        // No bin scope at all is valid only with an item filter (whole-warehouse
+        // count of specific items) — the controller enforces that rule.
+
+        if (itemCodes is { Count: > 0 })
+        {
+            var names = new List<string>(itemCodes.Count);
+            for (int i = 0; i < itemCodes.Count; i++)
+            {
+                names.Add($"@i{i}");
+                cmd.Parameters.AddWithValue($"@i{i}", itemCodes[i]);
+            }
+            sql += $"\n  AND Q.ItemCode IN ({string.Join(", ", names)})";
         }
 
         sql += "\nORDER BY B.BinCode, Q.ItemCode;";
@@ -529,19 +547,33 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     }
 
     public async Task<List<CountingLineSeed>> GetNonBinCountingSeedsAsync(
-        string whsCode, CancellationToken ct)
+        string whsCode, List<string>? itemCodes, CancellationToken ct)
     {
-        const string sql = """
+        var sql = """
             SELECT W.ItemCode, W.WhsCode
             FROM OITW W
             WHERE W.WhsCode = @whs AND W.OnHand <> 0
-            ORDER BY W.ItemCode;
             """;
 
         var list = new List<CountingLineSeed>();
         await using var conn = await OpenAsync(ct);
-        await using var cmd = new SqlCommand(sql, conn);
+        await using var cmd = new SqlCommand();
+        cmd.Connection = conn;
         cmd.Parameters.AddWithValue("@whs", whsCode);
+
+        if (itemCodes is { Count: > 0 })
+        {
+            var names = new List<string>(itemCodes.Count);
+            for (int i = 0; i < itemCodes.Count; i++)
+            {
+                names.Add($"@i{i}");
+                cmd.Parameters.AddWithValue($"@i{i}", itemCodes[i]);
+            }
+            sql += $"\n  AND W.ItemCode IN ({string.Join(", ", names)})";
+        }
+
+        sql += "\nORDER BY W.ItemCode;";
+        cmd.CommandText = sql;
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {

@@ -395,9 +395,16 @@ public class AutohubInventoryController : ControllerBase
 
             bool hasRange = !string.IsNullOrWhiteSpace(request.BinFrom) && !string.IsNullOrWhiteSpace(request.BinTo);
             bool hasList = request.BinAbsList is { Count: > 0 };
-            if (binManaged && !hasRange && !hasList)
+            var itemCodes = request.ItemCodes?
+                .Where(i => !string.IsNullOrWhiteSpace(i))
+                .Select(i => i.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            bool hasItems = itemCodes is { Count: > 0 };
+            if (binManaged && !hasRange && !hasList && !hasItems)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(
-                    $"Warehouse {request.WhsCode} is bin-managed — provide bin_from/bin_to or bin_abs_list to scope the session."));
+                    $"Warehouse {request.WhsCode} is bin-managed — scope the session with " +
+                    "bin_from/bin_to, bin_abs_list, and/or item_codes."));
             if (!binManaged && (hasRange || hasList))
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(
                     $"Warehouse {request.WhsCode} has no bins — omit bin_from/bin_to/bin_abs_list."));
@@ -414,8 +421,9 @@ public class AutohubInventoryController : ControllerBase
 
             var seeds = binManaged
                 ? await _sql.GetBinCountingSeedsAsync(
-                    request.WhsCode, request.BinFrom?.Trim(), request.BinTo?.Trim(), request.BinAbsList, ct)
-                : await _sql.GetNonBinCountingSeedsAsync(request.WhsCode, ct);
+                    request.WhsCode, request.BinFrom?.Trim(), request.BinTo?.Trim(),
+                    request.BinAbsList, itemCodes, ct)
+                : await _sql.GetNonBinCountingSeedsAsync(request.WhsCode, itemCodes, ct);
 
             if (seeds.Count == 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(
@@ -675,6 +683,113 @@ public class AutohubInventoryController : ControllerBase
             _logger.LogError(ex,
                 "Inventory posting failed (app_ref={AppRef}, counting={Counting})",
                 request.AppRef, request.CountingDocEntry);
+            return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/postings/direct
+    /// STANDALONE stock correction: an Inventory Posting (OIQR) with no counting
+    /// session. <c>counted_qty</c> per line is the ABSOLUTE new quantity (0 zeroes the
+    /// stock out) — SAP computes the variance against current stock at post time and
+    /// writes the stock/GL adjustment. In bin-managed warehouses each line must name
+    /// its bin explicitly — a correction targets a specific bin deliberately, never a
+    /// guessed one. Idempotent on <c>app_ref</c>.
+    /// <para>For counted-session posting (review + subset approval), use
+    /// <c>POST /postings</c> instead.</para>
+    /// </summary>
+    [HttpPost("postings/direct")]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CreateDirectPosting(
+        [FromBody] DirectPostingCreate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (string.IsNullOrWhiteSpace(request.WhsCode)) errors.Add("whs_code is required.");
+        if (request.Lines.Count == 0) errors.Add("At least one line is required.");
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            var l = request.Lines[i];
+            if (string.IsNullOrWhiteSpace(l.ItemCode))
+                errors.Add($"lines[{i}]: item_code is required.");
+            if (l.CountedQty < 0)
+                errors.Add($"lines[{i}]: counted_qty cannot be negative (0 zeroes the stock out).");
+        }
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+        request.WhsCode = request.WhsCode.Trim();
+        request.AppRef = request.AppRef.Trim();
+
+        try
+        {
+            await ValidateWarehousesExistAsync(new[] { request.WhsCode }, ct);
+
+            // Idempotency: same app_ref already posted → return it, don't double-post.
+            var existing = await _sql.FindDocEntryByAppRefAsync("OIQR", request.AppRef, ct);
+            if (existing is not null)
+                return Ok(ApiResponse<InventoryDocResult>.Ok(new InventoryDocResult
+                {
+                    DocEntry = existing.Value.DocEntry,
+                    DocNum = existing.Value.DocNum,
+                    AlreadyExisted = true,
+                }));
+
+            // Bin discipline: corrections in bin warehouses must name their bin; the
+            // bin must exist and belong to this warehouse. Non-bin warehouse strips bins.
+            bool binManaged = await _sql.IsBinManagedAsync(request.WhsCode, ct);
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var line = request.Lines[i];
+                line.ItemCode = line.ItemCode.Trim();
+
+                if (!binManaged)
+                {
+                    line.BinAbs = null;
+                    continue;
+                }
+                if (!line.BinAbs.HasValue)
+                {
+                    errors.Add(
+                        $"lines[{i}] ({line.ItemCode}): bin_abs is required in bin-managed warehouse " +
+                        $"{request.WhsCode} — pick via GET /bins (stocked) or GET /warehouse-bins (all).");
+                    continue;
+                }
+
+                var bin = await _sql.GetBinInfoAsync(line.BinAbs.Value, ct);
+                if (bin is null)
+                    errors.Add($"lines[{i}] ({line.ItemCode}): bin AbsEntry {line.BinAbs} does not exist.");
+                else if (!string.Equals(bin.Value.WhsCode, request.WhsCode, StringComparison.OrdinalIgnoreCase))
+                    errors.Add(
+                        $"lines[{i}] ({line.ItemCode}): bin {bin.Value.BinCode} belongs to warehouse " +
+                        $"{bin.Value.WhsCode}, not {request.WhsCode}.");
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            // Branch (OIQR.BPLId) — same requirement as all service-created documents.
+            var (bplId, branchError) = await ResolveActiveBranchAsync(request.WhsCode, ct);
+            if (branchError is not null)
+                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
+
+            var result = await _sap.CreateDirectInventoryPostingAsync(
+                request, _settings.PostingSeries, bplId, ct);
+
+            return Ok(ApiResponse<InventoryDocResult>.Ok(
+                result,
+                new Dictionary<string, object> { ["posted_lines"] = request.Lines.Count }));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
+        {
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Direct inventory posting failed (app_ref={AppRef}, whs={Whs})",
+                request.AppRef, request.WhsCode);
             return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
         }
     }

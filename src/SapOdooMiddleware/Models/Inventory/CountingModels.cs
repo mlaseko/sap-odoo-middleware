@@ -19,6 +19,12 @@ public class CountingCreate
     public string? BinTo { get; set; }
     /// <summary>Explicit OBIN AbsEntry list (alternative to the BinFrom/BinTo range).</summary>
     public List<int>? BinAbsList { get; set; }
+    /// <summary>
+    /// Optional item filter: count only these items. In a bin warehouse this may be
+    /// used INSTEAD of a bin scope (one line per stocked bin of each item across the
+    /// whole warehouse) or combined with one (intersection).
+    /// </summary>
+    public List<string>? ItemCodes { get; set; }
     /// <summary>Count date (defaults to today).</summary>
     public DateTime? CountDate { get; set; }
     /// <summary>
@@ -141,5 +147,34 @@ public class PostingCreate
 public class CountingPostLine
 {
     public int LineNum { get; set; }
+    public double CountedQty { get; set; }
+}
+
+// ── Direct Inventory Posting (no counting session) ──────────────────
+
+/// <summary>
+/// POST /api/autohub/inv/postings/direct body. Standalone stock correction: an
+/// Inventory Posting (OIQR) with NO base counting document. <c>counted_qty</c> is the
+/// absolute new quantity — SAP computes the variance against current stock at post
+/// time and writes the stock/GL adjustment.
+/// </summary>
+public class DirectPostingCreate
+{
+    /// <summary>App-generated GUID for idempotency (written to U_AppRef, max 40 chars).</summary>
+    public string AppRef { get; set; } = "";
+    public string WhsCode { get; set; } = "";
+    public DateTime? DocDate { get; set; }
+    /// <summary>Reason for the correction (stored as the document remarks).</summary>
+    public string? Remarks { get; set; }
+    public List<DirectPostingLineCreate> Lines { get; set; } = new();
+}
+
+public class DirectPostingLineCreate
+{
+    public string ItemCode { get; set; } = "";
+    /// <summary>Bin (OBIN AbsEntry) whose count is being set. REQUIRED in bin-managed
+    /// warehouses — a correction targets a specific bin deliberately, never a guessed one.</summary>
+    public int? BinAbs { get; set; }
+    /// <summary>The absolute new quantity (0 zeroes the stock out).</summary>
     public double CountedQty { get; set; }
 }
