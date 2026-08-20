@@ -5863,6 +5863,94 @@ ORDER BY PostingDate, DocumentNumber";
         }
     }
 
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateDirectInventoryPostingAsync(
+        DirectPostingCreate request, int series, int? bplId, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var cs = _company!.GetCompanyService();
+            InventoryPostingsService? svc = null;
+            InventoryPosting? posting = null;
+            try
+            {
+                svc = (InventoryPostingsService)cs.GetBusinessService(
+                    ServiceTypes.InventoryPostingsService);
+                posting = (InventoryPosting)svc.GetDataInterface(
+                    InventoryPostingsServiceDataInterfaces.ipsInventoryPosting);
+
+                if (series > 0) posting.Series = series;
+                if (bplId is > 0)
+                    SetBranchLateBound(posting, bplId.Value);
+                if (!string.IsNullOrWhiteSpace(request.Remarks))
+                    TrySetLateBound(posting, "Remarks", request.Remarks);
+                posting.UserFields.Item("U_AppRef").Value = request.AppRef;
+
+                foreach (var l in request.Lines)
+                {
+                    // No base refs — a standalone correction line. CountedQuantity is
+                    // the absolute new quantity; SAP posts the variance vs current stock.
+                    var pl = posting.InventoryPostingLines.Add();
+                    pl.ItemCode = l.ItemCode;
+                    pl.WarehouseCode = request.WhsCode;
+                    if (l.BinAbs.HasValue)
+                        pl.BinEntry = l.BinAbs.Value;
+                    pl.CountedQuantity = l.CountedQty;
+                }
+
+                var result = svc.Add(posting);
+                int docEntry = result.DocumentEntry;
+                int docNum = QueryDocNumByEntry("OIQR", docEntry);
+
+                _logger.LogInformation(
+                    "SAP Direct Inventory Posting created: DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "Whs={Whs}, Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, request.WhsCode, request.Lines.Count, request.AppRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            catch (COMException ex)
+            {
+                throw WrapServiceError("InventoryPostingsService.Add (direct)", ex);
+            }
+            finally
+            {
+                if (posting is not null) try { Marshal.ReleaseComObject(posting); } catch { /* ignored */ }
+                if (svc is not null) try { Marshal.ReleaseComObject(svc); } catch { /* ignored */ }
+                try { Marshal.ReleaseComObject(cs); } catch { /* ignored */ }
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Best-effort late-bound property set: silently skipped when this DI API build
+    /// does not declare the property (for optional fields like Remarks).
+    /// </summary>
+    private void TrySetLateBound(object serviceObject, string propertyName, object value)
+    {
+        try
+        {
+            serviceObject.GetType().InvokeMember(
+                propertyName,
+                System.Reflection.BindingFlags.SetProperty,
+                binder: null,
+                target: serviceObject,
+                args: new[] { value });
+        }
+        catch (Exception ex) when (IsUnknownComName(ex))
+        {
+            _logger.LogDebug(
+                "Optional property {Property} not declared on this DI API build — skipped.", propertyName);
+        }
+    }
+
     /// <summary>
     /// The branch property's name varies by object family and DI API build:
     /// service objects (InventoryCounting/InventoryPosting) usually expose "BranchID",

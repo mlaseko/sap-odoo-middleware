@@ -333,6 +333,15 @@ public interface ISapB1Service
         int? bplId, CancellationToken ct);
 
     /// <summary>
+    /// Creates a STANDALONE Inventory Posting (OIQR) with no base counting document —
+    /// a direct stock correction. Each line carries item + warehouse (+ bin) +
+    /// CountedQuantity as the absolute new quantity; SAP computes the variance against
+    /// current stock at post time and writes the stock/GL adjustment.
+    /// </summary>
+    Task<InventoryDocResult> CreateDirectInventoryPostingAsync(
+        DirectPostingCreate request, int series, int? bplId, CancellationToken ct);
+
+    /// <summary>
     /// Creates a Goods Receipt (OIGN, object 59, <c>oInventoryGenEntry</c>) — standalone
     /// non-PO stock-in. UnitPrice is set per line only when a unit cost is supplied
     /// (otherwise SAP uses the item cost). Lines carry a single destination bin
