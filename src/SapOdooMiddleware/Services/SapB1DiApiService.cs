@@ -6578,6 +6578,69 @@ ORDER BY PostingDate, DocumentNumber";
     }
 
     /// <inheritdoc/>
+    public async Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            // Pre-check via SQL: not found → clear error; already cancelled → idempotent OK.
+            int docNum;
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery($"SELECT \"DocNum\", \"CANCELED\" FROM ORRR WHERE \"DocEntry\" = {docEntry}");
+                if (rs.EoF)
+                    throw new InvalidOperationException(
+                        $"Return Request DocEntry={docEntry} not found (ORRR).");
+
+                docNum = Convert.ToInt32(rs.Fields.Item("DocNum").Value);
+                var canceled = rs.Fields.Item("CANCELED").Value?.ToString();
+                if (canceled is "Y" or "C")
+                {
+                    _logger.LogInformation(
+                        "Return Request already cancelled: DocEntry={DocEntry}, DocNum={DocNum} — idempotent OK.",
+                        docEntry, docNum);
+                    return new DocCancelResult { DocEntry = docEntry, DocNum = docNum, AlreadyCancelled = true };
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+
+            var rr = (Documents)_company.GetBusinessObject(BoObjectTypes.oReturnRequest);
+            try
+            {
+                if (!rr.GetByKey(docEntry))
+                    throw new InvalidOperationException(
+                        $"Return Request DocEntry={docEntry} not found via DI API.");
+
+                int result = rr.Cancel();
+                if (result != 0)
+                {
+                    // e.g. request already fully drawn to a Goods Return — SAP's message flows through.
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "Return Request cancelled: DocEntry={DocEntry}, DocNum={DocNum}", docEntry, docNum);
+                return new DocCancelResult { DocEntry = docEntry, DocNum = docNum, AlreadyCancelled = false };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rr);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
     public async Task<List<(int DocEntry, int DocNum, bool Cancelled)>> FindIncomingPaymentsByInvoiceAsync(
         int invoiceDocEntry)
     {

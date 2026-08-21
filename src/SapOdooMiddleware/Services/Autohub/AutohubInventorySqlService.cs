@@ -67,6 +67,20 @@ public interface IAutohubInventorySqlService
         string? cardCode, CancellationToken ct);
 
     /// <summary>
+    /// Customer picker list (OCRD CardType 'C', not frozen), filtered by a search
+    /// string matching code or name, alphabetical, capped at <paramref name="limit"/>.
+    /// </summary>
+    Task<List<CustomerSummary>> GetCustomersAsync(string? search, int limit, CancellationToken ct);
+
+    /// <summary>
+    /// Return document headers with status. <paramref name="docTable"/> is "ORRR"
+    /// (Return Requests) or "ORDN" (Goods Returns). <paramref name="status"/>:
+    /// open | closed | canceled | all. Newest first.
+    /// </summary>
+    Task<List<ReturnDocumentSummary>> GetReturnDocumentsAsync(
+        string docTable, string? cardCode, string status, CancellationToken ct);
+
+    /// <summary>
     /// Idempotency probe: DocEntry/DocNum of an already-posted document carrying this U_AppRef
     /// GUID, or null. <paramref name="headerTable"/> must be one of OIGN/OWTQ/OWTR/OINC/OIQR.
     /// </summary>
@@ -580,6 +594,101 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 Quantity = (double)reader.GetDecimal(10),
                 OpenQty = (double)reader.GetDecimal(11),
                 WhsCode = reader.IsDBNull(12) ? "" : reader.GetString(12),
+            });
+        }
+        return list;
+    }
+
+    public async Task<List<CustomerSummary>> GetCustomersAsync(
+        string? search, int limit, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT TOP (@limit) CardCode, CardName, Phone1
+            FROM OCRD
+            WHERE CardType = 'C'
+              AND ISNULL(frozenFor, 'N') = 'N'
+              AND (@search IS NULL OR CardCode LIKE @pattern OR CardName LIKE @pattern)
+            ORDER BY CardName;
+            """;
+
+        var list = new List<CustomerSummary>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@limit", limit);
+        cmd.Parameters.Add("@search", System.Data.SqlDbType.NVarChar, 100).Value =
+            (object?)search ?? DBNull.Value;
+        cmd.Parameters.Add("@pattern", System.Data.SqlDbType.NVarChar, 102).Value =
+            (object?)(search is null ? null : $"%{search}%") ?? DBNull.Value;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new CustomerSummary
+            {
+                CardCode = reader.GetString(0),
+                CardName = reader.IsDBNull(1) ? null : reader.GetString(1),
+                Phone = reader.IsDBNull(2) ? null : reader.GetString(2),
+            });
+        }
+        return list;
+    }
+
+    public async Task<List<ReturnDocumentSummary>> GetReturnDocumentsAsync(
+        string docTable, string? cardCode, string status, CancellationToken ct)
+    {
+        // Whitelisted header/lines pairs — never interpolate caller input.
+        (string header, string lines) = docTable.ToUpperInvariant() switch
+        {
+            "ORRR" => ("ORRR", "RRR1"),
+            "ORDN" => ("ORDN", "RDN1"),
+            _ => throw new ArgumentException($"Unsupported return table '{docTable}'.", nameof(docTable)),
+        };
+
+        // 'C' rows are SAP's cancellation reversal documents — never listed.
+        string statusFilter = status.ToLowerInvariant() switch
+        {
+            "open" => "AND T0.DocStatus = 'O' AND T0.CANCELED = 'N'",
+            "closed" => "AND T0.DocStatus = 'C' AND T0.CANCELED = 'N'",
+            "canceled" => "AND T0.CANCELED = 'Y'",
+            _ => "",   // all
+        };
+
+        var sql = $"""
+            SELECT T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
+                   T0.DocStatus, T0.CANCELED,
+                   COUNT(T1.LineNum) AS TotalLines,
+                   SUM(T1.Quantity) AS TotalQty,
+                   SUM(T1.OpenQty) AS OpenQty
+            FROM {header} T0
+            JOIN {lines} T1 ON T1.DocEntry = T0.DocEntry
+            WHERE T0.CANCELED <> 'C'
+              AND (@card IS NULL OR T0.CardCode = @card)
+              {statusFilter}
+            GROUP BY T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
+                     T0.DocStatus, T0.CANCELED
+            ORDER BY T0.DocEntry DESC;
+            """;
+
+        var list = new List<ReturnDocumentSummary>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@card", System.Data.SqlDbType.NVarChar, 15).Value =
+            (object?)cardCode ?? DBNull.Value;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            bool cancelled = !reader.IsDBNull(6) && reader.GetString(6) == "Y";
+            string docStatus = reader.IsDBNull(5) ? "" : reader.GetString(5);
+            list.Add(new ReturnDocumentSummary
+            {
+                DocEntry = reader.GetInt32(0),
+                DocNum = reader.GetInt32(1),
+                DocDate = reader.IsDBNull(2) ? "" : reader.GetDateTime(2).ToString("yyyy-MM-dd"),
+                CardCode = reader.GetString(3),
+                CardName = reader.IsDBNull(4) ? null : reader.GetString(4),
+                Status = cancelled ? "canceled" : docStatus == "O" ? "open" : "closed",
+                TotalLines = reader.GetInt32(7),
+                TotalQty = reader.IsDBNull(8) ? 0d : (double)reader.GetDecimal(8),
+                OpenQty = reader.IsDBNull(9) ? 0d : (double)reader.GetDecimal(9),
             });
         }
         return list;

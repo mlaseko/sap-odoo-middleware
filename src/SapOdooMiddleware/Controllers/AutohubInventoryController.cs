@@ -1364,6 +1364,89 @@ public class AutohubInventoryController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// GET /api/autohub/inv/customers?search=juma&amp;limit=50
+    /// Customer picker list (active customers only), filtered by code or name,
+    /// alphabetical. Use for the dropdown instead of typing exact CardCodes.
+    /// </summary>
+    [HttpGet("customers")]
+    [ProducesResponseType(typeof(ApiResponse<List<CustomerSummary>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetCustomers(
+        [FromQuery(Name = "search")] string? search = null,
+        [FromQuery(Name = "limit")] int limit = 50,
+        CancellationToken ct = default)
+    {
+        limit = Math.Clamp(limit, 1, 200);
+        var customers = await _sql.GetCustomersAsync(
+            string.IsNullOrWhiteSpace(search) ? null : search.Trim(), limit, ct);
+        return Ok(ApiResponse<List<CustomerSummary>>.Ok(
+            customers,
+            new Dictionary<string, object> { ["count"] = customers.Count, ["limit"] = limit }));
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/return-requests/list?card_code=&amp;status=all
+    /// Return Request documents with status (<c>open</c> | <c>closed</c> |
+    /// <c>canceled</c> | <c>all</c>, default all), newest first, with line/quantity
+    /// totals. For the line-level fulfillment view use <c>GET /return-requests</c>.
+    /// </summary>
+    [HttpGet("return-requests/list")]
+    [ProducesResponseType(typeof(ApiResponse<List<ReturnDocumentSummary>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListReturnRequests(
+        [FromQuery(Name = "card_code")] string? cardCode = null,
+        [FromQuery(Name = "status")] string status = "all",
+        CancellationToken ct = default)
+    {
+        var docs = await _sql.GetReturnDocumentsAsync("ORRR", NormalizeWhs(cardCode), status.Trim(), ct);
+        return Ok(ApiResponse<List<ReturnDocumentSummary>>.Ok(
+            docs, new Dictionary<string, object> { ["count"] = docs.Count, ["status"] = status }));
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/returns/list?card_code=&amp;status=all
+    /// Posted Goods Return documents (ORDN) with status, newest first, with
+    /// line/quantity totals.
+    /// </summary>
+    [HttpGet("returns/list")]
+    [ProducesResponseType(typeof(ApiResponse<List<ReturnDocumentSummary>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ListGoodsReturns(
+        [FromQuery(Name = "card_code")] string? cardCode = null,
+        [FromQuery(Name = "status")] string status = "all",
+        CancellationToken ct = default)
+    {
+        var docs = await _sql.GetReturnDocumentsAsync("ORDN", NormalizeWhs(cardCode), status.Trim(), ct);
+        return Ok(ApiResponse<List<ReturnDocumentSummary>>.Ok(
+            docs, new Dictionary<string, object> { ["count"] = docs.Count, ["status"] = status }));
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/return-requests/{docEntry}/cancel
+    /// Cancels an open Return Request. Idempotent: an already-cancelled request
+    /// returns 200 with <c>already_cancelled = true</c>. A request already fully
+    /// drawn to a Goods Return is rejected by SAP with its own message.
+    /// </summary>
+    [HttpPost("return-requests/{docEntry:int}/cancel")]
+    [ProducesResponseType(typeof(ApiResponse<DocCancelResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<DocCancelResult>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<DocCancelResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CancelReturnRequest(int docEntry, CancellationToken ct)
+    {
+        try
+        {
+            var result = await _sap.CancelAutohubReturnRequestAsync(docEntry, ct);
+            return Ok(ApiResponse<DocCancelResult>.Ok(result));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found"))
+        {
+            return NotFound(ApiResponse<DocCancelResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Return request cancellation failed (doc_entry={DocEntry})", docEntry);
+            return StatusCode(500, ApiResponse<DocCancelResult>.Fail(ex.Message));
+        }
+    }
+
     // ── Default-bin seeding job (Phase 5, spec §10) ──────────────────
 
     /// <summary>

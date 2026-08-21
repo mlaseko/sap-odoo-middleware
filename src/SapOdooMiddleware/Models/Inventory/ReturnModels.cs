@@ -89,6 +89,42 @@ public class GoodsReturnCreate
     public List<GoodsReturnLineCreate> Lines { get; set; } = new();
 }
 
+// ── Listings / cancel ────────────────────────────────────────────────
+
+/// <summary>Customer picker row (OCRD, CardType C, not frozen).</summary>
+public class CustomerSummary
+{
+    public string CardCode { get; set; } = "";
+    public string? CardName { get; set; }
+    public string? Phone { get; set; }
+}
+
+/// <summary>
+/// Return document header with status — used for both Return Requests (ORRR) and
+/// Goods Returns (ORDN). Status: "open" | "closed" | "canceled".
+/// </summary>
+public class ReturnDocumentSummary
+{
+    public int DocEntry { get; set; }
+    public int DocNum { get; set; }
+    public string DocDate { get; set; } = "";
+    public string CardCode { get; set; } = "";
+    public string? CardName { get; set; }
+    public string Status { get; set; } = "";
+    public int TotalLines { get; set; }
+    public double TotalQty { get; set; }
+    /// <summary>Remaining open quantity across lines (0 when fully drawn/closed).</summary>
+    public double OpenQty { get; set; }
+}
+
+/// <summary>Result of cancelling a document (idempotent on already-cancelled).</summary>
+public class DocCancelResult
+{
+    public int DocEntry { get; set; }
+    public int DocNum { get; set; }
+    public bool AlreadyCancelled { get; set; }
+}
+
 public class GoodsReturnLineCreate
 {
     /// <summary>Base Return Request DocEntry (ORRR).</summary>
