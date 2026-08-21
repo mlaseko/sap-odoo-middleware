@@ -55,6 +55,18 @@ public interface IAutohubInventorySqlService
         string? cardCode, string? itemCode, CancellationToken ct);
 
     /// <summary>
+    /// A customer's AR invoice item lines for the return-request copy screen, newest
+    /// invoice first. <paramref name="openOnly"/> limits to open invoices; pass false
+    /// to include closed (paid) ones, since returns often happen after payment.
+    /// </summary>
+    Task<List<OpenInvoiceLine>> GetInvoiceLinesForReturnAsync(
+        string cardCode, bool openOnly, CancellationToken ct);
+
+    /// <summary>Open Return Request lines awaiting the physical goods return, oldest first.</summary>
+    Task<List<OpenReturnRequestLine>> GetOpenReturnRequestLinesAsync(
+        string? cardCode, CancellationToken ct);
+
+    /// <summary>
     /// Idempotency probe: DocEntry/DocNum of an already-posted document carrying this U_AppRef
     /// GUID, or null. <paramref name="headerTable"/> must be one of OIGN/OWTQ/OWTR/OINC/OIQR.
     /// </summary>
@@ -100,9 +112,9 @@ public interface IAutohubInventorySqlService
 public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
 {
     // U_AppRef idempotency probes are limited to the inventory header tables
-    // (the five from spec §6.3 plus OPDN for GRPO).
+    // (the five from spec §6.3, plus OPDN for GRPO and ORRR/ORDN for returns).
     private static readonly HashSet<string> AllowedAppRefTables =
-        new(StringComparer.OrdinalIgnoreCase) { "OIGN", "OWTQ", "OWTR", "OINC", "OIQR", "OPDN" };
+        new(StringComparer.OrdinalIgnoreCase) { "OIGN", "OWTQ", "OWTR", "OINC", "OIQR", "OPDN", "ORRR", "ORDN" };
 
     private static readonly TimeSpan WarehouseCacheTtl = TimeSpan.FromMinutes(5);
 
@@ -460,6 +472,100 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         while (await reader.ReadAsync(ct))
         {
             list.Add(new OpenPurchaseOrderLine
+            {
+                DocEntry = reader.GetInt32(0),
+                DocNum = reader.GetInt32(1),
+                DocDate = reader.IsDBNull(2) ? "" : reader.GetDateTime(2).ToString("yyyy-MM-dd"),
+                CardCode = reader.GetString(3),
+                CardName = reader.IsDBNull(4) ? null : reader.GetString(4),
+                LineNum = reader.GetInt32(5),
+                ItemCode = reader.GetString(6),
+                ItemName = reader.IsDBNull(7) ? null : reader.GetString(7),
+                ArticleNumber = reader.IsDBNull(8) ? null : reader.GetString(8),
+                Manufacturer = reader.IsDBNull(9) ? null : reader.GetString(9),
+                Quantity = (double)reader.GetDecimal(10),
+                OpenQty = (double)reader.GetDecimal(11),
+                WhsCode = reader.IsDBNull(12) ? "" : reader.GetString(12),
+            });
+        }
+        return list;
+    }
+
+    // ── Returns (Return Request ← invoice; Goods Return ← request) ───
+
+    public async Task<List<OpenInvoiceLine>> GetInvoiceLinesForReturnAsync(
+        string cardCode, bool openOnly, CancellationToken ct)
+    {
+        // Item-type lines only (T1.ItemCode set). An AR invoice CLOSES when paid, not
+        // when returned — hence the openOnly toggle.
+        const string sql = """
+            SELECT T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
+                   T1.LineNum, T1.ItemCode,
+                   I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
+                   T1.Quantity, T1.Price, T1.WhsCode
+            FROM OINV T0
+            JOIN INV1 T1 ON T1.DocEntry = T0.DocEntry
+            JOIN OITM I ON I.ItemCode = T1.ItemCode
+            WHERE T0.CardCode = @card
+              AND T0.CANCELED = 'N'
+              AND (@openOnly = 0 OR T0.DocStatus = 'O')
+            ORDER BY T0.DocDate DESC, T0.DocNum DESC, T1.LineNum;
+            """;
+
+        var list = new List<OpenInvoiceLine>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@card", cardCode);
+        cmd.Parameters.AddWithValue("@openOnly", openOnly ? 1 : 0);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new OpenInvoiceLine
+            {
+                DocEntry = reader.GetInt32(0),
+                DocNum = reader.GetInt32(1),
+                DocDate = reader.IsDBNull(2) ? "" : reader.GetDateTime(2).ToString("yyyy-MM-dd"),
+                CardCode = reader.GetString(3),
+                CardName = reader.IsDBNull(4) ? null : reader.GetString(4),
+                LineNum = reader.GetInt32(5),
+                ItemCode = reader.GetString(6),
+                ItemName = reader.IsDBNull(7) ? null : reader.GetString(7),
+                ArticleNumber = reader.IsDBNull(8) ? null : reader.GetString(8),
+                Manufacturer = reader.IsDBNull(9) ? null : reader.GetString(9),
+                Quantity = (double)reader.GetDecimal(10),
+                Price = reader.IsDBNull(11) ? 0d : (double)reader.GetDecimal(11),
+                WhsCode = reader.IsDBNull(12) ? "" : reader.GetString(12),
+            });
+        }
+        return list;
+    }
+
+    public async Task<List<OpenReturnRequestLine>> GetOpenReturnRequestLinesAsync(
+        string? cardCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
+                   T1.LineNum, T1.ItemCode,
+                   I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
+                   T1.Quantity, T1.OpenQty, T1.WhsCode
+            FROM ORRR T0
+            JOIN RRR1 T1 ON T1.DocEntry = T0.DocEntry
+            JOIN OITM I ON I.ItemCode = T1.ItemCode
+            WHERE T0.DocStatus = 'O' AND T1.LineStatus = 'O' AND T1.OpenQty > 0
+              AND T0.CANCELED = 'N'
+              AND (@card IS NULL OR T0.CardCode = @card)
+            ORDER BY T0.DocDate, T0.DocNum, T1.LineNum;
+            """;
+
+        var list = new List<OpenReturnRequestLine>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@card", System.Data.SqlDbType.NVarChar, 15).Value =
+            (object?)cardCode ?? DBNull.Value;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new OpenReturnRequestLine
             {
                 DocEntry = reader.GetInt32(0),
                 DocNum = reader.GetInt32(1),

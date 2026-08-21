@@ -29,4 +29,10 @@ public class AutohubInventorySettings
     /// <summary>Series for Goods Receipt POs (object 20, OPDN). 0 = let SAP use the
     /// default series (discovery found a single series for all objects except transfers).</summary>
     public int GrpoSeries { get; set; } = 0;
+
+    /// <summary>Series for sales Return Requests (ORRR). 0 = SAP default series.</summary>
+    public int SalesReturnRequestSeries { get; set; } = 0;
+
+    /// <summary>Series for Goods Returns (object 16, ORDN). 0 = SAP default series.</summary>
+    public int GoodsReturnSeries { get; set; } = 0;
 }
