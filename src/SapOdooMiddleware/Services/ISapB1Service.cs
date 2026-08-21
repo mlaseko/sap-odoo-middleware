@@ -374,4 +374,31 @@ public interface ISapB1Service
     /// </summary>
     Task<bool> SetItemDefaultBinsAsync(
         string itemCode, IReadOnlyDictionary<string, int> binByWhs, CancellationToken ct);
+
+    /// <summary>
+    /// Creates a sales Return Request (ORRR) for the Autohub inventory app: every line
+    /// copies from an AR invoice line (BaseType 13 + BaseEntry/BaseLine) so prices and
+    /// the document chain stay intact. No stock moves. <paramref name="bplId"/> stamps
+    /// the header branch when set.
+    /// </summary>
+    Task<InventoryDocResult> CreateAutohubReturnRequestAsync(
+        ReturnRequestCreate request, int series, int? bplId, CancellationToken ct);
+
+    /// <summary>
+    /// Creates a Goods Return (ORDN, object 16) for the Autohub inventory app by
+    /// copying from open Return Request lines (BaseType = ORRR) — SAP closes the
+    /// request's open quantities and stock comes back in. Lines carry a destination
+    /// bin allocation when a bin is set. <paramref name="bplId"/> stamps the header
+    /// branch when set.
+    /// </summary>
+    Task<InventoryDocResult> CreateAutohubGoodsReturnAsync(
+        GoodsReturnCreate request, int series, int? bplId, CancellationToken ct);
+
+    /// <summary>
+    /// Cancels an Incoming Payment (ORCT) via <c>Payments.Cancel()</c>. Pre-checks
+    /// ORCT.Canceled — an already-cancelled payment returns success idempotently with
+    /// <c>AlreadyCancelled = true</c>. SAP's rejection messages (e.g. deposited or
+    /// reconciled payments) are passed through verbatim.
+    /// </summary>
+    Task<SapPaymentCancelResponse> CancelIncomingPaymentAsync(int docEntry);
 }

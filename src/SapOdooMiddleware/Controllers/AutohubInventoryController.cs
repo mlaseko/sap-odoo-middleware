@@ -1100,6 +1100,270 @@ public class AutohubInventoryController : ControllerBase
         }
     }
 
+    // ── Customer returns: Return Request ← invoice, Goods Return ← request ──
+
+    /// <summary>
+    /// GET /api/autohub/inv/invoices?card_code=C00001&amp;status=open
+    /// The customer's AR invoice item lines for the return-request copy screen,
+    /// newest first. <c>status</c>: <c>open</c> (default) or <c>all</c> — note an AR
+    /// invoice closes when PAID, so returns for already-paid sales need <c>all</c>.
+    /// </summary>
+    [HttpGet("invoices")]
+    [ProducesResponseType(typeof(ApiResponse<List<OpenInvoiceLine>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<List<OpenInvoiceLine>>), StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetInvoicesForReturn(
+        [FromQuery(Name = "card_code")] string? cardCode,
+        [FromQuery(Name = "status")] string status = "open",
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(cardCode))
+            return BadRequest(ApiResponse<List<OpenInvoiceLine>>.Fail(
+                "card_code query parameter is required."));
+
+        bool openOnly = !string.Equals(status?.Trim(), "all", StringComparison.OrdinalIgnoreCase);
+        var lines = await _sql.GetInvoiceLinesForReturnAsync(cardCode.Trim(), openOnly, ct);
+
+        return Ok(ApiResponse<List<OpenInvoiceLine>>.Ok(
+            lines,
+            new Dictionary<string, object>
+            {
+                ["total_lines"] = lines.Count,
+                ["total_documents"] = lines.Select(l => l.DocEntry).Distinct().Count(),
+            }));
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/return-requests
+    /// Creates a Return Request (ORRR) with every line copied from one of the
+    /// customer's AR invoice lines — prices and the document chain flow from the base.
+    /// No stock moves yet; the physical return posts later via <c>POST /returns</c>.
+    /// Idempotent on <c>app_ref</c>.
+    /// </summary>
+    [HttpPost("return-requests")]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CreateReturnRequest(
+        [FromBody] ReturnRequestCreate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (string.IsNullOrWhiteSpace(request.CardCode)) errors.Add("card_code is required.");
+        if (request.Lines.Count == 0) errors.Add("At least one line is required.");
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            var l = request.Lines[i];
+            if (l.InvoiceDocEntry <= 0) errors.Add($"lines[{i}]: invoice_doc_entry is required.");
+            if (l.InvoiceLineNum < 0) errors.Add($"lines[{i}]: invoice_line_num cannot be negative.");
+            if (l.Quantity <= 0) errors.Add($"lines[{i}]: quantity must be greater than zero.");
+        }
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+        request.CardCode = request.CardCode.Trim();
+        request.AppRef = request.AppRef.Trim();
+
+        try
+        {
+            // Idempotency: same app_ref already posted → return it.
+            var existing = await _sql.FindDocEntryByAppRefAsync("ORRR", request.AppRef, ct);
+            if (existing is not null)
+                return Ok(ApiResponse<InventoryDocResult>.Ok(new InventoryDocResult
+                {
+                    DocEntry = existing.Value.DocEntry,
+                    DocNum = existing.Value.DocNum,
+                    AlreadyExisted = true,
+                }));
+
+            // Validate each line against the customer's invoice lines (open AND paid).
+            var invoiceLines = await _sql.GetInvoiceLinesForReturnAsync(request.CardCode, openOnly: false, ct);
+            var byRef = invoiceLines.ToDictionary(l => (l.DocEntry, l.LineNum));
+
+            string? branchWhs = null;
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var line = request.Lines[i];
+                if (!byRef.TryGetValue((line.InvoiceDocEntry, line.InvoiceLineNum), out var inv))
+                {
+                    errors.Add(
+                        $"lines[{i}]: invoice {line.InvoiceDocEntry} line {line.InvoiceLineNum} is not an " +
+                        $"AR invoice item line of customer {request.CardCode}.");
+                    continue;
+                }
+                if (line.Quantity > inv.Quantity)
+                    errors.Add(
+                        $"lines[{i}] ({inv.ItemCode}): quantity {line.Quantity} exceeds the invoiced " +
+                        $"quantity {inv.Quantity}.");
+
+                line.WhsCode = string.IsNullOrWhiteSpace(line.WhsCode) ? inv.WhsCode : line.WhsCode.Trim();
+                branchWhs ??= line.WhsCode;
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            int? bplId = null;
+            if (!string.IsNullOrWhiteSpace(branchWhs))
+            {
+                var (resolved, branchError) = await ResolveActiveBranchAsync(branchWhs, ct);
+                if (branchError is not null)
+                    return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
+                bplId = resolved;
+            }
+
+            var result = await _sap.CreateAutohubReturnRequestAsync(
+                request, _settings.SalesReturnRequestSeries, bplId, ct);
+            return Ok(ApiResponse<InventoryDocResult>.Ok(result));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
+        {
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Return request creation failed (app_ref={AppRef}, card_code={CardCode})",
+                request.AppRef, request.CardCode);
+            return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/return-requests?card_code=C00001
+    /// Open Return Request lines awaiting the physical goods return, oldest first —
+    /// the copy source for <c>POST /returns</c>.
+    /// </summary>
+    [HttpGet("return-requests")]
+    [ProducesResponseType(typeof(ApiResponse<List<OpenReturnRequestLine>>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetOpenReturnRequests(
+        [FromQuery(Name = "card_code")] string? cardCode = null,
+        CancellationToken ct = default)
+    {
+        var lines = await _sql.GetOpenReturnRequestLinesAsync(NormalizeWhs(cardCode), ct);
+        return Ok(ApiResponse<List<OpenReturnRequestLine>>.Ok(
+            lines,
+            new Dictionary<string, object>
+            {
+                ["total_lines"] = lines.Count,
+                ["total_documents"] = lines.Select(l => l.DocEntry).Distinct().Count(),
+            }));
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/returns
+    /// Posts the Goods Return (ORDN) by copying from open Return Request lines —
+    /// SAP closes the request's open quantities (partials allowed) and the stock
+    /// comes back into the warehouse. Destination bins resolve server-side like
+    /// receipts. Idempotent on <c>app_ref</c>.
+    /// </summary>
+    [HttpPost("returns")]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CreateGoodsReturn(
+        [FromBody] GoodsReturnCreate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (string.IsNullOrWhiteSpace(request.CardCode)) errors.Add("card_code is required.");
+        if (request.Lines.Count == 0) errors.Add("At least one line is required.");
+        for (int i = 0; i < request.Lines.Count; i++)
+        {
+            var l = request.Lines[i];
+            if (l.ReturnRequestDocEntry <= 0) errors.Add($"lines[{i}]: return_request_doc_entry is required.");
+            if (l.ReturnRequestLineNum < 0) errors.Add($"lines[{i}]: return_request_line_num cannot be negative.");
+            if (l.Quantity <= 0) errors.Add($"lines[{i}]: quantity must be greater than zero.");
+        }
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+        request.CardCode = request.CardCode.Trim();
+        request.AppRef = request.AppRef.Trim();
+
+        try
+        {
+            // Idempotency: same app_ref already posted → return it.
+            var existing = await _sql.FindDocEntryByAppRefAsync("ORDN", request.AppRef, ct);
+            if (existing is not null)
+                return Ok(ApiResponse<InventoryDocResult>.Ok(new InventoryDocResult
+                {
+                    DocEntry = existing.Value.DocEntry,
+                    DocNum = existing.Value.DocNum,
+                    AlreadyExisted = true,
+                }));
+
+            // Validate against the customer's open return request lines.
+            var openLines = await _sql.GetOpenReturnRequestLinesAsync(request.CardCode, ct);
+            var byRef = openLines.ToDictionary(l => (l.DocEntry, l.LineNum));
+
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var line = request.Lines[i];
+                if (!byRef.TryGetValue((line.ReturnRequestDocEntry, line.ReturnRequestLineNum), out var rrLine))
+                {
+                    errors.Add(
+                        $"lines[{i}]: return request {line.ReturnRequestDocEntry} line " +
+                        $"{line.ReturnRequestLineNum} is not an open return request line of customer " +
+                        $"{request.CardCode}.");
+                    continue;
+                }
+                if (line.Quantity > rrLine.OpenQty)
+                    errors.Add(
+                        $"lines[{i}] ({rrLine.ItemCode}): quantity {line.Quantity} exceeds the request " +
+                        $"line's open quantity {rrLine.OpenQty}.");
+
+                line.WhsCode = string.IsNullOrWhiteSpace(line.WhsCode) ? rrLine.WhsCode : line.WhsCode.Trim();
+                if (string.IsNullOrWhiteSpace(line.WhsCode))
+                    errors.Add($"lines[{i}] ({rrLine.ItemCode}): no warehouse on the request line — supply whs_code.");
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            // Destination bins — goods come back IN, same rules as receipts.
+            for (int i = 0; i < request.Lines.Count; i++)
+            {
+                var line = request.Lines[i];
+                var rrLine = byRef[(line.ReturnRequestDocEntry, line.ReturnRequestLineNum)];
+
+                if (!await _sql.IsBinManagedAsync(line.WhsCode!, ct))
+                {
+                    line.BinAbs = null;
+                    continue;
+                }
+                if (line.BinAbs.HasValue) continue;
+
+                var res = await _binResolver.ResolveAsync(
+                    rrLine.ItemCode, line.WhsCode!, BinDirection.Destination, ct);
+                if (res.Resolution == "auto")
+                    line.BinAbs = res.Auto!.BinAbs;
+                else
+                    errors.Add(
+                        $"lines[{i}] ({rrLine.ItemCode}): destination bin required in warehouse {line.WhsCode} " +
+                        $"(resolver: {res.Resolution}) — pick one via GET /api/autohub/inv/bins.");
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            var (bplId, branchError) = await ResolveActiveBranchAsync(request.Lines[0].WhsCode!, ct);
+            if (branchError is not null)
+                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
+
+            var result = await _sap.CreateAutohubGoodsReturnAsync(
+                request, _settings.GoodsReturnSeries, bplId, ct);
+            return Ok(ApiResponse<InventoryDocResult>.Ok(result));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
+        {
+            return BadRequest(ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Goods return creation failed (app_ref={AppRef}, card_code={CardCode})",
+                request.AppRef, request.CardCode);
+            return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+    }
+
     // ── Default-bin seeding job (Phase 5, spec §10) ──────────────────
 
     /// <summary>

@@ -30,6 +30,39 @@ public class IncomingPaymentsController : ControllerBase
     }
 
     /// <summary>
+    /// POST /api/payments/{docEntry}/cancel
+    /// Cancels an Incoming Payment (ORCT) via DI API <c>Payments.GetByKey</c> +
+    /// <c>Cancel()</c>. Pre-checks ORCT.Canceled: an already-cancelled payment returns
+    /// success idempotently with <c>already_cancelled = true</c>. SAP's rejection
+    /// messages (deposited or reconciled payments) are passed through verbatim.
+    /// The cancelled DocNum is logged.
+    /// </summary>
+    [HttpPost("/api/payments/{docEntry:int}/cancel")]
+    [ProducesResponseType(typeof(ApiResponse<SapPaymentCancelResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<SapPaymentCancelResponse>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<SapPaymentCancelResponse>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> Cancel(int docEntry)
+    {
+        _logger.LogInformation("Incoming Payment cancellation requested: DocEntry={DocEntry}", docEntry);
+
+        try
+        {
+            var result = await _sapService.CancelIncomingPaymentAsync(docEntry);
+            return Ok(ApiResponse<SapPaymentCancelResponse>.Ok(result));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found"))
+        {
+            return NotFound(ApiResponse<SapPaymentCancelResponse>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            // SAP's own message (e.g. deposited/reconciled rejection) flows through as-is.
+            _logger.LogError(ex, "Incoming Payment cancellation failed: DocEntry={DocEntry}", docEntry);
+            return StatusCode(500, ApiResponse<SapPaymentCancelResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/incoming-payments
     /// Creates an Incoming Payment (ORCT) in SAP B1 and, when <c>odoo_payment_id</c> is provided,
     /// writes the SAP DocEntry and DocNum back to the Odoo payment record.

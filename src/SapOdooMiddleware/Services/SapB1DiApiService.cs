@@ -6269,6 +6269,222 @@ ORDER BY PostingDate, DocumentNumber";
             _lock.Release();
         }
     }
+
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateAutohubReturnRequestAsync(
+        ReturnRequestCreate request, int series, int? bplId, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var rr = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturnRequest);
+            try
+            {
+                if (series > 0) rr.Series = series;
+                rr.CardCode = request.CardCode;
+                rr.DocDate = request.DocDate ?? DateTime.Today;
+                rr.DocDueDate = request.DocDate ?? DateTime.Today;
+                if (bplId is > 0)
+                    rr.BPL_IDAssignedToInvoice = bplId.Value;
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    rr.Comments = request.Comments;
+                rr.UserFields.Fields.Item("U_AppRef").Value = request.AppRef;
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0) rr.Lines.Add();
+                    var line = request.Lines[i];
+
+                    // Copy from the AR invoice line — prices and the document chain
+                    // flow from the base (BaseType 13 = oInvoices).
+                    rr.Lines.BaseType  = (int)BoObjectTypes.oInvoices;
+                    rr.Lines.BaseEntry = line.InvoiceDocEntry;
+                    rr.Lines.BaseLine  = line.InvoiceLineNum;
+                    rr.Lines.Quantity  = line.Quantity;
+                    if (!string.IsNullOrWhiteSpace(line.WhsCode))
+                        rr.Lines.WarehouseCode = line.WhsCode;
+                }
+
+                int result = rr.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                rr.GetByKey(docEntry);
+                int docNum = rr.DocNum;
+
+                _logger.LogInformation(
+                    "SAP Return Request created (Autohub app): DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "CardCode={CardCode}, Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, request.CardCode, request.Lines.Count, request.AppRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rr);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<InventoryDocResult> CreateAutohubGoodsReturnAsync(
+        GoodsReturnCreate request, int series, int? bplId, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var ret = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
+            try
+            {
+                if (series > 0) ret.Series = series;
+                ret.CardCode = request.CardCode;
+                ret.DocDate = request.DocDate ?? DateTime.Today;
+                ret.DocDueDate = request.DocDate ?? DateTime.Today;
+                if (bplId is > 0)
+                    ret.BPL_IDAssignedToInvoice = bplId.Value;
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    ret.Comments = request.Comments;
+                ret.UserFields.Fields.Item("U_AppRef").Value = request.AppRef;
+
+                for (int i = 0; i < request.Lines.Count; i++)
+                {
+                    if (i > 0) ret.Lines.Add();
+                    var line = request.Lines[i];
+
+                    // Copy from the Return Request line — SAP decrements/closes the
+                    // request's open quantity (partial returns supported).
+                    ret.Lines.BaseType  = (int)BoObjectTypes.oReturnRequest;
+                    ret.Lines.BaseEntry = line.ReturnRequestDocEntry;
+                    ret.Lines.BaseLine  = line.ReturnRequestLineNum;
+                    ret.Lines.Quantity  = line.Quantity;
+                    if (!string.IsNullOrWhiteSpace(line.WhsCode))
+                        ret.Lines.WarehouseCode = line.WhsCode;
+
+                    if (line.BinAbs.HasValue)
+                    {
+                        ret.Lines.BinAllocations.BinAbsEntry = line.BinAbs.Value;
+                        ret.Lines.BinAllocations.Quantity    = line.Quantity;
+                        ret.Lines.BinAllocations.Add();
+                    }
+                }
+
+                int result = ret.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                ret.GetByKey(docEntry);
+                int docNum = ret.DocNum;
+
+                _logger.LogInformation(
+                    "SAP Goods Return created (Autohub app): DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "CardCode={CardCode}, Lines={Lines}, AppRef={AppRef}",
+                    docEntry, docNum, request.CardCode, request.Lines.Count, request.AppRef);
+
+                return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(ret);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<SapPaymentCancelResponse> CancelIncomingPaymentAsync(int docEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            // Pre-check: idempotent success when already cancelled. 'C' marks the
+            // cancellation document itself; treat both as cancelled.
+            int docNum;
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery($"SELECT \"DocNum\", \"Canceled\" FROM ORCT WHERE \"DocEntry\" = {docEntry}");
+                if (rs.EoF)
+                    throw new InvalidOperationException(
+                        $"Incoming Payment DocEntry={docEntry} not found (ORCT).");
+
+                docNum = Convert.ToInt32(rs.Fields.Item("DocNum").Value);
+                var canceled = rs.Fields.Item("Canceled").Value?.ToString();
+                if (canceled is "Y" or "C")
+                {
+                    _logger.LogInformation(
+                        "Incoming Payment already cancelled: DocEntry={DocEntry}, DocNum={DocNum} — idempotent OK.",
+                        docEntry, docNum);
+                    return new SapPaymentCancelResponse
+                    {
+                        DocEntry = docEntry,
+                        DocNum = docNum,
+                        AlreadyCancelled = true,
+                    };
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+
+            var payment = (Payments)_company.GetBusinessObject(BoObjectTypes.oIncomingPayments);
+            try
+            {
+                if (!payment.GetByKey(docEntry))
+                    throw new InvalidOperationException(
+                        $"Incoming Payment DocEntry={docEntry} not found via DI API.");
+
+                int result = payment.Cancel();
+                if (result != 0)
+                {
+                    // Pass SAP's message through verbatim — deposited/reconciled
+                    // payments are rejected here and the caller needs SAP's reason.
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "Incoming Payment cancelled: DocEntry={DocEntry}, DocNum={DocNum}",
+                    docEntry, docNum);
+
+                return new SapPaymentCancelResponse
+                {
+                    DocEntry = docEntry,
+                    DocNum = docNum,
+                    AlreadyCancelled = false,
+                };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(payment);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 }
 
 /// <summary>

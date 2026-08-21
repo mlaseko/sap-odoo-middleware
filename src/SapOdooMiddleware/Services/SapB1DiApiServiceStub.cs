@@ -222,6 +222,20 @@ internal class SapB1DiApiServiceStub : ISapB1Service
         string itemCode, IReadOnlyDictionary<string, int> binByWhs, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<InventoryDocResult> CreateAutohubReturnRequestAsync(
+        ReturnRequestCreate request, int series, int? bplId, CancellationToken ct) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<InventoryDocResult> CreateAutohubGoodsReturnAsync(
+        GoodsReturnCreate request, int series, int? bplId, CancellationToken ct) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<SapPaymentCancelResponse> CancelIncomingPaymentAsync(int docEntry) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 }
 
 /// <summary>Non-Windows stub for the Autohub-company SAP connection (<see cref="IAutohubSapB1Service"/>).</summary>
