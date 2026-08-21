@@ -2249,22 +2249,39 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         };
     }
 
+    /// <summary>Whether ORCT has the optional U_Odoo_Payment_ID UDF (probed once per connection lifetime).</summary>
+    private bool? _orctHasOdooPayIdColumn;
+
     /// <summary>
-    /// Latest SAP payment (active or cancelled) carrying this external reference in
-    /// CounterRef (standard column, always stamped at creation) or U_Odoo_Payment_ID
-    /// (UDF; name is legacy — it stores any caller's reference). Fails open (null) on
-    /// query errors so a guard glitch never blocks payment creation.
-    /// Caller already holds <see cref="_lock"/>.
+    /// Latest SAP payment (active or cancelled) carrying this external reference.
+    /// Primary match is CounterRef — a standard column, always stamped at creation.
+    /// The legacy U_Odoo_Payment_ID UDF is included only when it exists in this
+    /// company DB (probed once). Fails open (null) on query errors so a guard glitch
+    /// never blocks payment creation. Caller already holds <see cref="_lock"/>.
     /// </summary>
     private (int DocEntry, int DocNum, bool Cancelled)? FindPaymentByExternalRef(string externalRef)
     {
         var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
         try
         {
+            if (_orctHasOdooPayIdColumn is null)
+            {
+                rs.DoQuery(
+                    "SELECT COUNT(*) AS \"Cnt\" FROM sys.columns " +
+                    "WHERE object_id = OBJECT_ID('ORCT') AND name = 'U_Odoo_Payment_ID'");
+                _orctHasOdooPayIdColumn = Convert.ToInt32(rs.Fields.Item("Cnt").Value) > 0;
+                _logger.LogInformation(
+                    "ORCT U_Odoo_Payment_ID column present: {Present}", _orctHasOdooPayIdColumn);
+            }
+
             var escaped = externalRef.Replace("'", "''");
+            var refMatch = _orctHasOdooPayIdColumn == true
+                ? $"(T0.\"CounterRef\" = '{escaped}' OR T0.\"U_Odoo_Payment_ID\" = '{escaped}')"
+                : $"T0.\"CounterRef\" = '{escaped}'";
+
             rs.DoQuery(
                 "SELECT TOP 1 T0.\"DocEntry\", T0.\"DocNum\", T0.\"Canceled\" FROM ORCT T0 " +
-                $"WHERE (T0.\"CounterRef\" = '{escaped}' OR T0.\"U_Odoo_Payment_ID\" = '{escaped}') " +
+                $"WHERE {refMatch} " +
                 "AND T0.\"Canceled\" <> 'C' " +
                 "ORDER BY T0.\"DocEntry\" DESC");
             if (rs.EoF) return null;
