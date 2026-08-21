@@ -399,8 +399,9 @@ public interface ISapB1Service
     /// ORCT.Canceled — an already-cancelled payment returns success idempotently with
     /// <c>AlreadyCancelled = true</c>. SAP's rejection messages (e.g. deposited or
     /// reconciled payments) are passed through verbatim.
-    /// <para>Note: SAP cancellation creates a reversal document (an ORCT row marked
-    /// 'C') by design — that document IS the cancellation's postings.</para>
+    /// <para>Note: payment cancellation flips the payment to Cancelled and posts a
+    /// reversing journal entry — it does NOT create a new payment document. Any new
+    /// ORCT row appearing after a cancel came from a separate creation call.</para>
     /// </summary>
     Task<SapPaymentCancelResponse> CancelIncomingPaymentAsync(int docEntry);
 
