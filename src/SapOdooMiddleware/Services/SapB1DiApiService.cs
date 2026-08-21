@@ -2056,15 +2056,17 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             request.OdooPaymentId,
             request.Lines.Count);
 
-        // ── Duplicate guard on U_Odoo_Payment_ID ──
-        // One Odoo payment record maps to ONE SAP payment lifecycle:
-        //  - an ACTIVE payment already exists       → return it (idempotent re-send);
-        //  - a CANCELLED payment exists              → refuse: re-sending the same Odoo
-        //    payment after a SAP-side cancellation silently re-pays the invoice
-        //    (the 23600/23601 incident). A genuine new collection gets a new Odoo id.
+        // ── Duplicate guard on the caller's external payment reference ──
+        // external_payment_id is the caller's unique reference (the app's AppRef, an
+        // Odoo payment name, …), stamped into ORCT.CounterRef + U_Odoo_Payment_ID.
+        // One external reference maps to ONE SAP payment lifecycle:
+        //  - an ACTIVE payment already exists  → return it (idempotent re-send);
+        //  - a CANCELLED payment exists        → refuse: re-sending the same reference
+        //    after a SAP-side cancellation silently re-pays the invoice
+        //    (the 23600/23601 incident). A genuine new collection gets a new reference.
         if (!string.IsNullOrWhiteSpace(request.ExternalPaymentId))
         {
-            var existing = FindPaymentByOdooPaymentId(request.ExternalPaymentId);
+            var existing = FindPaymentByExternalRef(request.ExternalPaymentId);
             if (existing is { } dup)
             {
                 if (!dup.Cancelled)
@@ -2084,11 +2086,10 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 }
 
                 throw new InvalidOperationException(
-                    $"Incoming Payment for Odoo payment '{request.ExternalPaymentId}' already exists in SAP " +
-                    $"as DocEntry={dup.DocEntry} (DocNum {dup.DocNum}) and was CANCELLED there. Refusing to " +
-                    "re-post the same payment automatically. If the customer actually paid again, create a NEW " +
-                    "Odoo payment; if the cancellation came from SAP/the app, cancel the Odoo payment too " +
-                    "instead of re-syncing it.");
+                    $"An Incoming Payment with external reference '{request.ExternalPaymentId}' already exists " +
+                    $"in SAP as DocEntry={dup.DocEntry} (DocNum {dup.DocNum}) and was CANCELLED there. Refusing " +
+                    "to re-post the same payment automatically. If the customer actually paid again, send a NEW " +
+                    "external_payment_id; if the cancellation was intentional, do not re-send this payment.");
             }
         }
 
@@ -2249,18 +2250,21 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     }
 
     /// <summary>
-    /// Latest SAP payment (active or cancelled) carrying this Odoo payment id in
-    /// U_Odoo_Payment_ID. Fails open (null) on query errors so a guard glitch never
-    /// blocks payment creation. Caller already holds <see cref="_lock"/>.
+    /// Latest SAP payment (active or cancelled) carrying this external reference in
+    /// CounterRef (standard column, always stamped at creation) or U_Odoo_Payment_ID
+    /// (UDF; name is legacy — it stores any caller's reference). Fails open (null) on
+    /// query errors so a guard glitch never blocks payment creation.
+    /// Caller already holds <see cref="_lock"/>.
     /// </summary>
-    private (int DocEntry, int DocNum, bool Cancelled)? FindPaymentByOdooPaymentId(string odooPaymentId)
+    private (int DocEntry, int DocNum, bool Cancelled)? FindPaymentByExternalRef(string externalRef)
     {
         var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
         try
         {
+            var escaped = externalRef.Replace("'", "''");
             rs.DoQuery(
                 "SELECT TOP 1 T0.\"DocEntry\", T0.\"DocNum\", T0.\"Canceled\" FROM ORCT T0 " +
-                $"WHERE T0.\"U_Odoo_Payment_ID\" = '{odooPaymentId.Replace("'", "''")}' " +
+                $"WHERE (T0.\"CounterRef\" = '{escaped}' OR T0.\"U_Odoo_Payment_ID\" = '{escaped}') " +
                 "AND T0.\"Canceled\" <> 'C' " +
                 "ORDER BY T0.\"DocEntry\" DESC");
             if (rs.EoF) return null;
@@ -2273,7 +2277,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         {
             _logger.LogWarning(ex,
                 "Duplicate-payment guard query failed for ExternalPaymentId={ExternalPaymentId} — proceeding with creation.",
-                odooPaymentId);
+                externalRef);
             return null;
         }
         finally
