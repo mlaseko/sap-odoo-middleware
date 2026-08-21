@@ -6485,6 +6485,56 @@ ORDER BY PostingDate, DocumentNumber";
             _lock.Release();
         }
     }
+
+    /// <inheritdoc/>
+    public async Task<List<(int DocEntry, int DocNum, bool Cancelled)>> FindIncomingPaymentsByInvoiceAsync(
+        int invoiceDocEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            // RCT2.DocNum = the payment's ORCT.DocEntry; RCT2.DocEntry = the paid
+            // invoice's OINV.DocEntry (InvType 13 = AR Invoice). Exclude 'C' rows —
+            // those are SAP's own cancellation reversal documents, not payments.
+            var sql =
+                "SELECT P.\"DocEntry\", P.\"DocNum\", P.\"Canceled\" " +
+                "FROM ORCT P " +
+                "JOIN RCT2 A ON A.\"DocNum\" = P.\"DocEntry\" " +
+                $"WHERE A.\"DocEntry\" = {invoiceDocEntry} AND A.\"InvType\" = 13 " +
+                "AND P.\"Canceled\" <> 'C' " +
+                "ORDER BY P.\"DocEntry\" DESC";
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(sql);
+                var list = new List<(int, int, bool)>();
+                while (!rs.EoF)
+                {
+                    list.Add((
+                        Convert.ToInt32(rs.Fields.Item("DocEntry").Value),
+                        Convert.ToInt32(rs.Fields.Item("DocNum").Value),
+                        rs.Fields.Item("Canceled").Value?.ToString() == "Y"));
+                    rs.MoveNext();
+                }
+
+                _logger.LogInformation(
+                    "Payments for invoice DocEntry={Invoice}: {Count} found ({Active} active).",
+                    invoiceDocEntry, list.Count, list.Count(p => !p.Item3));
+                return list;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 }
 
 /// <summary>
