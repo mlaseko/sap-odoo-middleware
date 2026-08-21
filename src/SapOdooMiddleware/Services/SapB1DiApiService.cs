@@ -2056,6 +2056,43 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             request.OdooPaymentId,
             request.Lines.Count);
 
+        // ── Duplicate guard on the caller's external payment reference ──
+        // external_payment_id is the caller's unique reference (the app's AppRef, an
+        // Odoo payment name, …), stamped into ORCT.CounterRef + U_Odoo_Payment_ID.
+        // One external reference maps to ONE SAP payment lifecycle:
+        //  - an ACTIVE payment already exists  → return it (idempotent re-send);
+        //  - a CANCELLED payment exists        → refuse: re-sending the same reference
+        //    after a SAP-side cancellation silently re-pays the invoice
+        //    (the 23600/23601 incident). A genuine new collection gets a new reference.
+        if (!string.IsNullOrWhiteSpace(request.ExternalPaymentId))
+        {
+            var existing = FindPaymentByExternalRef(request.ExternalPaymentId);
+            if (existing is { } dup)
+            {
+                if (!dup.Cancelled)
+                {
+                    _logger.LogWarning(
+                        "Incoming Payment for ExternalPaymentId={ExternalPaymentId} already exists " +
+                        "(DocEntry={DocEntry}, DocNum={DocNum}) — returning existing instead of double-posting.",
+                        request.ExternalPaymentId, dup.DocEntry, dup.DocNum);
+                    return new SapIncomingPaymentResponse
+                    {
+                        DocEntry = dup.DocEntry,
+                        DocNum = dup.DocNum,
+                        ExternalPaymentId = request.ExternalPaymentId,
+                        OdooPaymentId = request.OdooPaymentId,
+                        TotalApplied = request.Lines.Sum(l => l.AppliedAmount)
+                    };
+                }
+
+                throw new InvalidOperationException(
+                    $"An Incoming Payment with external reference '{request.ExternalPaymentId}' already exists " +
+                    $"in SAP as DocEntry={dup.DocEntry} (DocNum {dup.DocNum}) and was CANCELLED there. Refusing " +
+                    "to re-post the same payment automatically. If the customer actually paid again, send a NEW " +
+                    "external_payment_id; if the cancellation was intentional, do not re-send this payment.");
+            }
+        }
+
         var payment = (Payments)_company!.GetBusinessObject(BoObjectTypes.oIncomingPayments);
 
         // Header fields
@@ -2210,6 +2247,60 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             OdooPaymentId = request.OdooPaymentId,
             TotalApplied = request.Lines.Sum(l => l.AppliedAmount)
         };
+    }
+
+    /// <summary>Whether ORCT has the optional U_Odoo_Payment_ID UDF (probed once per connection lifetime).</summary>
+    private bool? _orctHasOdooPayIdColumn;
+
+    /// <summary>
+    /// Latest SAP payment (active or cancelled) carrying this external reference.
+    /// Primary match is CounterRef — a standard column, always stamped at creation.
+    /// The legacy U_Odoo_Payment_ID UDF is included only when it exists in this
+    /// company DB (probed once). Fails open (null) on query errors so a guard glitch
+    /// never blocks payment creation. Caller already holds <see cref="_lock"/>.
+    /// </summary>
+    private (int DocEntry, int DocNum, bool Cancelled)? FindPaymentByExternalRef(string externalRef)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            if (_orctHasOdooPayIdColumn is null)
+            {
+                rs.DoQuery(
+                    "SELECT COUNT(*) AS \"Cnt\" FROM sys.columns " +
+                    "WHERE object_id = OBJECT_ID('ORCT') AND name = 'U_Odoo_Payment_ID'");
+                _orctHasOdooPayIdColumn = Convert.ToInt32(rs.Fields.Item("Cnt").Value) > 0;
+                _logger.LogInformation(
+                    "ORCT U_Odoo_Payment_ID column present: {Present}", _orctHasOdooPayIdColumn);
+            }
+
+            var escaped = externalRef.Replace("'", "''");
+            var refMatch = _orctHasOdooPayIdColumn == true
+                ? $"(T0.\"CounterRef\" = '{escaped}' OR T0.\"U_Odoo_Payment_ID\" = '{escaped}')"
+                : $"T0.\"CounterRef\" = '{escaped}'";
+
+            rs.DoQuery(
+                "SELECT TOP 1 T0.\"DocEntry\", T0.\"DocNum\", T0.\"Canceled\" FROM ORCT T0 " +
+                $"WHERE {refMatch} " +
+                "AND T0.\"Canceled\" <> 'C' " +
+                "ORDER BY T0.\"DocEntry\" DESC");
+            if (rs.EoF) return null;
+            return (
+                Convert.ToInt32(rs.Fields.Item("DocEntry").Value),
+                Convert.ToInt32(rs.Fields.Item("DocNum").Value),
+                rs.Fields.Item("Canceled").Value?.ToString() == "Y");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Duplicate-payment guard query failed for ExternalPaymentId={ExternalPaymentId} — proceeding with creation.",
+                externalRef);
+            return null;
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
     }
 
     /// <summary>
@@ -6478,6 +6569,56 @@ ORDER BY PostingDate, DocumentNumber";
             finally
             {
                 Marshal.ReleaseComObject(payment);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<List<(int DocEntry, int DocNum, bool Cancelled)>> FindIncomingPaymentsByInvoiceAsync(
+        int invoiceDocEntry)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            // RCT2.DocNum = the payment's ORCT.DocEntry; RCT2.DocEntry = the paid
+            // invoice's OINV.DocEntry (InvType 13 = AR Invoice). Exclude 'C' rows —
+            // those are SAP's own cancellation reversal documents, not payments.
+            var sql =
+                "SELECT P.\"DocEntry\", P.\"DocNum\", P.\"Canceled\" " +
+                "FROM ORCT P " +
+                "JOIN RCT2 A ON A.\"DocNum\" = P.\"DocEntry\" " +
+                $"WHERE A.\"DocEntry\" = {invoiceDocEntry} AND A.\"InvType\" = 13 " +
+                "AND P.\"Canceled\" <> 'C' " +
+                "ORDER BY P.\"DocEntry\" DESC";
+
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery(sql);
+                var list = new List<(int, int, bool)>();
+                while (!rs.EoF)
+                {
+                    list.Add((
+                        Convert.ToInt32(rs.Fields.Item("DocEntry").Value),
+                        Convert.ToInt32(rs.Fields.Item("DocNum").Value),
+                        rs.Fields.Item("Canceled").Value?.ToString() == "Y"));
+                    rs.MoveNext();
+                }
+
+                _logger.LogInformation(
+                    "Payments for invoice DocEntry={Invoice}: {Count} found ({Active} active).",
+                    invoiceDocEntry, list.Count, list.Count(p => !p.Item3));
+                return list;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
             }
         }
         finally

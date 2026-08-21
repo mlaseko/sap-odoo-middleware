@@ -63,6 +63,79 @@ public class IncomingPaymentsController : ControllerBase
     }
 
     /// <summary>
+    /// POST /api/payments/cancel-by-invoice/{invoiceDocEntry}
+    /// Cancels the Incoming Payment that was applied to the given AR Invoice (OINV
+    /// DocEntry). The middleware resolves the payment via the RCT2 allocation lines
+    /// and cancels THAT payment — no new payment is posted by us; SAP's own
+    /// cancellation document carries the reversal postings.
+    /// <list type="bullet">
+    ///   <item>No payment found for the invoice → 404.</item>
+    ///   <item>Payment already cancelled → 200 with <c>already_cancelled = true</c> (idempotent).</item>
+    ///   <item>Multiple active payments on the invoice → 409 listing them; cancel the
+    ///   intended one explicitly via <c>POST /api/payments/{docEntry}/cancel</c>.</item>
+    /// </list>
+    /// </summary>
+    [HttpPost("/api/payments/cancel-by-invoice/{invoiceDocEntry:int}")]
+    [ProducesResponseType(typeof(ApiResponse<SapPaymentCancelResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<SapPaymentCancelResponse>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<SapPaymentCancelResponse>), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ApiResponse<SapPaymentCancelResponse>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CancelByInvoice(int invoiceDocEntry)
+    {
+        _logger.LogInformation(
+            "Payment cancellation by invoice requested: InvoiceDocEntry={InvoiceDocEntry}", invoiceDocEntry);
+
+        try
+        {
+            var payments = await _sapService.FindIncomingPaymentsByInvoiceAsync(invoiceDocEntry);
+            if (payments.Count == 0)
+                return NotFound(ApiResponse<SapPaymentCancelResponse>.Fail(
+                    $"No incoming payment found for invoice DocEntry={invoiceDocEntry} (RCT2)."));
+
+            var active = payments.Where(p => !p.Cancelled).ToList();
+
+            // Everything already cancelled → idempotent success.
+            if (active.Count == 0)
+            {
+                var latest = payments[0];
+                return Ok(ApiResponse<SapPaymentCancelResponse>.Ok(
+                    new SapPaymentCancelResponse
+                    {
+                        DocEntry = latest.DocEntry,
+                        DocNum = latest.DocNum,
+                        AlreadyCancelled = true,
+                    },
+                    new Dictionary<string, object> { ["invoice_doc_entry"] = invoiceDocEntry }));
+            }
+
+            // Ambiguous — never guess which payment to reverse.
+            if (active.Count > 1)
+            {
+                var listing = string.Join(", ", active.Select(p => $"DocEntry={p.DocEntry} (DocNum {p.DocNum})"));
+                return Conflict(ApiResponse<SapPaymentCancelResponse>.Fail(
+                    $"Invoice DocEntry={invoiceDocEntry} has {active.Count} active incoming payments: {listing}. " +
+                    "Cancel the intended one explicitly via POST /api/payments/{docEntry}/cancel."));
+            }
+
+            var result = await _sapService.CancelIncomingPaymentAsync(active[0].DocEntry);
+            return Ok(ApiResponse<SapPaymentCancelResponse>.Ok(
+                result,
+                new Dictionary<string, object> { ["invoice_doc_entry"] = invoiceDocEntry }));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found"))
+        {
+            return NotFound(ApiResponse<SapPaymentCancelResponse>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            // SAP's own rejection (e.g. deposited/reconciled payment) flows through as-is.
+            _logger.LogError(ex,
+                "Payment cancellation by invoice failed: InvoiceDocEntry={InvoiceDocEntry}", invoiceDocEntry);
+            return StatusCode(500, ApiResponse<SapPaymentCancelResponse>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/incoming-payments
     /// Creates an Incoming Payment (ORCT) in SAP B1 and, when <c>odoo_payment_id</c> is provided,
     /// writes the SAP DocEntry and DocNum back to the Odoo payment record.
