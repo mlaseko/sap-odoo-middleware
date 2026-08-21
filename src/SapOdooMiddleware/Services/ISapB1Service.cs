@@ -412,4 +412,12 @@ public interface ISapB1Service
     /// </summary>
     Task<List<(int DocEntry, int DocNum, bool Cancelled)>> FindIncomingPaymentsByInvoiceAsync(
         int invoiceDocEntry);
+
+    /// <summary>
+    /// Cancels a Return Request (ORRR) via <c>Documents.Cancel()</c>. Already-cancelled
+    /// documents return success idempotently with <c>AlreadyCancelled = true</c>.
+    /// SAP creates the cancellation document itself; a closed request (already fully
+    /// drawn to a Goods Return) is rejected by SAP with its own message.
+    /// </summary>
+    Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, CancellationToken ct);
 }

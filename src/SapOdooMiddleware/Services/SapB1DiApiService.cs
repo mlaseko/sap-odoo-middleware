@@ -2108,8 +2108,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         if (!string.IsNullOrEmpty(request.JournalRemarks))
             payment.JournalRemarks = request.JournalRemarks;
 
-        // UDF fields — store Odoo identifiers on the SAP payment for traceability
+        // UDF fields — store the caller's reference on the SAP payment for traceability.
+        // Both are best-effort (skipped when the UDF doesn't exist in this company DB);
+        // CounterRef above is the always-present canonical copy.
         TrySetUserField(payment.UserFields, "U_Odoo_Payment_ID", request.ExternalPaymentId, "Payment header");
+        TrySetUserField(payment.UserFields, "U_ClientRef", request.ExternalPaymentId, "Payment header");
 
         // Document trail: link payment back to the originating SO and invoice
         if (!string.IsNullOrEmpty(request.UOdooSoId))
@@ -6569,6 +6572,69 @@ ORDER BY PostingDate, DocumentNumber";
             finally
             {
                 Marshal.ReleaseComObject(payment);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            // Pre-check via SQL: not found → clear error; already cancelled → idempotent OK.
+            int docNum;
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery($"SELECT \"DocNum\", \"CANCELED\" FROM ORRR WHERE \"DocEntry\" = {docEntry}");
+                if (rs.EoF)
+                    throw new InvalidOperationException(
+                        $"Return Request DocEntry={docEntry} not found (ORRR).");
+
+                docNum = Convert.ToInt32(rs.Fields.Item("DocNum").Value);
+                var canceled = rs.Fields.Item("CANCELED").Value?.ToString();
+                if (canceled is "Y" or "C")
+                {
+                    _logger.LogInformation(
+                        "Return Request already cancelled: DocEntry={DocEntry}, DocNum={DocNum} — idempotent OK.",
+                        docEntry, docNum);
+                    return new DocCancelResult { DocEntry = docEntry, DocNum = docNum, AlreadyCancelled = true };
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+
+            var rr = (Documents)_company.GetBusinessObject(BoObjectTypes.oReturnRequest);
+            try
+            {
+                if (!rr.GetByKey(docEntry))
+                    throw new InvalidOperationException(
+                        $"Return Request DocEntry={docEntry} not found via DI API.");
+
+                int result = rr.Cancel();
+                if (result != 0)
+                {
+                    // e.g. request already fully drawn to a Goods Return — SAP's message flows through.
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "Return Request cancelled: DocEntry={DocEntry}, DocNum={DocNum}", docEntry, docNum);
+                return new DocCancelResult { DocEntry = docEntry, DocNum = docNum, AlreadyCancelled = false };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rr);
             }
         }
         finally

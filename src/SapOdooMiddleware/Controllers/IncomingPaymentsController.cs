@@ -136,11 +136,15 @@ public class IncomingPaymentsController : ControllerBase
     }
 
     /// <summary>
-    /// POST /api/incoming-payments
+    /// POST /api/incoming-payments  (alias: POST /api/payments/incoming)
     /// Creates an Incoming Payment (ORCT) in SAP B1 and, when <c>odoo_payment_id</c> is provided,
     /// writes the SAP DocEntry and DocNum back to the Odoo payment record.
+    /// <c>external_payment_id</c> is the caller's unique reference (≤ 25 chars) and the
+    /// idempotency key — stamped into ORCT.CounterRef (+ U_ClientRef / U_Odoo_Payment_ID
+    /// UDFs where those exist).
     /// </summary>
     [HttpPost]
+    [HttpPost("/api/payments/incoming")]
     public async Task<IActionResult> Create([FromBody] SapIncomingPaymentRequest request)
     {
         _logger.LogInformation(
