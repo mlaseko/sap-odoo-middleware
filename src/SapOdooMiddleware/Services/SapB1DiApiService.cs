@@ -2108,8 +2108,11 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         if (!string.IsNullOrEmpty(request.JournalRemarks))
             payment.JournalRemarks = request.JournalRemarks;
 
-        // UDF fields — store Odoo identifiers on the SAP payment for traceability
+        // UDF fields — store the caller's reference on the SAP payment for traceability.
+        // Both are best-effort (skipped when the UDF doesn't exist in this company DB);
+        // CounterRef above is the always-present canonical copy.
         TrySetUserField(payment.UserFields, "U_Odoo_Payment_ID", request.ExternalPaymentId, "Payment header");
+        TrySetUserField(payment.UserFields, "U_ClientRef", request.ExternalPaymentId, "Payment header");
 
         // Document trail: link payment back to the originating SO and invoice
         if (!string.IsNullOrEmpty(request.UOdooSoId))
