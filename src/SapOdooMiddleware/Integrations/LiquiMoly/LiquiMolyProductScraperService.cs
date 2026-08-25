@@ -896,8 +896,9 @@ public class LiquiMolyProductScraperService
         if (node == null)
             return (null, null);
 
-        var lines = HtmlEntity.DeEntitize(node.InnerText)
-            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+        // Split on block-element boundaries, not just source newlines — minified HTML
+        // collapses the whole tab into one line and the heading never stands alone.
+        var lines = SplitIntoVisualLines(node)
             .Select(x => x.Trim())
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Where(x => !IsNoiseLine(x))
@@ -906,11 +907,15 @@ public class LiquiMolyProductScraperService
         if (lines.Count == 0)
             return (null, null);
 
-        var applicationIndex = lines.FindIndex(x =>
-            x.Equals("Application", StringComparison.OrdinalIgnoreCase));
+        var applicationIndex = lines.FindIndex(x => ApplicationHeadingRegex.IsMatch(x));
 
         if (applicationIndex < 0)
-            return (string.Join(Environment.NewLine + Environment.NewLine, lines), null);
+        {
+            // Heading not inside the description container — some layouts render the
+            // Application section as its own accordion/tab elsewhere on the page.
+            var fallback = ExtractApplicationSectionFallback(doc);
+            return (string.Join(Environment.NewLine + Environment.NewLine, lines), fallback);
+        }
 
         var descriptionLines = lines
             .Take(applicationIndex)
@@ -930,6 +935,101 @@ public class LiquiMolyProductScraperService
             : string.Join(" ", applicationLines);
 
         return (description, application);
+    }
+
+    /// <summary>
+    /// "Application" heading in its known variants: "Application", "Application:",
+    /// "Areas of application", "Application notes".
+    /// </summary>
+    private static readonly Regex ApplicationHeadingRegex = new(
+        @"^(areas?\s+of\s+)?application(\s+notes?)?\s*:?\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Text of a node split on VISUAL line breaks: closing block tags and &lt;br&gt;
+    /// become newlines before the text is extracted, so minified single-line HTML
+    /// still yields one line per paragraph/list item/heading.
+    /// </summary>
+    private static IEnumerable<string> SplitIntoVisualLines(HtmlNode node)
+    {
+        var html = Regex.Replace(
+            node.InnerHtml,
+            @"<\s*(?:br\s*/?|/p|/li|/div|/h[1-6]|/tr|/section)\s*>",
+            "\n",
+            RegexOptions.IgnoreCase);
+        var tmp = new HtmlDocument();
+        tmp.LoadHtml(html);
+        return HtmlEntity.DeEntitize(tmp.DocumentNode.InnerText)
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    /// <summary>
+    /// Page-wide fallback: find an element whose OWN text is an Application heading
+    /// (accordion/tab title) and collect the text that follows it — first its
+    /// siblings, then its parent's siblings (accordion title wrapped in its own div).
+    /// </summary>
+    private static string? ExtractApplicationSectionFallback(HtmlDocument doc)
+    {
+        var candidates = doc.DocumentNode.SelectNodes(
+            "//h1|//h2|//h3|//h4|//h5|//strong|//b|//span|//button|//a|//div");
+        if (candidates == null)
+            return null;
+
+        foreach (var h in candidates)
+        {
+            // Own text only (direct text children) — a container div's InnerText would
+            // match far too broadly.
+            var own = NormalizeWhitespace(HtmlEntity.DeEntitize(string.Concat(
+                h.ChildNodes
+                    .Where(c => c.NodeType == HtmlNodeType.Text)
+                    .Select(c => c.InnerText))));
+            if (own.Length == 0 || !ApplicationHeadingRegex.IsMatch(own))
+                continue;
+
+            var text = CollectFollowingText(h)
+                ?? (h.ParentNode is { } parent ? CollectFollowingText(parent) : null);
+            if (!string.IsNullOrWhiteSpace(text))
+                return text;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Concatenates the text of the siblings after <paramref name="start"/>, stopping
+    /// at the next heading/section boundary. Capped defensively — a heading directly
+    /// inside a page-level container could otherwise swallow unrelated content.
+    /// </summary>
+    private static string? CollectFollowingText(HtmlNode start)
+    {
+        const int maxChars = 4000;
+        var parts = new List<string>();
+        int total = 0;
+
+        for (var n = start.NextSibling; n != null; n = n.NextSibling)
+        {
+            if (n.NodeType != HtmlNodeType.Element && n.NodeType != HtmlNodeType.Text)
+                continue;
+
+            var stop = false;
+            foreach (var raw in SplitIntoVisualLines(n))
+            {
+                var t = NormalizeWhitespace(raw);
+                if (string.IsNullOrWhiteSpace(t) || IsNoiseLine(t))
+                    continue;
+                if (ApplicationHeadingRegex.IsMatch(t) || IsDescriptionSectionStopLine(t))
+                {
+                    stop = true;
+                    break;
+                }
+                parts.Add(t);
+                total += t.Length;
+                if (total > maxChars) { stop = true; break; }
+            }
+            if (stop || Regex.IsMatch(n.Name, @"^h[1-6]$", RegexOptions.IgnoreCase))
+                break;
+        }
+
+        return parts.Count == 0 ? null : string.Join(" ", parts);
     }
 
     /// <summary>
