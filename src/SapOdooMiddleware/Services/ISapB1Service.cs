@@ -420,4 +420,28 @@ public interface ISapB1Service
     /// drawn to a Goods Return) is rejected by SAP with its own message.
     /// </summary>
     Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, CancellationToken ct);
+
+    /// <summary>
+    /// Re-bins RELEASED pick list lines (OPKL/PKL1/PKL2) via
+    /// <c>PickLists.UpdateReleasedAllocation</c>: each line's bin allocation rows are
+    /// replaced by the plan's set (existing rows zeroed, requested rows set/added).
+    /// Quantities and statuses are untouched. When <paramref name="note"/> is set it is
+    /// the complete replacement OPKL.Remarks value (existing remarks + appended audit
+    /// note, pre-truncated by the caller) written afterwards; a note failure is
+    /// reported (false), never thrown, because the allocation change has already
+    /// committed.
+    /// </summary>
+    Task<bool> UpdatePickListAllocationsAsync(
+        int absEntry, List<PickListLineWrite> lines, string? note, CancellationToken ct);
+
+    /// <summary>
+    /// Picks pick-list lines via <c>PickLists.Update</c>: sets the ABSOLUTE
+    /// PickedQuantity per planned line (below the releasable total leaves the line
+    /// Partially Picked) and replaces the line's bin allocation rows with the plan's
+    /// breakdown. When <paramref name="note"/> is set, it is the complete replacement
+    /// OPKL.Remarks value written in the same Update. Returns whether the note was
+    /// written.
+    /// </summary>
+    Task<bool> PickPickListLinesAsync(
+        int absEntry, List<PickListLineWrite> lines, string? note, CancellationToken ct);
 }
