@@ -50,6 +50,12 @@ public interface IAutohubInventorySqlService
     Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
         string? fromWhs, string? toWhs, CancellationToken ct);
 
+    /// <summary>
+    /// One transfer request with every line (open and closed) for the update/close
+    /// endpoints, or null when the DocEntry does not exist.
+    /// </summary>
+    Task<TransferRequestSnapshot?> GetTransferRequestSnapshotAsync(int docEntry, CancellationToken ct);
+
     /// <summary>Open purchase order lines awaiting receipt (for the GRPO receiving screen), oldest first.</summary>
     Task<List<OpenPurchaseOrderLine>> GetOpenPurchaseOrderLinesAsync(
         string? cardCode, string? itemCode, CancellationToken ct);
@@ -432,6 +438,55 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             });
         }
         return list;
+    }
+
+    public async Task<TransferRequestSnapshot?> GetTransferRequestSnapshotAsync(
+        int docEntry, CancellationToken ct)
+    {
+        // Every line, open or closed — the planner needs closed lines to reject
+        // updates against them with a clear message. OWTQ.Filler is the
+        // from-warehouse column (legacy SAP naming).
+        const string sql = """
+            SELECT T0.DocNum, T0.DocDate, T0.Filler AS FromWhs, T0.ToWhsCode AS ToWhs,
+                   T0.DocStatus, ISNULL(T0.CANCELED, 'N') AS Canceled, T0.Comments,
+                   T1.LineNum, T1.ItemCode, I.ItemName,
+                   T1.Quantity, ISNULL(T1.OpenQty, 0) AS OpenQty, T1.LineStatus
+            FROM OWTQ T0
+            JOIN WTQ1 T1 ON T1.DocEntry = T0.DocEntry
+            LEFT JOIN OITM I ON I.ItemCode = T1.ItemCode
+            WHERE T0.DocEntry = @docEntry
+            ORDER BY T1.LineNum;
+            """;
+
+        TransferRequestSnapshot? snapshot = null;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@docEntry", System.Data.SqlDbType.Int).Value = docEntry;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            snapshot ??= new TransferRequestSnapshot
+            {
+                DocEntry = docEntry,
+                DocNum = reader.GetInt32(0),
+                DocDate = reader.GetDateTime(1).ToString("yyyy-MM-dd"),
+                FromWhs = reader.IsDBNull(2) ? "" : reader.GetString(2),
+                ToWhs = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                DocStatus = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                Canceled = reader.IsDBNull(5) ? "N" : reader.GetString(5),
+                Comments = reader.IsDBNull(6) ? null : reader.GetString(6),
+            };
+            snapshot.Lines.Add(new TransferRequestSnapshotLine
+            {
+                LineNum = reader.GetInt32(7),
+                ItemCode = reader.GetString(8),
+                ItemName = reader.IsDBNull(9) ? null : reader.GetString(9),
+                Quantity = (double)reader.GetDecimal(10),
+                OpenQty = (double)reader.GetDecimal(11),
+                LineStatus = reader.IsDBNull(12) ? "" : reader.GetString(12),
+            });
+        }
+        return snapshot;
     }
 
     // ── Branch (Business Place) resolution ───────────────────────────

@@ -1,5 +1,6 @@
 using SapOdooMiddleware.Models.Inventory;
 using SapOdooMiddleware.Models.Sap;
+using SapOdooMiddleware.Services.Autohub;
 
 namespace SapOdooMiddleware.Services;
 
@@ -174,6 +175,15 @@ internal class SapB1DiApiServiceStub : ISapB1Service
 
     public Task<InventoryDocResult> CreateInventoryTransferRequestAsync(
         TransferRequestCreate request, int series, CancellationToken ct) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task UpdateInventoryTransferRequestAsync(
+        int docEntry, TransferRequestUpdatePlan plan, CancellationToken ct) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task CloseInventoryTransferRequestAsync(int docEntry, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
