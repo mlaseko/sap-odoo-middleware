@@ -6692,6 +6692,197 @@ ORDER BY PostingDate, DocumentNumber";
             _lock.Release();
         }
     }
+
+    // ── Pick list picking operations (OPKL) ──────────────────────────
+
+    /// <inheritdoc/>
+    public async Task<bool> UpdatePickListAllocationsAsync(
+        int absEntry, List<PickListLineWrite> lines, string? note, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+            try
+            {
+                if (!pickList.GetByKey(absEntry))
+                    throw new InvalidOperationException($"Pick list {absEntry} was not found in SAP.");
+
+                ApplyPickListLineWrites(pickList, absEntry, lines, applyPickedQty: false);
+
+                int rc = pickList.UpdateReleasedAllocation();
+                if (rc != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP pick list {AbsEntry}: released allocations updated on {Lines} line(s).",
+                    absEntry, lines.Count);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(pickList);
+            }
+
+            // The allocation change above has already committed; a failure writing the
+            // audit note must be reported to the caller, never thrown as a failure of
+            // the whole operation.
+            return note is null || TrySetPickListRemarks(absEntry, note);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<bool> PickPickListLinesAsync(
+        int absEntry, List<PickListLineWrite> lines, string? note, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+            try
+            {
+                if (!pickList.GetByKey(absEntry))
+                    throw new InvalidOperationException($"Pick list {absEntry} was not found in SAP.");
+
+                ApplyPickListLineWrites(pickList, absEntry, lines, applyPickedQty: true);
+                if (note is not null) pickList.Remarks = note;
+
+                int rc = pickList.Update();
+                if (rc != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP pick list {AbsEntry}: picked quantities updated on {Lines} line(s).",
+                    absEntry, lines.Count);
+                return true;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(pickList);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Applies planned line writes onto a loaded PickLists object: optional absolute
+    /// PickedQuantity plus a full replacement of the line's bin allocation rows
+    /// (existing rows not in the plan are zeroed so SAP drops them; missing bins are
+    /// added, reusing the initial empty row when present).
+    /// </summary>
+    private static void ApplyPickListLineWrites(
+        PickLists pickList, int absEntry, List<PickListLineWrite> lines, bool applyPickedQty)
+    {
+        var writesByPickEntry = lines.ToDictionary(line => line.PickEntry);
+        var applied = new HashSet<int>();
+        for (int i = 0; i < pickList.Lines.Count; i++)
+        {
+            pickList.Lines.SetCurrentLine(i);
+            if (!writesByPickEntry.TryGetValue(pickList.Lines.LineNumber, out var write)) continue;
+            applied.Add(write.PickEntry);
+
+            if (applyPickedQty && write.PickedQty.HasValue)
+                pickList.Lines.PickedQuantity = write.PickedQty.Value;
+
+            if (write.Allocations.Count == 0) continue;   // non-bin warehouse line
+
+            var allocations = pickList.Lines.BinAllocations;
+            var requestedByBin = write.Allocations.ToDictionary(a => a.BinAbs, a => a.Quantity);
+            var satisfied = new HashSet<int>();
+            int emptyRow = -1;
+            for (int j = 0; j < allocations.Count; j++)
+            {
+                allocations.SetCurrentLine(j);
+                if (allocations.BinAbsEntry <= 0)
+                {
+                    if (emptyRow < 0) emptyRow = j;   // fresh collection template row
+                    continue;
+                }
+                if (requestedByBin.TryGetValue(allocations.BinAbsEntry, out var quantity))
+                {
+                    allocations.Quantity = quantity;
+                    satisfied.Add(allocations.BinAbsEntry);
+                }
+                else
+                {
+                    allocations.Quantity = 0;   // dropped from the new breakdown
+                }
+            }
+            foreach (var allocation in write.Allocations)
+            {
+                if (satisfied.Contains(allocation.BinAbs)) continue;
+                if (emptyRow >= 0)
+                {
+                    allocations.SetCurrentLine(emptyRow);
+                    emptyRow = -1;
+                }
+                else
+                {
+                    allocations.Add();
+                    allocations.SetCurrentLine(allocations.Count - 1);
+                }
+                allocations.BinAbsEntry = allocation.BinAbs;
+                allocations.Quantity = allocation.Quantity;
+            }
+        }
+
+        if (applied.Count != lines.Count)
+        {
+            var missing = string.Join(", ",
+                lines.Select(line => line.PickEntry).Where(entry => !applied.Contains(entry)));
+            throw new InvalidOperationException(
+                $"Pick list {absEntry}: line(s) {missing} were not found in SAP — refresh and retry.");
+        }
+    }
+
+    /// <summary>Best-effort write of the full Remarks value; failures are logged and reported, not thrown.</summary>
+    private bool TrySetPickListRemarks(int absEntry, string remarks)
+    {
+        try
+        {
+            var pickList = (PickLists)_company!.GetBusinessObject(BoObjectTypes.oPickLists);
+            try
+            {
+                if (!pickList.GetByKey(absEntry)) return false;
+                pickList.Remarks = remarks;
+                int rc = pickList.Update();
+                if (rc != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    _logger.LogWarning(
+                        "Pick list {AbsEntry}: audit note not written (SAP {Code}: {Message}).",
+                        absEntry, errCode, errMsg);
+                    return false;
+                }
+                return true;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(pickList);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Pick list {AbsEntry}: audit note not written.", absEntry);
+            return false;
+        }
+    }
 }
 
 /// <summary>

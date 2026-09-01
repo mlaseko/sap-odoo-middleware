@@ -116,6 +116,14 @@ public interface IAutohubInventorySqlService
     /// Ordered by ItemCode so a re-run processes items deterministically.
     /// </summary>
     Task<List<DefaultBinSeedRow>> GetDefaultBinSeedRowsAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Current state of one pick list (OPKL/PKL1/PKL2) for validating and answering the
+    /// picking write endpoints: header status, sales-order lines (item + warehouse from
+    /// RDR1), released/picked quantities, and per-bin allocations. Null when the pick
+    /// list does not exist.
+    /// </summary>
+    Task<PickListSnapshot?> GetPickListSnapshotAsync(int absEntry, CancellationToken ct);
 }
 
 /// <summary>
@@ -960,6 +968,97 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             });
         }
         return list;
+    }
+
+    // ── Pick lists (picking operations) ──────────────────────────────
+
+    public async Task<PickListSnapshot?> GetPickListSnapshotAsync(int absEntry, CancellationToken ct)
+    {
+        const string headerSql = """
+            SELECT P.[Status], P.[Canceled], ISNULL(P.[Remarks], '')
+            FROM [dbo].[OPKL] P
+            WHERE P.[AbsEntry] = @abs;
+            """;
+        // Item and warehouse live on the base sales-order line (RDR1); PKL1 only
+        // carries the reference. BaseObject 17 = sales order.
+        const string linesSql = """
+            SELECT L.[PickEntry], L.[OrderEntry], L.[OrderLine],
+                   ISNULL(L.[RelQtty], 0), ISNULL(L.[PickQtty], 0), L.[PickStatus],
+                   R.[ItemCode], R.[WhsCode], R.[Dscription]
+            FROM [dbo].[PKL1] L
+            JOIN [dbo].[RDR1] R
+              ON R.[DocEntry] = L.[OrderEntry] AND R.[LineNum] = L.[OrderLine]
+            WHERE L.[AbsEntry] = @abs AND L.[BaseObject] = 17
+            ORDER BY L.[PickEntry];
+            """;
+        // PKL2.BinAbs and the quantity columns are nullable in SAP's schema:
+        // the inner join drops bin-less rows (non-bin warehouses), and ISNULL
+        // keeps the readers safe on NULL quantities.
+        const string allocationsSql = """
+            SELECT A.[PickEntry], A.[BinAbs], B.[BinCode],
+                   ISNULL(A.[RelQtty], 0), ISNULL(A.[PickQtty], 0)
+            FROM [dbo].[PKL2] A
+            JOIN [dbo].[OBIN] B ON B.[AbsEntry] = A.[BinAbs]
+            WHERE A.[AbsEntry] = @abs
+            ORDER BY A.[PickEntry], B.[BinCode];
+            """;
+
+        await using var conn = await OpenAsync(ct);
+
+        var snapshot = new PickListSnapshot { AbsEntry = absEntry };
+        await using (var cmd = new SqlCommand(headerSql, conn))
+        {
+            cmd.Parameters.AddWithValue("@abs", absEntry);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+            snapshot.Status = reader.IsDBNull(0) ? "" : reader.GetString(0);
+            snapshot.Canceled = !reader.IsDBNull(1) && reader.GetString(1) == "Y";
+            snapshot.Remarks = reader.GetString(2);
+        }
+
+        var linesByPickEntry = new Dictionary<int, PickListLineSnapshot>();
+        await using (var cmd = new SqlCommand(linesSql, conn))
+        {
+            cmd.Parameters.AddWithValue("@abs", absEntry);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var line = new PickListLineSnapshot
+                {
+                    PickEntry = reader.GetInt32(0),
+                    OrderEntry = reader.GetInt32(1),
+                    OrderLine = reader.GetInt32(2),
+                    ReleasedQty = (double)reader.GetDecimal(3),
+                    PickedQty = (double)reader.GetDecimal(4),
+                    PickStatus = reader.IsDBNull(5) ? "" : reader.GetString(5),
+                    ItemCode = reader.IsDBNull(6) ? "" : reader.GetString(6),
+                    WhsCode = reader.IsDBNull(7) ? "" : reader.GetString(7),
+                    Description = reader.IsDBNull(8) ? null : reader.GetString(8),
+                };
+                snapshot.Lines.Add(line);
+                linesByPickEntry[line.PickEntry] = line;
+            }
+        }
+
+        await using (var cmd = new SqlCommand(allocationsSql, conn))
+        {
+            cmd.Parameters.AddWithValue("@abs", absEntry);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var pickEntry = reader.GetInt32(0);
+                if (!linesByPickEntry.TryGetValue(pickEntry, out var line)) continue;
+                line.Allocations.Add(new PickListBinSnapshot
+                {
+                    BinAbs = reader.GetInt32(1),
+                    BinCode = reader.GetString(2),
+                    ReleasedQty = (double)reader.GetDecimal(3),
+                    PickedQty = (double)reader.GetDecimal(4),
+                });
+            }
+        }
+
+        return snapshot;
     }
 
     // ── Idempotency ──────────────────────────────────────────────────

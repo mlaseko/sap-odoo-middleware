@@ -1538,6 +1538,165 @@ public class AutohubInventoryController : ControllerBase
         job.Failures,
     };
 
+    // ── Pick list picking operations ─────────────────────────────────
+
+    /// <summary>
+    /// PATCH /api/autohub/inv/pick-lists/{absEntry}/allocations
+    /// Re-bins RELEASED pick-list lines before picking. Allocations are the full
+    /// replacement bin breakdown per line (total ≤ released qty; bins must hold the
+    /// item's stock). Every bin change appends an audit note to OPKL.Remarks naming
+    /// <c>changed_by</c>. Requests matching SAP's current state return already_applied.
+    /// </summary>
+    [HttpPatch("pick-lists/{absEntry:int}/allocations")]
+    [ProducesResponseType(typeof(ApiResponse<PickListActionResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<PickListActionResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<PickListActionResult>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<PickListActionResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> UpdatePickListAllocations(
+        int absEntry, [FromBody] PickListAllocationUpdate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<PickListActionResult>.Fail(errors));
+
+        try
+        {
+            var snapshot = await _sql.GetPickListSnapshotAsync(absEntry, ct);
+            if (snapshot is null)
+                return NotFound(ApiResponse<PickListActionResult>.Fail($"Pick list {absEntry} was not found."));
+
+            var binStock = await LoadPickListBinStockAsync(snapshot, request.Lines.Select(l => l.PickEntry), ct);
+            var plan = PickListUpdatePlanner.PlanAllocationUpdate(snapshot, request, binStock, DateTime.UtcNow);
+            if (plan.Errors.Count > 0)
+                return BadRequest(ApiResponse<PickListActionResult>.Fail(plan.Errors));
+            if (plan.AlreadyApplied)
+                return Ok(ApiResponse<PickListActionResult>.Ok(
+                    await BuildPickListResultAsync(absEntry, alreadyApplied: true, noteWritten: true, ct)));
+
+            var remarks = plan.Note is null
+                ? null
+                : PickListUpdatePlanner.AppendNote(snapshot.Remarks, plan.Note);
+            var noteWritten = await _sap.UpdatePickListAllocationsAsync(absEntry, plan.Lines, remarks, ct);
+
+            _logger.LogInformation(
+                "Pick list {AbsEntry}: allocations updated ({Lines} line(s)) by {ChangedBy} (app_ref={AppRef}).",
+                absEntry, plan.Lines.Count, request.ChangedBy, request.AppRef);
+            return Ok(ApiResponse<PickListActionResult>.Ok(
+                await BuildPickListResultAsync(absEntry, alreadyApplied: false, noteWritten, ct)));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse<PickListActionResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Pick list allocation update failed (abs_entry={AbsEntry}, app_ref={AppRef})",
+                absEntry, request.AppRef);
+            return StatusCode(500, ApiResponse<PickListActionResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/pick-lists/{absEntry}/pick
+    /// Picks lines by setting the ABSOLUTE picked quantity (with the full bin
+    /// breakdown for bin-managed warehouses). Below the releasable total leaves the
+    /// line Partially Picked; equal completes it. Replaying an identical request is a
+    /// no-op (already_applied) — quantities are absolute, so retries are safe.
+    /// </summary>
+    [HttpPost("pick-lists/{absEntry:int}/pick")]
+    [ProducesResponseType(typeof(ApiResponse<PickListActionResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<PickListActionResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<PickListActionResult>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<PickListActionResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> PickPickListLines(
+        int absEntry, [FromBody] PickListPickRequest request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<PickListActionResult>.Fail(errors));
+
+        try
+        {
+            var snapshot = await _sql.GetPickListSnapshotAsync(absEntry, ct);
+            if (snapshot is null)
+                return NotFound(ApiResponse<PickListActionResult>.Fail($"Pick list {absEntry} was not found."));
+
+            var binStock = await LoadPickListBinStockAsync(snapshot, request.Lines.Select(l => l.PickEntry), ct);
+            var binManaged = new Dictionary<string, bool>();
+            foreach (var whs in snapshot.Lines.Select(line => line.WhsCode).Where(w => w != "").Distinct())
+                binManaged[whs] = await _sql.IsBinManagedAsync(whs, ct);
+
+            var plan = PickListUpdatePlanner.PlanPick(snapshot, request, binStock, binManaged, DateTime.UtcNow);
+            if (plan.Errors.Count > 0)
+                return BadRequest(ApiResponse<PickListActionResult>.Fail(plan.Errors));
+            if (plan.AlreadyApplied)
+                return Ok(ApiResponse<PickListActionResult>.Ok(
+                    await BuildPickListResultAsync(absEntry, alreadyApplied: true, noteWritten: true, ct)));
+
+            var remarks = plan.Note is null
+                ? null
+                : PickListUpdatePlanner.AppendNote(snapshot.Remarks, plan.Note);
+            var noteWritten = await _sap.PickPickListLinesAsync(absEntry, plan.Lines, remarks, ct);
+
+            _logger.LogInformation(
+                "Pick list {AbsEntry}: {Lines} line(s) picked by {ChangedBy} (app_ref={AppRef}).",
+                absEntry, plan.Lines.Count, request.ChangedBy, request.AppRef);
+            return Ok(ApiResponse<PickListActionResult>.Ok(
+                await BuildPickListResultAsync(absEntry, alreadyApplied: false, noteWritten, ct)));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse<PickListActionResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Pick list pick failed (abs_entry={AbsEntry}, app_ref={AppRef})",
+                absEntry, request.AppRef);
+            return StatusCode(500, ApiResponse<PickListActionResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>Per-requested-line item bin stock (OIBQ), keyed by PickEntry, for allocation validation.</summary>
+    private async Task<Dictionary<int, IReadOnlyList<BinOption>>> LoadPickListBinStockAsync(
+        PickListSnapshot snapshot, IEnumerable<int> pickEntries, CancellationToken ct)
+    {
+        var result = new Dictionary<int, IReadOnlyList<BinOption>>();
+        var cache = new Dictionary<(string ItemCode, string WhsCode), IReadOnlyList<BinOption>>();
+        foreach (var pickEntry in pickEntries.Distinct())
+        {
+            var line = snapshot.Lines.FirstOrDefault(candidate => candidate.PickEntry == pickEntry);
+            if (line is null || line.ItemCode == "" || line.WhsCode == "") continue;
+            var key = (line.ItemCode, line.WhsCode);
+            if (!cache.TryGetValue(key, out var stock))
+            {
+                stock = await _sql.GetBinStockAsync(line.ItemCode, line.WhsCode, ct);
+                cache[key] = stock;
+            }
+            result[pickEntry] = stock;
+        }
+        return result;
+    }
+
+    /// <summary>Fresh post-write document state for the response (SQL reads committed DI writes).</summary>
+    private async Task<PickListActionResult> BuildPickListResultAsync(
+        int absEntry, bool alreadyApplied, bool noteWritten, CancellationToken ct)
+    {
+        var snapshot = await _sql.GetPickListSnapshotAsync(absEntry, ct);
+        return new PickListActionResult
+        {
+            AbsEntry = absEntry,
+            Status = snapshot?.Status ?? "",
+            AlreadyApplied = alreadyApplied,
+            NoteWritten = noteWritten,
+            Remarks = snapshot?.Remarks ?? "",
+            Lines = snapshot?.Lines ?? new List<PickListLineSnapshot>(),
+        };
+    }
+
     // ── Write helpers ────────────────────────────────────────────────
 
     private static void ValidateAppRef(string? appRef, List<string> errors)
