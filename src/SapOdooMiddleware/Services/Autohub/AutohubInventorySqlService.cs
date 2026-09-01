@@ -983,7 +983,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         // carries the reference. BaseObject 17 = sales order.
         const string linesSql = """
             SELECT L.[PickEntry], L.[OrderEntry], L.[OrderLine],
-                   L.[RelQtty], L.[PickQtty], L.[PickStatus],
+                   ISNULL(L.[RelQtty], 0), ISNULL(L.[PickQtty], 0), L.[PickStatus],
                    R.[ItemCode], R.[WhsCode], R.[Dscription]
             FROM [dbo].[PKL1] L
             JOIN [dbo].[RDR1] R
@@ -991,8 +991,12 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             WHERE L.[AbsEntry] = @abs AND L.[BaseObject] = 17
             ORDER BY L.[PickEntry];
             """;
+        // PKL2.BinAbs and the quantity columns are nullable in SAP's schema:
+        // the inner join drops bin-less rows (non-bin warehouses), and ISNULL
+        // keeps the readers safe on NULL quantities.
         const string allocationsSql = """
-            SELECT A.[PickEntry], A.[BinAbs], B.[BinCode], A.[RelQtty], A.[PickQtty]
+            SELECT A.[PickEntry], A.[BinAbs], B.[BinCode],
+                   ISNULL(A.[RelQtty], 0), ISNULL(A.[PickQtty], 0)
             FROM [dbo].[PKL2] A
             JOIN [dbo].[OBIN] B ON B.[AbsEntry] = A.[BinAbs]
             WHERE A.[AbsEntry] = @abs
