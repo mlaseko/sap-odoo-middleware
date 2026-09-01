@@ -272,6 +272,85 @@ public class AutohubInventoryController : ControllerBase
     }
 
     /// <summary>
+    /// PATCH /api/autohub/inv/transfer-requests/{docEntry}
+    /// Updates a still-open transfer request: absolute quantity changes on open
+    /// lines (never below the already-fulfilled amount — SAP enforces it too),
+    /// appended lines on the same route, and replaced comments. Quantities are
+    /// absolute, so retrying the same update is a no-op (<c>already_applied</c>).
+    /// Returns the refreshed document snapshot.
+    /// </summary>
+    [HttpPatch("transfer-requests/{docEntry:int}")]
+    [ProducesResponseType(typeof(ApiResponse<TransferRequestSnapshot>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<TransferRequestSnapshot>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<TransferRequestSnapshot>), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> UpdateTransferRequest(
+        int docEntry, [FromBody] TransferRequestUpdate request, CancellationToken ct)
+    {
+        try
+        {
+            var snapshot = await _sql.GetTransferRequestSnapshotAsync(docEntry, ct);
+            if (snapshot is null)
+                return NotFound(ApiResponse<TransferRequestSnapshot>.Fail(
+                    $"Transfer request {docEntry} was not found."));
+
+            var plan = TransferRequestUpdatePlanner.PlanUpdate(snapshot, request);
+            if (plan.Errors.Count > 0)
+                return BadRequest(ApiResponse<TransferRequestSnapshot>.Fail(plan.Errors));
+
+            if (plan.AlreadyApplied)
+                return Ok(ApiResponse<TransferRequestSnapshot>.Ok(
+                    snapshot, new Dictionary<string, object> { ["already_applied"] = true }));
+
+            await _sap.UpdateInventoryTransferRequestAsync(docEntry, plan, ct);
+            var refreshed = await _sql.GetTransferRequestSnapshotAsync(docEntry, ct) ?? snapshot;
+            return Ok(ApiResponse<TransferRequestSnapshot>.Ok(
+                refreshed, new Dictionary<string, object> { ["already_applied"] = false }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Transfer request update failed (DocEntry={DocEntry})", docEntry);
+            return StatusCode(500, ApiResponse<TransferRequestSnapshot>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// POST /api/autohub/inv/transfer-requests/{docEntry}/close
+    /// Closes an open transfer request, cancelling every remaining open quantity.
+    /// Idempotent: a request that is already closed or cancelled returns OK with
+    /// <c>already_closed = true</c>. Returns the refreshed document snapshot.
+    /// </summary>
+    [HttpPost("transfer-requests/{docEntry:int}/close")]
+    [ProducesResponseType(typeof(ApiResponse<TransferRequestSnapshot>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<TransferRequestSnapshot>), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> CloseTransferRequest(int docEntry, CancellationToken ct)
+    {
+        try
+        {
+            var snapshot = await _sql.GetTransferRequestSnapshotAsync(docEntry, ct);
+            if (snapshot is null)
+                return NotFound(ApiResponse<TransferRequestSnapshot>.Fail(
+                    $"Transfer request {docEntry} was not found."));
+
+            var errors = TransferRequestUpdatePlanner.ValidateClose(snapshot, out bool alreadyClosed);
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<TransferRequestSnapshot>.Fail(errors));
+            if (alreadyClosed)
+                return Ok(ApiResponse<TransferRequestSnapshot>.Ok(
+                    snapshot, new Dictionary<string, object> { ["already_closed"] = true }));
+
+            await _sap.CloseInventoryTransferRequestAsync(docEntry, ct);
+            var refreshed = await _sql.GetTransferRequestSnapshotAsync(docEntry, ct) ?? snapshot;
+            return Ok(ApiResponse<TransferRequestSnapshot>.Ok(
+                refreshed, new Dictionary<string, object> { ["already_closed"] = false }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Transfer request close failed (DocEntry={DocEntry})", docEntry);
+            return StatusCode(500, ApiResponse<TransferRequestSnapshot>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/autohub/inv/transfers
     /// Creates an Inventory Transfer (OWTR). Lines drawn from a transfer request carry
     /// <c>base_request_entry</c>/<c>base_request_line</c> so SAP closes the request's

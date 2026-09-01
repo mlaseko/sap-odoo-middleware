@@ -4,6 +4,7 @@ using SAPbobsCOM;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Models.Inventory;
 using SapOdooMiddleware.Models.Sap;
+using SapOdooMiddleware.Services.Autohub;
 using System.Runtime.InteropServices;
 
 namespace SapOdooMiddleware.Services;
@@ -5630,6 +5631,109 @@ ORDER BY PostingDate, DocumentNumber";
                     docEntry, docNum, request.FromWhs, request.ToWhs, request.Lines.Count, request.AppRef);
 
                 return new InventoryDocResult { DocEntry = docEntry, DocNum = docNum };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(tr);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task UpdateInventoryTransferRequestAsync(
+        int docEntry, TransferRequestUpdatePlan plan, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var tr = (StockTransfer)_company!.GetBusinessObject(BoObjectTypes.oInventoryTransferRequest);
+            try
+            {
+                if (!tr.GetByKey(docEntry))
+                    throw new InvalidOperationException($"Transfer request {docEntry} was not found in SAP.");
+
+                // Absolute quantity writes on existing lines, matched by LineNum.
+                var byLineNum = plan.QuantityWrites.ToDictionary(w => w.LineNum);
+                int applied = 0;
+                for (int i = 0; i < tr.Lines.Count; i++)
+                {
+                    tr.Lines.SetCurrentLine(i);
+                    if (byLineNum.TryGetValue(tr.Lines.LineNum, out var write))
+                    {
+                        tr.Lines.Quantity = write.Quantity;
+                        applied++;
+                    }
+                }
+                if (applied != plan.QuantityWrites.Count)
+                    throw new InvalidOperationException(
+                        $"Transfer request {docEntry}: only {applied} of {plan.QuantityWrites.Count} " +
+                        "line updates matched existing line numbers — check line_num values.");
+
+                // Appended lines inherit the header route.
+                foreach (var add in plan.NewLines)
+                {
+                    tr.Lines.Add();
+                    tr.Lines.SetCurrentLine(tr.Lines.Count - 1);
+                    tr.Lines.ItemCode          = add.ItemCode;
+                    tr.Lines.Quantity          = add.Quantity;
+                    tr.Lines.FromWarehouseCode = tr.FromWarehouse;
+                    tr.Lines.WarehouseCode     = tr.ToWarehouse;
+                }
+
+                if (plan.Comments is not null)
+                    tr.Comments = plan.Comments;
+
+                int result = tr.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP Transfer Request updated: DocEntry={DocEntry}, QtyWrites={QtyWrites}, " +
+                    "NewLines={NewLines}, CommentsChanged={CommentsChanged}",
+                    docEntry, plan.QuantityWrites.Count, plan.NewLines.Count, plan.Comments is not null);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(tr);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task CloseInventoryTransferRequestAsync(int docEntry, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var tr = (StockTransfer)_company!.GetBusinessObject(BoObjectTypes.oInventoryTransferRequest);
+            try
+            {
+                if (!tr.GetByKey(docEntry))
+                    throw new InvalidOperationException($"Transfer request {docEntry} was not found in SAP.");
+
+                int result = tr.Close();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation("SAP Transfer Request closed: DocEntry={DocEntry}", docEntry);
             }
             finally
             {

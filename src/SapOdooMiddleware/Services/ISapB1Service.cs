@@ -1,5 +1,6 @@
 using SapOdooMiddleware.Models.Inventory;
 using SapOdooMiddleware.Models.Sap;
+using SapOdooMiddleware.Services.Autohub;
 
 namespace SapOdooMiddleware.Services;
 
@@ -286,6 +287,21 @@ public interface ISapB1Service
     /// </summary>
     Task<InventoryDocResult> CreateInventoryTransferRequestAsync(
         TransferRequestCreate request, int series, CancellationToken ct);
+
+    /// <summary>
+    /// Updates a still-open Inventory Transfer Request: absolute quantity changes on
+    /// open lines, appended lines (inheriting the header route), and replaced
+    /// comments. The plan has already been validated against a fresh SQL snapshot;
+    /// SAP re-validates on Update and remains the final authority.
+    /// </summary>
+    Task UpdateInventoryTransferRequestAsync(
+        int docEntry, TransferRequestUpdatePlan plan, CancellationToken ct);
+
+    /// <summary>
+    /// Closes an open Inventory Transfer Request, cancelling every remaining open
+    /// quantity. Already-fulfilled quantities are untouched.
+    /// </summary>
+    Task CloseInventoryTransferRequestAsync(int docEntry, CancellationToken ct);
 
     /// <summary>
     /// Creates an Inventory Transfer (OWTR, object 67). Lines drawn from a transfer
