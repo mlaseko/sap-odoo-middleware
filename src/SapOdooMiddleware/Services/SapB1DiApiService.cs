@@ -5658,6 +5658,27 @@ ORDER BY PostingDate, DocumentNumber";
                 if (!tr.GetByKey(docEntry))
                     throw new InvalidOperationException($"Transfer request {docEntry} was not found in SAP.");
 
+                // Deletes first: each Delete() shifts collection indices, so every
+                // target LineNum gets its own fresh scan of the collection.
+                foreach (var deleteLineNum in plan.DeleteLineNums)
+                {
+                    bool deleted = false;
+                    for (int i = 0; i < tr.Lines.Count; i++)
+                    {
+                        tr.Lines.SetCurrentLine(i);
+                        if (tr.Lines.LineNum == deleteLineNum)
+                        {
+                            tr.Lines.Delete();
+                            deleted = true;
+                            break;
+                        }
+                    }
+                    if (!deleted)
+                        throw new InvalidOperationException(
+                            $"Transfer request {docEntry}: line {deleteLineNum} to remove was not found — " +
+                            "refresh and review the request again.");
+                }
+
                 // Absolute quantity writes on existing lines, matched by LineNum.
                 var byLineNum = plan.QuantityWrites.ToDictionary(w => w.LineNum);
                 int applied = 0;
@@ -5698,8 +5719,9 @@ ORDER BY PostingDate, DocumentNumber";
 
                 _logger.LogInformation(
                     "SAP Transfer Request updated: DocEntry={DocEntry}, QtyWrites={QtyWrites}, " +
-                    "NewLines={NewLines}, CommentsChanged={CommentsChanged}",
-                    docEntry, plan.QuantityWrites.Count, plan.NewLines.Count, plan.Comments is not null);
+                    "NewLines={NewLines}, DeletedLines={DeletedLines}, CommentsChanged={CommentsChanged}",
+                    docEntry, plan.QuantityWrites.Count, plan.NewLines.Count,
+                    plan.DeleteLineNums.Count, plan.Comments is not null);
             }
             finally
             {

@@ -19,6 +19,14 @@ public class TransferRequestUpdate
 
     /// <summary>New lines appended to the request (same route as the header).</summary>
     public List<TransferRequestLineCreate> AddLines { get; set; } = new();
+
+    /// <summary>
+    /// LineNums to remove from the request. A line with no fulfilment yet is
+    /// deleted outright; a partially fulfilled line cannot be deleted from a
+    /// posted document, so it is closed instead by reducing its quantity to
+    /// the already-fulfilled amount.
+    /// </summary>
+    public List<int> RemoveLines { get; set; } = new();
 }
 
 public class TransferRequestLineQuantityUpdate

@@ -173,6 +173,67 @@ public class TransferRequestUpdatePlannerTests
     }
 
     [Fact]
+    public void RemoveDeletesUnfulfilledAndClosesPartiallyFulfilledLines()
+    {
+        // Line 0 has 7 of 10 fulfilled; line 1 is untouched.
+        var request = new TransferRequestUpdate { RemoveLines = { 0, 1 }, AddLines = { new TransferRequestLineCreate { ItemCode = "TY20031", Quantity = 2 } } };
+        var plan = TransferRequestUpdatePlanner.PlanUpdate(Snapshot(quantity: 10, openQty: 3), request);
+        Assert.Empty(plan.Errors);
+        // Partially fulfilled line 0 → closed by reducing to the fulfilled amount.
+        var write = Assert.Single(plan.QuantityWrites);
+        Assert.Equal(0, write.LineNum);
+        Assert.Equal(7, write.Quantity);
+        // Unfulfilled line 1 → deleted outright.
+        Assert.Equal(1, Assert.Single(plan.DeleteLineNums));
+    }
+
+    [Fact]
+    public void RemoveValidatesLineExistenceStatusAndOverlap()
+    {
+        var unknown = TransferRequestUpdatePlanner.PlanUpdate(
+            Snapshot(), new TransferRequestUpdate { RemoveLines = { 7 } });
+        Assert.Contains(unknown.Errors, e => e.Contains("no line 7"));
+
+        var closed = TransferRequestUpdatePlanner.PlanUpdate(
+            Snapshot(lineStatus: "C"), new TransferRequestUpdate { RemoveLines = { 0 } });
+        Assert.Contains(closed.Errors, e => e.Contains("already closed"));
+
+        var overlap = new TransferRequestUpdate
+        {
+            RemoveLines = { 1 },
+            Lines = { new TransferRequestLineQuantityUpdate { LineNum = 1, Quantity = 6 } },
+        };
+        Assert.Contains(
+            TransferRequestUpdatePlanner.PlanUpdate(Snapshot(), overlap).Errors,
+            e => e.Contains("pick one"));
+    }
+
+    [Fact]
+    public void RemovingEveryOpenLineRequiresTheCloseEndpoint()
+    {
+        var all = TransferRequestUpdatePlanner.PlanUpdate(
+            Snapshot(), new TransferRequestUpdate { RemoveLines = { 0, 1 } });
+        Assert.Contains(all.Errors, e => e.Contains("close endpoint"));
+
+        // Removing one of two open lines is fine.
+        var one = TransferRequestUpdatePlanner.PlanUpdate(
+            Snapshot(), new TransferRequestUpdate { RemoveLines = { 1 } });
+        Assert.Empty(one.Errors);
+        Assert.Equal(1, Assert.Single(one.DeleteLineNums));
+
+        // Removing every open line while adding a replacement is also fine.
+        var withAdd = TransferRequestUpdatePlanner.PlanUpdate(
+            Snapshot(),
+            new TransferRequestUpdate
+            {
+                RemoveLines = { 0, 1 },
+                AddLines = { new TransferRequestLineCreate { ItemCode = "TY20031", Quantity = 1 } },
+            });
+        Assert.Empty(withAdd.Errors);
+        Assert.Equal(2, withAdd.DeleteLineNums.Count);
+    }
+
+    [Fact]
     public void CloseIsIdempotentOnClosedOrCancelledDocuments()
     {
         Assert.Empty(TransferRequestUpdatePlanner.ValidateClose(Snapshot(), out bool openAlready));
