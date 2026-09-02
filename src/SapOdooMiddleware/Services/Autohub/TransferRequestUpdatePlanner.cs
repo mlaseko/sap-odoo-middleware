@@ -9,6 +9,8 @@ public class TransferRequestUpdatePlan
     /// <summary>Absolute quantity writes that actually change the document.</summary>
     public List<TransferRequestLineQuantityUpdate> QuantityWrites { get; } = new();
     public List<TransferRequestLineCreate> NewLines { get; } = new();
+    /// <summary>LineNums to delete outright (lines with zero fulfilment).</summary>
+    public List<int> DeleteLineNums { get; } = new();
     /// <summary>Trimmed replacement comments; null when the request leaves them alone.</summary>
     public string? Comments { get; set; }
     /// <summary>True when everything requested already matches SAP — nothing to write.</summary>
@@ -33,16 +35,68 @@ public static class TransferRequestUpdatePlanner
         var plan = new TransferRequestUpdatePlan();
         if (!ValidateDocumentOpen(snapshot, plan)) return plan;
 
-        if (request.Lines.Count == 0 && request.AddLines.Count == 0 && request.Comments is null)
+        if (request.Lines.Count == 0 && request.AddLines.Count == 0 &&
+            request.RemoveLines.Count == 0 && request.Comments is null)
         {
-            plan.Errors.Add("Nothing to update: provide lines, add_lines, or comments.");
+            plan.Errors.Add("Nothing to update: provide lines, add_lines, remove_lines, or comments.");
             return plan;
         }
 
         var byLineNum = snapshot.Lines.ToDictionary(l => l.LineNum);
+        var removeSet = new HashSet<int>(request.RemoveLines);
+
+        foreach (var lineNum in removeSet)
+        {
+            if (!byLineNum.TryGetValue(lineNum, out var line))
+            {
+                plan.Errors.Add($"Request {snapshot.DocEntry} has no line {lineNum}.");
+                continue;
+            }
+            if (!string.Equals(line.LineStatus, "O", StringComparison.OrdinalIgnoreCase))
+            {
+                plan.Errors.Add($"Line {lineNum} ({line.ItemCode}) is already closed.");
+                continue;
+            }
+            double fulfilled = line.Quantity - line.OpenQty;
+            if (fulfilled > QtyTolerance)
+            {
+                // A posted document cannot lose a line that already moved stock;
+                // reducing it to the fulfilled amount closes it instead.
+                plan.QuantityWrites.Add(new TransferRequestLineQuantityUpdate
+                {
+                    LineNum = lineNum,
+                    Quantity = fulfilled,
+                });
+            }
+            else
+            {
+                plan.DeleteLineNums.Add(lineNum);
+            }
+        }
+
+        // Removing every open line is a whole-document close in disguise — make
+        // the caller say that explicitly so nobody empties a request by accident.
+        if (removeSet.Count > 0 && request.AddLines.Count == 0)
+        {
+            var openLineNums = snapshot.Lines
+                .Where(l => string.Equals(l.LineStatus, "O", StringComparison.OrdinalIgnoreCase))
+                .Select(l => l.LineNum);
+            if (openLineNums.All(removeSet.Contains))
+            {
+                plan.Errors.Add(
+                    "Removing every open line would close the whole request — use the close endpoint instead.");
+            }
+        }
+
         var seen = new HashSet<int>();
         foreach (var update in request.Lines)
         {
+            if (removeSet.Contains(update.LineNum))
+            {
+                plan.Errors.Add(
+                    $"Line {update.LineNum} appears in both lines and remove_lines — pick one.");
+                continue;
+            }
             if (!seen.Add(update.LineNum))
             {
                 plan.Errors.Add($"Line {update.LineNum} is listed twice.");
@@ -109,7 +163,8 @@ public static class TransferRequestUpdatePlanner
         }
 
         if (plan.Errors.Count > 0) return plan;
-        if (plan.QuantityWrites.Count == 0 && plan.NewLines.Count == 0 && plan.Comments is null)
+        if (plan.QuantityWrites.Count == 0 && plan.NewLines.Count == 0 &&
+            plan.DeleteLineNums.Count == 0 && plan.Comments is null)
             plan.AlreadyApplied = true;
         return plan;
     }
