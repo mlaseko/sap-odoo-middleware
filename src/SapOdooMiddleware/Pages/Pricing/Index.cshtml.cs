@@ -167,7 +167,8 @@ public class IndexModel : PageModel
 
     // ── Single item ──────────────────────────────────────────────────
 
-    public async Task<IActionResult> OnPostLookupAsync(string itemCode, CancellationToken ct)
+    public async Task<IActionResult> OnPostLookupAsync(
+        string itemCode, string? compareItem, CancellationToken ct)
     {
         Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
         if (string.IsNullOrWhiteSpace(itemCode)) { Error = "Enter an item code."; return Page(); }
@@ -177,6 +178,7 @@ public class IndexModel : PageModel
         EnteredEurCost = Preview.EurCost;
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
         await LoadClassificationSourcesAsync(ct);
+        await LoadCompareAsync(compareItem, ct);
         return Page();
     }
 
@@ -185,8 +187,19 @@ public class IndexModel : PageModel
     public decimal? TargetPrice { get; private set; }
     public decimal? ImpliedEur { get; private set; }
 
+    /// <summary>Benchmark item whose price lists are shown alongside the review.</summary>
+    public string? CompareItem { get; private set; }
+    public RepricePreviewLine? ComparePreview { get; private set; }
+
+    private async Task LoadCompareAsync(string? compareItem, CancellationToken ct)
+    {
+        CompareItem = string.IsNullOrWhiteSpace(compareItem) ? null : compareItem.Trim();
+        if (CompareItem is null) return;
+        ComparePreview = await _reprice.PreviewAsync(CompareItem, null, null, includeTrace: false, ct);
+    }
+
     public async Task<IActionResult> OnPostTargetPreviewAsync(
-        string itemCode, int targetPl, decimal targetPrice, CancellationToken ct)
+        string itemCode, int targetPl, decimal targetPrice, string? compareItem, CancellationToken ct)
     {
         Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
         LookedUpItem = itemCode.Trim();
@@ -213,24 +226,26 @@ public class IndexModel : PageModel
 
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
         await LoadClassificationSourcesAsync(ct);
+        await LoadCompareAsync(compareItem, ct);
         return Page();
     }
 
     public async Task<IActionResult> OnPostPreviewAsync(
-        string itemCode, decimal eurCost, CancellationToken ct)
+        string itemCode, decimal eurCost, string? compareItem, CancellationToken ct)
     {
         Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
         LookedUpItem = itemCode.Trim();
         EnteredEurCost = eurCost;
         Preview = await _reprice.PreviewAsync(LookedUpItem, eurCost, null, includeTrace: false, ct);
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        await LoadCompareAsync(compareItem, ct);
         if (Preview.CanApply)
             Message = "Preview only — nothing posted yet. Review the diff, then Confirm & Post.";
         return Page();
     }
 
     public async Task<IActionResult> OnPostApplyAsync(
-        string itemCode, decimal eurCost, string? note, CancellationToken ct)
+        string itemCode, decimal eurCost, string? note, string? compareItem, CancellationToken ct)
     {
         Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
         LookedUpItem = itemCode.Trim();
@@ -249,6 +264,7 @@ public class IndexModel : PageModel
 
         Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        await LoadCompareAsync(compareItem, ct);
         return Page();
     }
 

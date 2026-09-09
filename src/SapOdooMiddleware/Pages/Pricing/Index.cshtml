@@ -56,6 +56,7 @@
     .row-incl td { color: var(--text-strong); font-weight: 650; }
     .row-new td { background: var(--accent-soft); }
     .row-net td { color: var(--muted); font-size: 12px; }
+    .row-cmp td { color: var(--teal); }
 </style>
 
 <div class="page-head">
@@ -89,6 +90,9 @@
     <form method="post" asp-page-handler="Lookup" class="inline-form">
         <input type="text" name="itemCode" placeholder="Item code (LM article, e.g. 4702)"
                value="@Model.LookedUpItem" required />
+        <label>Compare with:</label>
+        <input type="text" name="compareItem" placeholder="item code (optional)"
+               value="@Model.CompareItem" />
         <button class="btn" type="submit">Look up</button>
     </form>
 
@@ -149,7 +153,42 @@
                         @for (int pl = 1; pl <= 4; pl++) { <td>@Money(NetOf(p.NewNet, pl))</td> }
                     </tr>
                 }
+                @if (Model.ComparePreview is { Found: true } cmp)
+                {
+                    <tr class="row-cmp">
+                        <td>@cmp.ItemCode — incl VAT (benchmark)</td>
+                        @for (int pl = 1; pl <= 4; pl++) { <td>@InclOf(cmp.OldNet, pl)</td> }
+                    </tr>
+                    <tr>
+                        <td>Vs @cmp.ItemCode</td>
+                        @for (int pl = 1; pl <= 4; pl++)
+                        {
+                            var mineNet = NetOf(p.NewNet, pl) ?? NetOf(p.OldNet, pl);
+                            var theirNet = NetOf(cmp.OldNet, pl);
+                            decimal? d = mineNet is { } m && theirNet is { } t && t > 0m
+                                ? Math.Round((m - t) / t * 100m, 1) : null;
+                            <td class="@DeltaCls(d)">@(d is null ? "—" : $"{d:+0.#;-0.#}%")</td>
+                        }
+                    </tr>
+                }
             </table>
+            @if (Model.ComparePreview is { } cp2)
+            {
+                @if (!cp2.Found)
+                {
+                    <div class="msg-warn">Benchmark item '@Model.CompareItem' not found — comparison skipped.</div>
+                }
+                else
+                {
+                    <div class="meta" style="margin-top:4px">
+                        Benchmark: <b>@cp2.ItemCode</b> — @cp2.ItemName · band @(cp2.PricingCategory ?? "?")
+                        @if (cp2.EurCost is not null) { <text> · EUR invoice price €@cp2.EurCost?.ToString("N2")</text> }
+                        @if (cp2.PricingCategory is not null && p.PricingCategory is not null
+                             && cp2.PricingCategory != p.PricingCategory)
+                        { <span class="delta-up"> · different band — expect different ratios</span> }
+                    </div>
+                }
+            }
 
             @if (BigMoves(p.DeltaPct) is { } moves)
             {
@@ -160,6 +199,7 @@
             <div style="margin-top:12px">
                 <form method="post" asp-page-handler="Preview" class="inline-form" style="display:inline-flex">
                     <input type="hidden" name="itemCode" value="@p.ItemCode" />
+                    <input type="hidden" name="compareItem" value="@Model.CompareItem" />
                     <label>New EUR invoice price:</label>
                     <input type="number" name="eurCost" step="0.01" min="0.01"
                            value="@(Model.EnteredEurCost?.ToString("0.##"))" required />
@@ -169,6 +209,7 @@
             <div style="margin-top:8px">
                 <form method="post" asp-page-handler="TargetPreview" class="inline-form" style="display:inline-flex">
                     <input type="hidden" name="itemCode" value="@p.ItemCode" />
+                    <input type="hidden" name="compareItem" value="@Model.CompareItem" />
                     <label>Or target selling price (incl VAT):</label>
                     <select name="targetPl">
                         <option value="1" selected="@(Model.TargetPl == 1)">PL1 Retail</option>
@@ -190,6 +231,7 @@
                 <div style="margin-top:10px">
                     <form method="post" asp-page-handler="Apply" class="inline-form" style="display:inline-flex">
                         <input type="hidden" name="itemCode" value="@p.ItemCode" />
+                    <input type="hidden" name="compareItem" value="@Model.CompareItem" />
                         <input type="hidden" name="eurCost" value="@Model.EnteredEurCost" />
                         <input type="text" name="note" placeholder="reason / note (optional)"
                                value="@(Model.TargetPl is { } tpl && Model.TargetPrice is { } tp ? $"target PL{tpl}={tp:N0}" : "")" />
