@@ -7,21 +7,26 @@
 }
 
 <style>
+    /* Dark-theme aware: colors come from site.css :root variables; the .card class
+       itself is the shared site style (not overridden here). */
     .price-grid { border-collapse: collapse; width: 100%; font-size: 13px; }
-    .price-grid th, .price-grid td { border: 1px solid #ddd; padding: 5px 9px; text-align: right; }
-    .price-grid th { background: #f5f5f5; text-align: center; }
+    .price-grid th, .price-grid td { border: 1px solid var(--border-soft); padding: 5px 9px; text-align: right; color: var(--text); }
+    .price-grid th { background: var(--surface-2); color: var(--muted); text-align: center; }
     .price-grid td:first-child { text-align: left; }
-    .delta-up { color: #b45309; font-weight: 600; }
-    .delta-down { color: #1d4ed8; font-weight: 600; }
-    .delta-big { color: #b91c1c; font-weight: 700; }
-    .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 14px 16px; margin: 14px 0; background: #fff; }
-    .card h3 { margin: 0 0 8px; }
+    .delta-up { color: var(--warning); font-weight: 600; }
+    .delta-down { color: var(--teal); font-weight: 600; }
+    .delta-big { color: var(--danger); font-weight: 700; }
     .inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .inline-form input[type=text], .inline-form input[type=number] { padding: 5px 8px; border: 1px solid #ccc; border-radius: 5px; }
-    .msg-ok { background: #ecfdf5; border: 1px solid #10b981; color: #065f46; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
-    .msg-err { background: #fef2f2; border: 1px solid #ef4444; color: #991b1b; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
-    .msg-warn { background: #fffbeb; border: 1px solid #f59e0b; color: #92400e; padding: 6px 10px; border-radius: 6px; margin: 6px 0; font-size: 13px; }
-    .meta { color: #666; font-size: 12px; }
+    .inline-form input[type=text], .inline-form input[type=number], .inline-form select {
+        padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--surface-2); color: var(--text);
+    }
+    .inline-form input:focus, .inline-form select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .inline-form label { color: var(--muted); font-size: 13px; }
+    .msg-ok   { background: rgba(52,211,153,.12);  border: 1px solid rgba(52,211,153,.35);  color: #6ee7b7; padding: 8px 12px; border-radius: var(--radius-sm); margin: 10px 0; }
+    .msg-err  { background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.35); color: #fca5a5; padding: 8px 12px; border-radius: var(--radius-sm); margin: 10px 0; }
+    .msg-warn { background: rgba(251,191,36,.12);  border: 1px solid rgba(251,191,36,.35);  color: #fcd34d; padding: 6px 10px; border-radius: var(--radius-sm); margin: 6px 0; font-size: 13px; }
+    .meta { color: var(--muted); font-size: 12px; }
     .bulk-scroll { max-height: 420px; overflow: auto; }
 </style>
 

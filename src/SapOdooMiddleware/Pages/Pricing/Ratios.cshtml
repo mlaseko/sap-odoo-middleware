@@ -6,17 +6,23 @@
 }
 
 <style>
-    .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 14px 16px; margin: 14px 0; background: #fff; }
+    /* Dark-theme aware: colors come from site.css :root variables; the .card class
+       itself is the shared site style (not overridden here). */
     .inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .inline-form input, .inline-form select { padding: 5px 8px; border: 1px solid #ccc; border-radius: 5px; }
+    .inline-form input, .inline-form select {
+        padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--surface-2); color: var(--text);
+    }
+    .inline-form input:focus, .inline-form select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .inline-form label { color: var(--muted); font-size: 13px; }
     .ratio-in { width: 110px; }
-    .msg-ok { background: #ecfdf5; border: 1px solid #10b981; color: #065f46; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
-    .msg-err { background: #fef2f2; border: 1px solid #ef4444; color: #991b1b; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
-    .meta { color: #666; font-size: 12px; }
+    .msg-ok  { background: rgba(52,211,153,.12);  border: 1px solid rgba(52,211,153,.35);  color: #6ee7b7; padding: 8px 12px; border-radius: var(--radius-sm); margin: 10px 0; }
+    .msg-err { background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.35); color: #fca5a5; padding: 8px 12px; border-radius: var(--radius-sm); margin: 10px 0; }
+    .meta { color: var(--muted); font-size: 12px; }
     .price-grid { border-collapse: collapse; font-size: 13px; }
-    .price-grid th, .price-grid td { border: 1px solid #ddd; padding: 5px 9px; text-align: right; }
-    .price-grid th { background: #f5f5f5; }
-    .ovr { color: #b45309; font-weight: 600; }
+    .price-grid th, .price-grid td { border: 1px solid var(--border-soft); padding: 5px 9px; text-align: right; color: var(--text); }
+    .price-grid th { background: var(--surface-2); color: var(--muted); }
+    .ovr { color: var(--warning); font-weight: 600; }
 </style>
 
 <div class="page-head">
