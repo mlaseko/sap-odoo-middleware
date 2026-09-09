@@ -41,6 +41,18 @@ public interface ILubesPricingRepository
     /// <summary>Items with a stored EUR cost, optionally filtered by SAP group code(s).</summary>
     Task<IReadOnlyList<RepriceCandidate>> GetRepriceCandidatesAsync(
         IReadOnlyCollection<int>? sapGroupCodes, CancellationToken ct);
+
+    // ── Ratio overrides (the runtime-editable calculator tables) ─────
+
+    Task<(List<Pricing.BandRatioOverride> Band, List<Pricing.MaasaiRatioOverride> Maasai)>
+        GetRatioOverridesAsync(CancellationToken ct);
+
+    Task UpsertBandRatioOverrideAsync(Pricing.BandRatioOverride o, string? note, CancellationToken ct);
+    Task UpsertMaasaiRatioOverrideAsync(Pricing.MaasaiRatioOverride o, string? note, CancellationToken ct);
+
+    /// <summary>Removes an override so the category+band reverts to the hard-coded default.</summary>
+    Task DeleteBandRatioOverrideAsync(string category, string band, CancellationToken ct);
+    Task DeleteMaasaiRatioOverrideAsync(string category, int bandIndex, CancellationToken ct);
 }
 
 public class LubesPricingRepository : ILubesPricingRepository
@@ -99,6 +111,31 @@ public class LubesPricingRepository : ILubesPricingRepository
                     ADD COLUMN IF NOT EXISTS "LastEurCost"    numeric NULL,
                     ADD COLUMN IF NOT EXISTS "LastEurTzsRate" numeric NULL,
                     ADD COLUMN IF NOT EXISTS "LastPricedAt"   timestamptz NULL;
+                CREATE TABLE IF NOT EXISTS public."pricing_band_ratio_overrides" (
+                    "Category"  text NOT NULL,
+                    "Band"      text NOT NULL,
+                    "SpRatio"     numeric NOT NULL,
+                    "DealerRatio" numeric NOT NULL,
+                    "RetailRatio" numeric NOT NULL,
+                    "UpdatedAt" timestamptz NOT NULL DEFAULT now(),
+                    PRIMARY KEY ("Category", "Band")
+                );
+                CREATE TABLE IF NOT EXISTS public."pricing_maasai_ratio_overrides" (
+                    "Category"  text NOT NULL,
+                    "BandIndex" int  NOT NULL,
+                    "Ratio"     numeric NOT NULL,
+                    "UpdatedAt" timestamptz NOT NULL DEFAULT now(),
+                    PRIMARY KEY ("Category", "BandIndex")
+                );
+                CREATE TABLE IF NOT EXISTS public."ratio_change_log" (
+                    "Id"        bigserial PRIMARY KEY,
+                    "Kind"      text NOT NULL,       -- band | maasai | reset
+                    "Category"  text NOT NULL,
+                    "Band"      text NOT NULL,
+                    "NewValues" text NOT NULL,
+                    "Note"      text NULL,
+                    "ChangedAt" timestamptz NOT NULL DEFAULT now()
+                );
                 """;
             await using var cmd = new NpgsqlCommand(sql, conn);
             await cmd.ExecuteNonQueryAsync(ct);
@@ -250,5 +287,110 @@ public class LubesPricingRepository : ILubesPricingRepository
                 r.IsDBNull(2) ? null : r.GetInt32(2)));
         }
         return list;
+    }
+
+    // ── Ratio overrides ──────────────────────────────────────────────
+
+    public async Task<(List<Pricing.BandRatioOverride> Band, List<Pricing.MaasaiRatioOverride> Maasai)>
+        GetRatioOverridesAsync(CancellationToken ct)
+    {
+        var band = new List<Pricing.BandRatioOverride>();
+        var maasai = new List<Pricing.MaasaiRatioOverride>();
+
+        await using var conn = await OpenAsync(ct);
+        await using (var cmd = new NpgsqlCommand(
+            """SELECT "Category","Band","SpRatio","DealerRatio","RetailRatio" FROM public."pricing_band_ratio_overrides";""",
+            conn))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+        {
+            while (await r.ReadAsync(ct))
+                band.Add(new Pricing.BandRatioOverride(
+                    r.GetString(0), r.GetString(1), r.GetDecimal(2), r.GetDecimal(3), r.GetDecimal(4)));
+        }
+        await using (var cmd = new NpgsqlCommand(
+            """SELECT "Category","BandIndex","Ratio" FROM public."pricing_maasai_ratio_overrides";""",
+            conn))
+        await using (var r = await cmd.ExecuteReaderAsync(ct))
+        {
+            while (await r.ReadAsync(ct))
+                maasai.Add(new Pricing.MaasaiRatioOverride(r.GetString(0), r.GetInt32(1), r.GetDecimal(2)));
+        }
+        return (band, maasai);
+    }
+
+    public async Task UpsertBandRatioOverrideAsync(
+        Pricing.BandRatioOverride o, string? note, CancellationToken ct)
+    {
+        const string sql = """
+            INSERT INTO public."pricing_band_ratio_overrides"
+                ("Category","Band","SpRatio","DealerRatio","RetailRatio","UpdatedAt")
+            VALUES (@c,@b,@sp,@d,@r,now())
+            ON CONFLICT ("Category","Band") DO UPDATE SET
+                "SpRatio" = EXCLUDED."SpRatio", "DealerRatio" = EXCLUDED."DealerRatio",
+                "RetailRatio" = EXCLUDED."RetailRatio", "UpdatedAt" = now();
+            INSERT INTO public."ratio_change_log" ("Kind","Category","Band","NewValues","Note")
+            VALUES ('band', @c, @b, @vals, @note);
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("c", o.Category);
+        cmd.Parameters.AddWithValue("b", o.Band);
+        cmd.Parameters.AddWithValue("sp", o.Sp);
+        cmd.Parameters.AddWithValue("d", o.Dealer);
+        cmd.Parameters.AddWithValue("r", o.Retail);
+        cmd.Parameters.AddWithValue("vals", $"sp={o.Sp} dealer={o.Dealer} retail={o.Retail}");
+        cmd.Parameters.AddWithValue("note", (object?)note ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task UpsertMaasaiRatioOverrideAsync(
+        Pricing.MaasaiRatioOverride o, string? note, CancellationToken ct)
+    {
+        const string sql = """
+            INSERT INTO public."pricing_maasai_ratio_overrides" ("Category","BandIndex","Ratio","UpdatedAt")
+            VALUES (@c,@i,@r,now())
+            ON CONFLICT ("Category","BandIndex") DO UPDATE SET
+                "Ratio" = EXCLUDED."Ratio", "UpdatedAt" = now();
+            INSERT INTO public."ratio_change_log" ("Kind","Category","Band","NewValues","Note")
+            VALUES ('maasai', @c, @band, @vals, @note);
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("c", o.Category);
+        cmd.Parameters.AddWithValue("i", o.BandIndex);
+        cmd.Parameters.AddWithValue("r", o.Ratio);
+        cmd.Parameters.AddWithValue("band", $"maasai-band-{o.BandIndex}");
+        cmd.Parameters.AddWithValue("vals", $"ratio={o.Ratio}");
+        cmd.Parameters.AddWithValue("note", (object?)note ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DeleteBandRatioOverrideAsync(string category, string band, CancellationToken ct)
+    {
+        const string sql = """
+            DELETE FROM public."pricing_band_ratio_overrides" WHERE "Category" = @c AND "Band" = @b;
+            INSERT INTO public."ratio_change_log" ("Kind","Category","Band","NewValues","Note")
+            VALUES ('reset', @c, @b, 'reverted to default', NULL);
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("c", category);
+        cmd.Parameters.AddWithValue("b", band);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task DeleteMaasaiRatioOverrideAsync(string category, int bandIndex, CancellationToken ct)
+    {
+        const string sql = """
+            DELETE FROM public."pricing_maasai_ratio_overrides" WHERE "Category" = @c AND "BandIndex" = @i;
+            INSERT INTO public."ratio_change_log" ("Kind","Category","Band","NewValues","Note")
+            VALUES ('reset', @c, @band, 'reverted to default', NULL);
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("c", category);
+        cmd.Parameters.AddWithValue("i", bandIndex);
+        cmd.Parameters.AddWithValue("band", $"maasai-band-{bandIndex}");
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 }

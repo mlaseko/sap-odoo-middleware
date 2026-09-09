@@ -65,6 +65,14 @@ public interface INeonProductRepository
 
     /// <summary>One item's pricing-relevant fields + stored price lists, or null when absent.</summary>
     Task<NeonPricingSnapshot?> GetPricingSnapshotAsync(string itemCode, CancellationToken ct);
+
+    /// <summary>
+    /// Updates an item's classification (SAP group and, when supplied, Odoo category).
+    /// Null category values leave the existing ones untouched.
+    /// </summary>
+    Task UpdateClassificationAsync(
+        string itemCode, int groupCode, string? groupName,
+        string? odooCategoryName, string? odooCategoryExternalId, CancellationToken ct);
 }
 
 /// <summary>
@@ -313,5 +321,28 @@ public class NeonProductRepository : INeonProductRepository
         return new NeonPricingSnapshot(
             itemCode, itemName, groupCode, groupName, category, sapStatus, syncedAt, prices,
             lastEurCost, lastRate, lastPricedAt);
+    }
+
+    public async Task UpdateClassificationAsync(
+        string itemCode, int groupCode, string? groupName,
+        string? odooCategoryName, string? odooCategoryExternalId, CancellationToken ct)
+    {
+        const string sql = """
+            UPDATE public."NeonProducts"
+            SET "ItemGroupCode"          = @g,
+                "ItemGroupName"          = COALESCE(@gn, "ItemGroupName"),
+                "OdooCategoryName"       = COALESCE(@cn, "OdooCategoryName"),
+                "OdooCategoryExternalId" = COALESCE(@ce, "OdooCategoryExternalId"),
+                "SyncedAt"               = now()
+            WHERE "ItemCode" = @i;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("i", itemCode);
+        cmd.Parameters.AddWithValue("g", groupCode);
+        cmd.Parameters.AddWithValue("gn", (object?)groupName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("cn", (object?)odooCategoryName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("ce", (object?)odooCategoryExternalId ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 }

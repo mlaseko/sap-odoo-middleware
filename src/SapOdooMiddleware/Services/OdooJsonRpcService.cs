@@ -125,6 +125,48 @@ public class OdooJsonRpcService : IOdooService
         return notes;
     }
 
+    /// <inheritdoc/>
+    public async Task<List<string>> UpdateLubesCategoryAsync(string itemCode, string categoryFullPath)
+    {
+        if (!_settings.UseBearerAuth)
+            await EnsureAuthenticatedAsync();
+
+        var notes = new List<string>();
+
+        var productIds = await SearchAsync("product.product", new JsonArray
+        {
+            new JsonArray { JsonValue.Create("default_code"), JsonValue.Create("="), JsonValue.Create(itemCode) }
+        });
+        if (productIds.Count == 0)
+        {
+            notes.Add($"Odoo: no product with default_code '{itemCode}' — category not updated.");
+            return notes;
+        }
+
+        // Try the full hierarchical name first, then the last segment.
+        var catIds = await SearchAsync("product.category", new JsonArray
+        {
+            new JsonArray { JsonValue.Create("complete_name"), JsonValue.Create("="), JsonValue.Create(categoryFullPath) }
+        });
+        if (catIds.Count == 0)
+        {
+            var leaf = categoryFullPath.Split('/')[^1].Trim();
+            catIds = await SearchAsync("product.category", new JsonArray
+            {
+                new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(leaf) }
+            });
+            if (catIds.Count == 0)
+            {
+                notes.Add($"Odoo: no product.category matching '{categoryFullPath}' — category not updated.");
+                return notes;
+            }
+        }
+
+        await WriteAsync("product.product", productIds[0], new JsonObject { ["categ_id"] = catIds[0] });
+        notes.Add($"Odoo: product {productIds[0]} category set to '{categoryFullPath}' (categ_id {catIds[0]}).");
+        return notes;
+    }
+
     public async Task<DeliveryUpdateResponse> ConfirmDeliveryAsync(DeliveryUpdateRequest request)
     {
         if (!_settings.UseBearerAuth)

@@ -30,6 +30,7 @@
         <h2>Price Management</h2>
         <div class="sub">Lubes price lists — reprice from EUR cost through the standard workflow (SAP + Neon + Odoo)</div>
     </div>
+    <a class="btn" href="/pricing/ratios">⚙ Pricing Ratios</a>
 </div>
 
 @if (Model.Message is not null) { <div class="msg-ok">@Model.Message</div> }
@@ -132,6 +133,32 @@
                 }
             </div>
         }
+    }
+
+    @if (Model.Preview is { Found: true } cp && Model.SapGroups.Count > 0)
+    {
+        <h4 style="margin:16px 0 6px">Classification (drives the pricing band)</h4>
+        <form method="post" asp-page-handler="Reclassify" class="inline-form">
+            <input type="hidden" name="itemCode" value="@cp.ItemCode" />
+            <label>SAP group:</label>
+            <select name="groupCode">
+                @foreach (var g in Model.SapGroups)
+                {
+                    var isCurrent = cp.CategoryPath is not null && cp.CategoryPath.Contains($"SAP group {g.Code} ");
+                    <option value="@g.Code" selected="@isCurrent">@g.Code — @g.Name</option>
+                }
+            </select>
+            <label>Odoo category:</label>
+            <input type="text" name="odooCategoryPath" list="odooCats" style="min-width:280px"
+                   placeholder="type to search (optional)" />
+            <datalist id="odooCats">
+                @foreach (var c in Model.OdooCategories)
+                { <option value="@(c.FullPath ?? c.Name)"></option> }
+            </datalist>
+            <button class="btn btn-primary" type="submit"
+                    onclick="return confirm('Reclassify this item in SAP (+ Neon/Odoo)? The pricing band may change — reprice afterwards.')">
+                Save classification</button>
+        </form>
     }
 
     @if (Model.History.Count > 0)

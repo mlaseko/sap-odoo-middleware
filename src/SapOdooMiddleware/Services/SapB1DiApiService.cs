@@ -7058,6 +7058,79 @@ ORDER BY PostingDate, DocumentNumber";
             return false;
         }
     }
+
+    /// <inheritdoc/>
+    public async Task<List<(int Code, string Name)>> GetItemGroupsAsync(CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery("SELECT T0.\"ItmsGrpCod\", T0.\"ItmsGrpNam\" FROM OITB T0 ORDER BY T0.\"ItmsGrpCod\"");
+                var list = new List<(int, string)>();
+                while (!rs.EoF)
+                {
+                    list.Add((
+                        Convert.ToInt32(rs.Fields.Item("ItmsGrpCod").Value),
+                        rs.Fields.Item("ItmsGrpNam").Value?.ToString() ?? ""));
+                    rs.MoveNext();
+                }
+                return list;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task SetItemClassificationAsync(
+        string itemCode, int groupCode, string? odooCategoryName, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException($"SAP item '{itemCode}' not found.");
+
+                items.ItemsGroupCode = groupCode;
+                if (!string.IsNullOrWhiteSpace(odooCategoryName))
+                    TrySetUserField(items.UserFields, "U_Odoo_Category", odooCategoryName, "Item classification");
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed reclassifying {itemCode} to group {groupCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP item reclassified: ItemCode={ItemCode}, Group={Group}, OdooCategory={Category}",
+                    itemCode, groupCode, odooCategoryName ?? "(unchanged)");
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 }
 
 /// <summary>

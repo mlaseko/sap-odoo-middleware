@@ -226,6 +226,11 @@ public class PricingTraceController : ControllerBase
         return Ok(ApiResponse<EffectiveRate>.Ok(await _pricingRepo.GetEffectiveRateAsync(ct)));
     }
 
+    /// <summary>GET /api/pricing/ratios — the calculator's effective ratio tables (defaults + overrides).</summary>
+    [HttpGet("ratios")]
+    public IActionResult GetRatios()
+        => Ok(ApiResponse<PricingRatioSnapshot>.Ok(_pricing.GetRatioSnapshot()));
+
     // ── Single-item reprice ──────────────────────────────────────────
 
     /// <summary>
