@@ -16,6 +16,7 @@ namespace SapOdooMiddleware.Services;
 public class OdooJsonRpcService : IOdooService
 {
     private readonly OdooSettings _settings;
+    private readonly PricingSettings _pricingSettings;
     private readonly HttpClient _httpClient;
     private readonly ILogger<OdooJsonRpcService> _logger;
 
@@ -24,12 +25,104 @@ public class OdooJsonRpcService : IOdooService
 
     public OdooJsonRpcService(
         IOptions<OdooSettings> settings,
+        IOptions<PricingSettings> pricingSettings,
         HttpClient httpClient,
         ILogger<OdooJsonRpcService> logger)
     {
         _settings = settings.Value;
+        _pricingSettings = pricingSettings.Value;
         _httpClient = httpClient;
         _logger = logger;
+    }
+
+    /// <inheritdoc/>
+    public async Task<List<string>> UpdateLubesPricesAsync(
+        string itemCode, decimal retailNet, decimal dealerNet, decimal superDealerNet, decimal maasaiNet)
+    {
+        if (!_settings.UseBearerAuth)
+            await EnsureAuthenticatedAsync();
+
+        var notes = new List<string>();
+
+        var productIds = await SearchAsync("product.product", new JsonArray
+        {
+            new JsonArray { JsonValue.Create("default_code"), JsonValue.Create("="), JsonValue.Create(itemCode) }
+        });
+        if (productIds.Count == 0)
+        {
+            notes.Add($"Odoo: no product with default_code '{itemCode}' — Odoo prices not updated.");
+            return notes;
+        }
+        int productId = productIds[0];
+
+        // The base sales price always follows Retail (matches provisioning's ListPrice).
+        await WriteAsync("product.product", productId, new JsonObject { ["list_price"] = retailNet });
+        notes.Add($"Odoo: product {productId} list_price = {retailNet:0.##}.");
+
+        // Tier pricelists — only those mapped in Pricing:OdooPricelistNames are touched.
+        var tiers = new (string Tier, decimal Price)[]
+        {
+            ("Retail", retailNet), ("Dealer", dealerNet),
+            ("SuperDealer", superDealerNet), ("Maasai", maasaiNet),
+        };
+        foreach (var (tier, price) in tiers)
+        {
+            if (!_pricingSettings.OdooPricelistNames.TryGetValue(tier, out var plName)
+                || string.IsNullOrWhiteSpace(plName))
+                continue;
+
+            try
+            {
+                var plIds = await SearchAsync("product.pricelist", new JsonArray
+                {
+                    new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(plName) }
+                });
+                if (plIds.Count == 0)
+                {
+                    notes.Add($"Odoo: pricelist '{plName}' ({tier}) not found — skipped.");
+                    continue;
+                }
+                int plId = plIds[0];
+
+                var itemIds = await SearchAsync("product.pricelist.item", new JsonArray
+                {
+                    new JsonArray { JsonValue.Create("pricelist_id"), JsonValue.Create("="), JsonValue.Create(plId) },
+                    new JsonArray { JsonValue.Create("product_id"), JsonValue.Create("="), JsonValue.Create(productId) }
+                });
+
+                if (itemIds.Count > 0)
+                {
+                    await WriteAsync("product.pricelist.item", itemIds[0], new JsonObject
+                    {
+                        ["compute_price"] = "fixed",
+                        ["fixed_price"] = price,
+                    });
+                    notes.Add($"Odoo: pricelist '{plName}' ({tier}) updated to {price:0.##}.");
+                }
+                else
+                {
+                    await CreateAsync("product.pricelist.item", new JsonObject
+                    {
+                        ["pricelist_id"] = plId,
+                        ["applied_on"] = "0_product_variant",
+                        ["product_id"] = productId,
+                        ["compute_price"] = "fixed",
+                        ["fixed_price"] = price,
+                        ["min_quantity"] = 0,
+                    });
+                    notes.Add($"Odoo: pricelist '{plName}' ({tier}) rule created at {price:0.##}.");
+                }
+            }
+            catch (Exception ex)
+            {
+                notes.Add($"Odoo: pricelist '{plName}' ({tier}) update FAILED: {ex.Message}");
+                _logger.LogWarning(ex,
+                    "Odoo pricelist update failed for {ItemCode} tier {Tier} → '{Pricelist}'",
+                    itemCode, tier, plName);
+            }
+        }
+
+        return notes;
     }
 
     public async Task<DeliveryUpdateResponse> ConfirmDeliveryAsync(DeliveryUpdateRequest request)

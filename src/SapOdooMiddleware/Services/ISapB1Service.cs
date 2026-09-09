@@ -267,6 +267,14 @@ public interface ISapB1Service
     Task SetPriceListPriceAsync(string itemCode, int priceListIndex, decimal netPrice, CancellationToken ct);
 
     /// <summary>
+    /// Sets several price-list prices on one OITM item in a SINGLE GetByKey + Update
+    /// (used by repricing — 4 lists per item would otherwise cost 4 SAP round trips).
+    /// Keys are 0-based PriceList collection indexes (0 = PL01 … 3 = PL04).
+    /// </summary>
+    Task SetPriceListPricesAsync(
+        string itemCode, IReadOnlyDictionary<int, decimal> netPricesByIndex, CancellationToken ct);
+
+    /// <summary>
     /// Returns ItemCode → ItmsGrpCod for every active item in SAP B1 (OITM).
     /// Uses a single Recordset query — no per-item overhead. Used by the PL04 backfill
     /// to resolve pricing categories from the authoritative SAP group code rather than

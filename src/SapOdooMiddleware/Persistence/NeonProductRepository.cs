@@ -35,7 +35,12 @@ public record NeonPricingSnapshot(
     string? SapStatus,
     DateTime? SyncedAt,
     /// <summary>PriceList (1-4) → stored NET price.</summary>
-    Dictionary<int, decimal> StoredNetPrices);
+    Dictionary<int, decimal> StoredNetPrices,
+    /// <summary>The EUR cost this item was last priced with (null before first stamp).</summary>
+    decimal? LastEurCost = null,
+    /// <summary>The EUR→TZS rate used at the last pricing (null before first stamp).</summary>
+    decimal? LastEurTzsRate = null,
+    DateTime? LastPricedAt = null);
 
 public interface INeonProductRepository
 {
@@ -250,9 +255,14 @@ public class NeonProductRepository : INeonProductRepository
 
     public async Task<NeonPricingSnapshot?> GetPricingSnapshotAsync(string itemCode, CancellationToken ct)
     {
+        // to_jsonb + ->> keeps this query working even before LubesPricingRepository has
+        // ensured the Last* columns exist (they read as NULL instead of erroring).
         const string productSql = """
-            SELECT "ItemName","ItemGroupCode","ItemGroupName","OdooCategoryName","SapStatus","SyncedAt"
-            FROM public."NeonProducts"
+            SELECT "ItemName","ItemGroupCode","ItemGroupName","OdooCategoryName","SapStatus","SyncedAt",
+                   (to_jsonb(p) ->> 'LastEurCost')::numeric,
+                   (to_jsonb(p) ->> 'LastEurTzsRate')::numeric,
+                   (to_jsonb(p) ->> 'LastPricedAt')::timestamptz
+            FROM public."NeonProducts" p
             WHERE "ItemCode" = @ItemCode
             LIMIT 1;
             """;
@@ -266,7 +276,8 @@ public class NeonProductRepository : INeonProductRepository
 
         string? itemName = null, groupName = null, category = null, sapStatus = null;
         int? groupCode = null;
-        DateTime? syncedAt = null;
+        DateTime? syncedAt = null, lastPricedAt = null;
+        decimal? lastEurCost = null, lastRate = null;
         bool found = false;
 
         await using (var cmd = new NpgsqlCommand(productSql, conn))
@@ -282,6 +293,9 @@ public class NeonProductRepository : INeonProductRepository
                 category  = r.IsDBNull(3) ? null : r.GetString(3);
                 sapStatus = r.IsDBNull(4) ? null : r.GetString(4);
                 syncedAt  = r.IsDBNull(5) ? null : r.GetDateTime(5);
+                lastEurCost  = r.IsDBNull(6) ? null : r.GetDecimal(6);
+                lastRate     = r.IsDBNull(7) ? null : r.GetDecimal(7);
+                lastPricedAt = r.IsDBNull(8) ? null : r.GetDateTime(8);
             }
         }
         if (!found)
@@ -297,6 +311,7 @@ public class NeonProductRepository : INeonProductRepository
         }
 
         return new NeonPricingSnapshot(
-            itemCode, itemName, groupCode, groupName, category, sapStatus, syncedAt, prices);
+            itemCode, itemName, groupCode, groupName, category, sapStatus, syncedAt, prices,
+            lastEurCost, lastRate, lastPricedAt);
     }
 }

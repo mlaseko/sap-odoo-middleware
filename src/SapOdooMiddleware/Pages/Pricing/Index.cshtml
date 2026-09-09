@@ -1,0 +1,245 @@
+@page "/pricing"
+@model SapOdooMiddleware.Pages.Pricing.IndexModel
+@functions {
+    static string Money(decimal? v) => v is null ? "—" : v.Value.ToString("N0");
+    static string DeltaCls(decimal? pct) => pct is null ? "" : Math.Abs(pct.Value) > 30 ? "delta-big" : pct > 0 ? "delta-up" : "delta-down";
+    static string DeltaTxt(decimal? pct) => pct is null ? "new" : $"{pct:+0.#;-0.#}%";
+}
+
+<style>
+    .price-grid { border-collapse: collapse; width: 100%; font-size: 13px; }
+    .price-grid th, .price-grid td { border: 1px solid #ddd; padding: 5px 9px; text-align: right; }
+    .price-grid th { background: #f5f5f5; text-align: center; }
+    .price-grid td:first-child { text-align: left; }
+    .delta-up { color: #b45309; font-weight: 600; }
+    .delta-down { color: #1d4ed8; font-weight: 600; }
+    .delta-big { color: #b91c1c; font-weight: 700; }
+    .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 14px 16px; margin: 14px 0; background: #fff; }
+    .card h3 { margin: 0 0 8px; }
+    .inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .inline-form input[type=text], .inline-form input[type=number] { padding: 5px 8px; border: 1px solid #ccc; border-radius: 5px; }
+    .msg-ok { background: #ecfdf5; border: 1px solid #10b981; color: #065f46; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
+    .msg-err { background: #fef2f2; border: 1px solid #ef4444; color: #991b1b; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
+    .msg-warn { background: #fffbeb; border: 1px solid #f59e0b; color: #92400e; padding: 6px 10px; border-radius: 6px; margin: 6px 0; font-size: 13px; }
+    .meta { color: #666; font-size: 12px; }
+    .bulk-scroll { max-height: 420px; overflow: auto; }
+</style>
+
+<div class="page-head">
+    <div>
+        <h2>Price Management</h2>
+        <div class="sub">Lubes price lists — reprice from EUR cost through the standard workflow (SAP + Neon + Odoo)</div>
+    </div>
+</div>
+
+@if (Model.Message is not null) { <div class="msg-ok">@Model.Message</div> }
+@if (Model.Error is not null) { <div class="msg-err">@Model.Error</div> }
+
+@* ── EUR→TZS rate ─────────────────────────────────────────────── *@
+<div class="card">
+    <h3>EUR → TZS rate</h3>
+    <div class="meta">
+        Effective: <b>@Model.Rate.Rate.ToString("N0")</b> — source: @Model.Rate.Source
+        @if (Model.Rate.UpdatedAt is not null) { <text> (updated @Model.Rate.UpdatedAt?.ToString("yyyy-MM-dd HH:mm") UTC)</text> }
+    </div>
+    <form method="post" asp-page-handler="Rate" class="inline-form" style="margin-top:8px">
+        <input type="number" name="newRate" step="0.01" min="1" placeholder="e.g. 3050" required />
+        <button class="btn btn-primary" type="submit"
+                onclick="return confirm('Set the EUR→TZS rate? Provisioning and all future repricing will use it.')">Set rate</button>
+    </form>
+</div>
+
+@* ── Single item ──────────────────────────────────────────────── *@
+<div class="card">
+    <h3>Single item reprice</h3>
+    <form method="post" asp-page-handler="Lookup" class="inline-form">
+        <input type="text" name="itemCode" placeholder="Item code (LM article, e.g. 4702)"
+               value="@Model.LookedUpItem" required />
+        <button class="btn" type="submit">Look up</button>
+    </form>
+
+    @if (Model.Preview is { } p)
+    {
+        @if (!p.Found)
+        {
+            <div class="msg-err">@p.Error</div>
+        }
+        else
+        {
+            <div style="margin-top:10px">
+                <b>@p.ItemCode</b> — @p.ItemName
+                <div class="meta">
+                    Category: <b>@(p.PricingCategory ?? "unresolved")</b> (@p.CategoryPath)<br />
+                    Stored EUR cost: <b>@(p.EurCost?.ToString("N2") ?? "none")</b>
+                    @if (p.EurCostSource is not null) { <text> — @p.EurCostSource</text> }
+                    · Rate: <b>@p.Rate.ToString("N0")</b>
+                    @if (p.CifTzs is not null) { <text> · CIF TZS: <b>@p.CifTzs?.ToString("N0")</b></text> }
+                </div>
+            </div>
+
+            <table class="price-grid" style="margin-top:8px">
+                <tr>
+                    <th>Price list (net TZS)</th><th>PL1 Retail</th><th>PL2 Dealer</th>
+                    <th>PL3 Super Dealer</th><th>PL4 Maasai</th>
+                </tr>
+                <tr>
+                    <td>Current (stored)</td>
+                    <td>@Money(p.OldNet.GetValueOrDefault(1))</td>
+                    <td>@Money(p.OldNet.GetValueOrDefault(2))</td>
+                    <td>@Money(p.OldNet.GetValueOrDefault(3))</td>
+                    <td>@Money(p.OldNet.GetValueOrDefault(4))</td>
+                </tr>
+                @if (p.NewNet is not null)
+                {
+                    <tr>
+                        <td>Recomputed</td>
+                        <td>@Money(p.NewNet.GetValueOrDefault(1))</td>
+                        <td>@Money(p.NewNet.GetValueOrDefault(2))</td>
+                        <td>@Money(p.NewNet.GetValueOrDefault(3))</td>
+                        <td>@Money(p.NewNet.GetValueOrDefault(4))</td>
+                    </tr>
+                    <tr>
+                        <td>Change</td>
+                        @for (int pl = 1; pl <= 4; pl++)
+                        {
+                            var d = p.DeltaPct?.GetValueOrDefault(pl);
+                            <td class="@DeltaCls(d)">@DeltaTxt(d)</td>
+                        }
+                    </tr>
+                }
+            </table>
+
+            @foreach (var w in p.Warnings) { <div class="msg-warn">⚠ @w</div> }
+            @if (p.Error is not null && p.Found) { <div class="msg-err">@p.Error</div> }
+
+            <div style="margin-top:12px">
+                <form method="post" asp-page-handler="Preview" class="inline-form" style="display:inline-flex">
+                    <input type="hidden" name="itemCode" value="@p.ItemCode" />
+                    <label>New EUR cost:</label>
+                    <input type="number" name="eurCost" step="0.01" min="0.01"
+                           value="@(Model.EnteredEurCost?.ToString("0.##"))" required />
+                    <button class="btn" type="submit">Preview change</button>
+                </form>
+                @if (p.CanApply && Model.EnteredEurCost is not null)
+                {
+                    <form method="post" asp-page-handler="Apply" class="inline-form" style="display:inline-flex; margin-left:10px">
+                        <input type="hidden" name="itemCode" value="@p.ItemCode" />
+                        <input type="hidden" name="eurCost" value="@Model.EnteredEurCost" />
+                        <input type="text" name="note" placeholder="reason / note (optional)" />
+                        <button class="btn btn-primary" type="submit"
+                                onclick="return confirm('Post these prices to SAP, Neon and Odoo?')">Confirm &amp; Post</button>
+                    </form>
+                }
+            </div>
+        }
+    }
+
+    @if (Model.History.Count > 0)
+    {
+        <h4 style="margin:16px 0 6px">Price history</h4>
+        <table class="price-grid">
+            <tr><th>When (UTC)</th><th>Mode</th><th>EUR</th><th>Rate</th><th>PL1</th><th>PL2</th><th>PL3</th><th>PL4</th><th>Note</th></tr>
+            @foreach (var h in Model.History)
+            {
+                <tr>
+                    <td>@h.ChangedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                    <td>@h.Mode</td>
+                    <td>@(h.EurCost?.ToString("N2") ?? "—")</td>
+                    <td>@(h.Rate?.ToString("N0") ?? "—")</td>
+                    <td>@Money(h.NewPl1)</td><td>@Money(h.NewPl2)</td><td>@Money(h.NewPl3)</td><td>@Money(h.NewPl4)</td>
+                    <td style="text-align:left">@h.Note</td>
+                </tr>
+            }
+        </table>
+    }
+</div>
+
+@* ── Bulk ─────────────────────────────────────────────────────── *@
+<div class="card">
+    <h3>Bulk reprice</h3>
+    <div class="meta" style="margin-bottom:8px">
+        Excel: columns <b>ItemCode</b> and <b>EurCost</b> (header row optional). Filter: reprices every item in a
+        band from its stored EUR cost — use it after a rate change.
+    </div>
+
+    <form method="post" asp-page-handler="Upload" enctype="multipart/form-data" class="inline-form">
+        <input type="file" name="file" accept=".xlsx" required />
+        <label>Rate override (optional):</label>
+        <input type="number" name="bulkRate" step="0.01" min="1" value="@(Model.BulkRate?.ToString("0.##"))" />
+        <button class="btn" type="submit">Upload &amp; preview</button>
+    </form>
+
+    <form method="post" asp-page-handler="FilterPreview" class="inline-form" style="margin-top:8px">
+        <label>Or by band:</label>
+        <select name="category">
+            @foreach (var c in SapOdooMiddleware.Pages.Pricing.IndexModel.CategoryOptions)
+            { <option value="@c">@c</option> }
+        </select>
+        <label>Rate override (optional):</label>
+        <input type="number" name="bulkRate" step="0.01" min="1" />
+        <button class="btn" type="submit">Preview band reprice</button>
+    </form>
+
+    @foreach (var e in Model.BulkParseErrors) { <div class="msg-warn">@e</div> }
+
+    @if (Model.BulkLines.Count > 0)
+    {
+        <div class="bulk-scroll" style="margin-top:10px">
+            <table class="price-grid">
+                <tr><th>Item</th><th>EUR</th><th>PL1 old→new</th><th>PL2 old→new</th><th>PL3 old→new</th><th>PL4 old→new</th><th>Δ PL1</th><th>Status</th></tr>
+                @foreach (var l in Model.BulkLines)
+                {
+                    <tr>
+                        <td>@l.ItemCode</td>
+                        <td>@(l.EurCost?.ToString("N2") ?? "—")</td>
+                        @for (int pl = 1; pl <= 4; pl++)
+                        {
+                            <td>@Money(l.OldNet.GetValueOrDefault(pl)) → @Money(l.NewNet?.GetValueOrDefault(pl))</td>
+                        }
+                        <td class="@DeltaCls(l.DeltaPct?.GetValueOrDefault(1))">@DeltaTxt(l.DeltaPct?.GetValueOrDefault(1))</td>
+                        <td style="text-align:left">
+                            @if (!l.CanApply) { <span class="delta-big">@l.Error</span> }
+                            else if (l.Warnings.Count > 0) { <span class="delta-up">⚠ &gt;30%</span> }
+                            else { <text>ok</text> }
+                        </td>
+                    </tr>
+                }
+            </table>
+        </div>
+
+        @if (Model.PendingBulkJson is not null)
+        {
+            <form method="post" asp-page-handler="BulkApply" class="inline-form" style="margin-top:10px">
+                <input type="hidden" name="pendingJson" value="@Model.PendingBulkJson" />
+                <input type="hidden" name="bulkRate" value="@Model.BulkRate" />
+                <input type="text" name="note" placeholder="reason / note (optional)" />
+                <button class="btn btn-primary" type="submit"
+                        onclick="return confirm('Start the bulk reprice job? Prices post to SAP, Neon and Odoo.')">
+                    Apply all applicable lines
+                </button>
+            </form>
+        }
+    }
+
+    @if (Model.Job is { } job)
+    {
+        <h4 style="margin:16px 0 6px">Latest bulk job</h4>
+        <div class="meta">
+            @job.Status — @job.Processed / @job.TotalItems processed, @job.Applied applied,
+            @job.Failed failed, @job.Warned with warnings
+            (started @job.StartedAt.ToString("HH:mm:ss") UTC@(job.FinishedAt is null ? "" : $", finished {job.FinishedAt:HH:mm:ss}"))
+            @if (job.Error is not null) { <span class="delta-big"> — @job.Error</span> }
+        </div>
+        @if (job.Status == "running")
+        {
+            <form method="post" asp-page-handler="StopJob" style="display:inline"><button class="btn" type="submit">Stop job</button></form>
+            <a class="btn" href="/pricing">Refresh</a>
+        }
+        @if (job.Failures.Count > 0)
+        {
+            <details style="margin-top:6px"><summary>@job.Failures.Count failure(s)</summary>
+                <ul>@foreach (var f in job.Failures) { <li><b>@f.ItemCode</b>: @f.Error</li> }</ul>
+            </details>
+        }
+    }
+</div>
