@@ -73,6 +73,13 @@ public interface INeonProductRepository
     Task UpdateClassificationAsync(
         string itemCode, int groupCode, string? groupName,
         string? odooCategoryName, string? odooCategoryExternalId, CancellationToken ct);
+
+    /// <summary>
+    /// Item picker search: case-insensitive match on ItemCode OR ItemName,
+    /// code-prefix matches first, capped at <paramref name="limit"/>.
+    /// </summary>
+    Task<IReadOnlyList<(string ItemCode, string? ItemName)>> SearchProductsAsync(
+        string term, int limit, CancellationToken ct);
 }
 
 /// <summary>
@@ -344,5 +351,29 @@ public class NeonProductRepository : INeonProductRepository
         cmd.Parameters.AddWithValue("cn", (object?)odooCategoryName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("ce", (object?)odooCategoryExternalId ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<(string ItemCode, string? ItemName)>> SearchProductsAsync(
+        string term, int limit, CancellationToken ct)
+    {
+        // Code-prefix matches rank first, then code/name substring matches.
+        const string sql = """
+            SELECT "ItemCode", "ItemName"
+            FROM public."NeonProducts"
+            WHERE "ItemCode" ILIKE @sub OR "ItemName" ILIKE @sub
+            ORDER BY ("ItemCode" ILIKE @prefix) DESC, "ItemCode"
+            LIMIT @limit;
+            """;
+
+        var list = new List<(string, string?)>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("sub", $"%{term}%");
+        cmd.Parameters.AddWithValue("prefix", $"{term}%");
+        cmd.Parameters.AddWithValue("limit", limit);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            list.Add((r.GetString(0), r.IsDBNull(1) ? null : r.GetString(1)));
+        return list;
     }
 }

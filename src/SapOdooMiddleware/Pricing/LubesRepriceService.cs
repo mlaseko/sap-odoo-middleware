@@ -72,6 +72,7 @@ public class LubesRepriceService : ILubesRepriceService
 
     private readonly INeonProductRepository _neon;
     private readonly ILubesPricingRepository _pricingRepo;
+    private readonly IStagingDocumentLineRepository _stagingLines;
     private readonly IPricingCalculator _calc;
     private readonly ISapB1Service _sap;
     private readonly IOdooService _odoo;
@@ -80,6 +81,7 @@ public class LubesRepriceService : ILubesRepriceService
     public LubesRepriceService(
         INeonProductRepository neon,
         ILubesPricingRepository pricingRepo,
+        IStagingDocumentLineRepository stagingLines,
         IPricingCalculator calc,
         ISapB1Service sap,
         IOdooService odoo,
@@ -87,6 +89,7 @@ public class LubesRepriceService : ILubesRepriceService
     {
         _neon = neon;
         _pricingRepo = pricingRepo;
+        _stagingLines = stagingLines;
         _calc = calc;
         _sap = sap;
         _odoo = odoo;
@@ -107,11 +110,34 @@ public class LubesRepriceService : ILubesRepriceService
 
         var rate = rateOverride ?? (await _pricingRepo.GetEffectiveRateAsync(ct)).Rate;
 
-        var (eur, eurSource) = eurCost is > 0m
-            ? (eurCost, "request")
-            : snapshot.LastEurCost is > 0m
-                ? (snapshot.LastEurCost, $"stored (last priced {snapshot.LastPricedAt:yyyy-MM-dd})")
-                : ((decimal?)null, null);
+        // EUR cost resolution: explicit request → stamped LastEurCost → the latest
+        // extracted invoice line for this article across ALL staging documents.
+        decimal? eur;
+        string? eurSource;
+        if (eurCost is > 0m)
+        {
+            (eur, eurSource) = (eurCost, "request");
+        }
+        else if (snapshot.LastEurCost is > 0m)
+        {
+            (eur, eurSource) = (snapshot.LastEurCost, $"stored (last priced {snapshot.LastPricedAt:yyyy-MM-dd})");
+        }
+        else
+        {
+            (eur, eurSource) = (null, null);
+            try
+            {
+                var hit = await _stagingLines.FindLatestByArticleAsync(itemCode, ct);
+                if (hit is { Line.UnitPrice: > 0m } h)
+                    (eur, eurSource) = (h.Line.UnitPrice,
+                        $"latest extracted invoice (uploaded {h.UploadedAt:yyyy-MM-dd})");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Staging invoice-line EUR cost lookup failed for {ItemCode} — continuing without.", itemCode);
+            }
+        }
 
         // Category — same resolution as provisioning: SAP group first, Odoo category fallback.
         string? category = null, categoryPath;
