@@ -20,6 +20,9 @@ public record RepricePreviewLine(
     string? CategoryPath,
     Dictionary<int, decimal> OldNet,
     Dictionary<int, decimal>? NewNet,
+    /// <summary>New INCL-VAT shelf prices per price list — the exact rounded values
+    /// the calculator produced (the business-primary figures).</summary>
+    Dictionary<int, decimal>? NewInclVat,
     Dictionary<int, decimal?>? DeltaPct,
     List<string> Warnings,
     PricingTrace? Trace)
@@ -88,7 +91,7 @@ public class LubesRepriceService : ILubesRepriceService
         {
             return new RepricePreviewLine(itemCode, false, null,
                 "Item not found in NeonProducts — was it provisioned through the pipeline?",
-                null, null, 0m, null, null, null, new(), null, null, warnings, null);
+                null, null, 0m, null, null, null, new(), null, null, null, warnings, null);
         }
 
         var rate = rateOverride ?? (await _pricingRepo.GetEffectiveRateAsync(ct)).Rate;
@@ -131,6 +134,7 @@ public class LubesRepriceService : ILubesRepriceService
             error = $"Pricing category unresolvable: {categoryPath}";
 
         Dictionary<int, decimal>? newNet = null;
+        Dictionary<int, decimal>? newInclVat = null;
         Dictionary<int, decimal?>? deltas = null;
         PricingTrace? trace = null;
 
@@ -143,6 +147,13 @@ public class LubesRepriceService : ILubesRepriceService
                 [2] = Math.Round(trace.Net.Dealer, 2),
                 [3] = Math.Round(trace.Net.SuperDealer, 2),
                 [4] = Math.Round(trace.Net.Maasai, 2),
+            };
+            newInclVat = new Dictionary<int, decimal>
+            {
+                [1] = trace.RetailInclVat,
+                [2] = trace.DealerInclVat,
+                [3] = trace.SuperDealerInclVat,
+                [4] = trace.MaasaiInclVat,
             };
             deltas = new Dictionary<int, decimal?>();
             foreach (var (pl, np) in newNet)
@@ -165,7 +176,7 @@ public class LubesRepriceService : ILubesRepriceService
             itemCode, true, snapshot.ItemName, error,
             eur, eurSource, rate, eur is null ? null : eur.Value * rate,
             category, categoryPath,
-            snapshot.StoredNetPrices, newNet, deltas, warnings,
+            snapshot.StoredNetPrices, newNet, newInclVat, deltas, warnings,
             includeTrace ? trace : null);
     }
 
