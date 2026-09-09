@@ -88,11 +88,13 @@
 <div class="card">
     <h3>Single item reprice</h3>
     <form method="post" asp-page-handler="Lookup" class="inline-form">
-        <input type="text" name="itemCode" placeholder="Item code (LM article, e.g. 4702)"
-               value="@Model.LookedUpItem" required />
+        <input type="text" name="itemCode" list="itemSearch" autocomplete="off"
+               placeholder="code or name (e.g. 4702, Top Tec)"
+               value="@Model.LookedUpItem" required data-itemsearch />
         <label>Compare with:</label>
-        <input type="text" name="compareItem" placeholder="item code (optional)"
-               value="@Model.CompareItem" />
+        <input type="text" name="compareItem" list="itemSearch" autocomplete="off"
+               placeholder="code or name (optional)"
+               value="@Model.CompareItem" data-itemsearch />
         <button class="btn" type="submit">Look up</button>
     </form>
 
@@ -390,3 +392,37 @@
         }
     }
 </div>
+
+<datalist id="itemSearch"></datalist>
+<script>
+    // Shared autocomplete for the item + benchmark inputs: searches NeonProducts
+    // by code OR name via the page's ItemSearch GET handler.
+    (function () {
+        const dl = document.getElementById("itemSearch");
+        let timer = null, lastTerm = "";
+        function search(term) {
+            if (term === lastTerm) return;
+            lastTerm = term;
+            fetch(`/pricing?handler=ItemSearch&term=${encodeURIComponent(term)}`)
+                .then(r => r.ok ? r.json() : [])
+                .then(rows => {
+                    dl.innerHTML = "";
+                    for (const row of rows) {
+                        const opt = document.createElement("option");
+                        opt.value = row.code;
+                        opt.label = row.name ? `${row.code} — ${row.name}` : row.code;
+                        dl.appendChild(opt);
+                    }
+                })
+                .catch(() => { /* autocomplete is best-effort */ });
+        }
+        document.querySelectorAll("input[data-itemsearch]").forEach(el => {
+            el.addEventListener("input", () => {
+                const term = el.value.trim();
+                clearTimeout(timer);
+                if (term.length < 2) return;
+                timer = setTimeout(() => search(term), 250);
+            });
+        });
+    })();
+</script>

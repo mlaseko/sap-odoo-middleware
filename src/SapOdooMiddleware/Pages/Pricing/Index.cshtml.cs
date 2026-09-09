@@ -149,6 +149,18 @@ public class IndexModel : PageModel
     public async Task OnGetAsync(CancellationToken ct)
         => Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
 
+    /// <summary>
+    /// AJAX autocomplete for the item and benchmark inputs
+    /// (GET /pricing?handler=ItemSearch&amp;term=...): matches ItemCode OR ItemName.
+    /// </summary>
+    public async Task<IActionResult> OnGetItemSearchAsync(string? term, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(term) || term.Trim().Length < 2)
+            return new JsonResult(Array.Empty<object>());
+        var hits = await _neon.SearchProductsAsync(term.Trim(), 15, ct);
+        return new JsonResult(hits.Select(h => new { code = h.ItemCode, name = h.ItemName }));
+    }
+
     // ── Rate ─────────────────────────────────────────────────────────
 
     public async Task<IActionResult> OnPostRateAsync(decimal newRate, CancellationToken ct)
