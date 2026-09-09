@@ -4,6 +4,28 @@
     static string Money(decimal? v) => v is null ? "—" : v.Value.ToString("N0");
     static string DeltaCls(decimal? pct) => pct is null ? "" : Math.Abs(pct.Value) > 30 ? "delta-big" : pct > 0 ? "delta-up" : "delta-down";
     static string DeltaTxt(decimal? pct) => pct is null ? "new" : $"{pct:+0.#;-0.#}%";
+
+    /// <summary>Net price or null when absent/zero (so missing shows as — not 0).</summary>
+    static decimal? NetOf(IReadOnlyDictionary<int, decimal>? d, int pl)
+        => d is not null && d.TryGetValue(pl, out var v) && v > 0m ? v : null;
+
+    /// <summary>Incl-VAT shelf price reconstructed from a stored net (net × 1.18).</summary>
+    static string InclOf(IReadOnlyDictionary<int, decimal>? d, int pl)
+    {
+        var net = NetOf(d, pl);
+        return net is null ? "—" : Math.Round(net.Value * 1.18m, 0).ToString("N0");
+    }
+
+    /// <summary>"PL2 +34.2%, PL4 −31%" for tiers beyond ±30, or null when calm.</summary>
+    static string? BigMoves(IReadOnlyDictionary<int, decimal?>? deltas)
+    {
+        if (deltas is null) return null;
+        var parts = deltas.Where(kv => kv.Value is { } v && Math.Abs(v) > 30m)
+                          .OrderBy(kv => kv.Key)
+                          .Select(kv => $"PL{kv.Key} {kv.Value:+0.#;-0.#}%")
+                          .ToList();
+        return parts.Count == 0 ? null : string.Join(", ", parts);
+    }
 }
 
 <style>
@@ -28,6 +50,13 @@
     .msg-warn { background: rgba(251,191,36,.12);  border: 1px solid rgba(251,191,36,.35);  color: #fcd34d; padding: 6px 10px; border-radius: var(--radius-sm); margin: 6px 0; font-size: 13px; }
     .meta { color: var(--muted); font-size: 12px; }
     .bulk-scroll { max-height: 420px; overflow: auto; }
+    .kv-grid { display: flex; gap: 28px; flex-wrap: wrap; margin: 10px 0 6px; }
+    .kv span { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted-2); margin-bottom: 2px; }
+    .kv b { font-size: 15px; color: var(--text-strong); }
+    .row-incl td { color: var(--text-strong); font-weight: 650; }
+    .row-new td { background: var(--accent-soft); }
+    .row-net td { color: var(--muted); font-size: 12px; }
+    .row-cmp td { color: var(--teal); }
 </style>
 
 <div class="page-head">
@@ -61,6 +90,9 @@
     <form method="post" asp-page-handler="Lookup" class="inline-form">
         <input type="text" name="itemCode" placeholder="Item code (LM article, e.g. 4702)"
                value="@Model.LookedUpItem" required />
+        <label>Compare with:</label>
+        <input type="text" name="compareItem" placeholder="item code (optional)"
+               value="@Model.CompareItem" />
         <button class="btn" type="submit">Look up</button>
     </form>
 
@@ -74,35 +106,32 @@
         {
             <div style="margin-top:10px">
                 <b>@p.ItemCode</b> — @p.ItemName
+                <div class="kv-grid">
+                    <div class="kv"><span>Pricing band</span><b>@(p.PricingCategory ?? "unresolved")</b></div>
+                    <div class="kv"><span>EUR invoice price</span><b>@(p.EurCost?.ToString("N2") ?? "—")</b></div>
+                    <div class="kv"><span>Rate EUR→TZS</span><b>@p.Rate.ToString("N0")</b></div>
+                    <div class="kv"><span>CIF cost TZS</span><b>@(p.CifTzs?.ToString("N0") ?? "—")</b></div>
+                </div>
                 <div class="meta">
-                    Category: <b>@(p.PricingCategory ?? "unresolved")</b> (@p.CategoryPath)<br />
-                    Stored EUR cost: <b>@(p.EurCost?.ToString("N2") ?? "none")</b>
-                    @if (p.EurCostSource is not null) { <text> — @p.EurCostSource</text> }
-                    · Rate: <b>@p.Rate.ToString("N0")</b>
-                    @if (p.CifTzs is not null) { <text> · CIF TZS: <b>@p.CifTzs?.ToString("N0")</b></text> }
+                    @p.CategoryPath
+                    @if (p.EurCostSource is not null) { <text> · EUR cost: @p.EurCostSource</text> }
                 </div>
             </div>
 
-            <table class="price-grid" style="margin-top:8px">
+            <table class="price-grid" style="margin-top:10px">
                 <tr>
-                    <th>Price list (net TZS)</th><th>PL1 Retail</th><th>PL2 Dealer</th>
+                    <th style="text-align:left">Price list (TZS)</th><th>PL1 Retail</th><th>PL2 Dealer</th>
                     <th>PL3 Super Dealer</th><th>PL4 Maasai</th>
                 </tr>
-                <tr>
-                    <td>Current (stored)</td>
-                    <td>@Money(p.OldNet.GetValueOrDefault(1))</td>
-                    <td>@Money(p.OldNet.GetValueOrDefault(2))</td>
-                    <td>@Money(p.OldNet.GetValueOrDefault(3))</td>
-                    <td>@Money(p.OldNet.GetValueOrDefault(4))</td>
+                <tr class="row-incl">
+                    <td>Current — incl VAT</td>
+                    @for (int pl = 1; pl <= 4; pl++) { <td>@InclOf(p.OldNet, pl)</td> }
                 </tr>
-                @if (p.NewNet is not null)
+                @if (p.NewInclVat is not null)
                 {
-                    <tr>
-                        <td>Recomputed</td>
-                        <td>@Money(p.NewNet.GetValueOrDefault(1))</td>
-                        <td>@Money(p.NewNet.GetValueOrDefault(2))</td>
-                        <td>@Money(p.NewNet.GetValueOrDefault(3))</td>
-                        <td>@Money(p.NewNet.GetValueOrDefault(4))</td>
+                    <tr class="row-incl row-new">
+                        <td>New — incl VAT</td>
+                        @for (int pl = 1; pl <= 4; pl++) { <td>@Money(NetOf(p.NewInclVat, pl))</td> }
                     </tr>
                     <tr>
                         <td>Change</td>
@@ -113,30 +142,104 @@
                         }
                     </tr>
                 }
+                <tr class="row-net">
+                    <td>Current — net (stored)</td>
+                    @for (int pl = 1; pl <= 4; pl++) { <td>@Money(NetOf(p.OldNet, pl))</td> }
+                </tr>
+                @if (p.NewNet is not null)
+                {
+                    <tr class="row-net">
+                        <td>New — net (to store)</td>
+                        @for (int pl = 1; pl <= 4; pl++) { <td>@Money(NetOf(p.NewNet, pl))</td> }
+                    </tr>
+                }
+                @if (Model.ComparePreview is { Found: true } cmp)
+                {
+                    <tr class="row-cmp">
+                        <td>@cmp.ItemCode — incl VAT (benchmark)</td>
+                        @for (int pl = 1; pl <= 4; pl++) { <td>@InclOf(cmp.OldNet, pl)</td> }
+                    </tr>
+                    <tr>
+                        <td>Vs @cmp.ItemCode</td>
+                        @for (int pl = 1; pl <= 4; pl++)
+                        {
+                            var mineNet = NetOf(p.NewNet, pl) ?? NetOf(p.OldNet, pl);
+                            var theirNet = NetOf(cmp.OldNet, pl);
+                            decimal? d = mineNet is { } m && theirNet is { } t && t > 0m
+                                ? Math.Round((m - t) / t * 100m, 1) : null;
+                            <td class="@DeltaCls(d)">@(d is null ? "—" : $"{d:+0.#;-0.#}%")</td>
+                        }
+                    </tr>
+                }
             </table>
+            @if (Model.ComparePreview is { } cp2)
+            {
+                @if (!cp2.Found)
+                {
+                    <div class="msg-warn">Benchmark item '@Model.CompareItem' not found — comparison skipped.</div>
+                }
+                else
+                {
+                    <div class="meta" style="margin-top:4px">
+                        Benchmark: <b>@cp2.ItemCode</b> — @cp2.ItemName · band @(cp2.PricingCategory ?? "?")
+                        @if (cp2.EurCost is not null) { <text> · EUR invoice price €@cp2.EurCost?.ToString("N2")</text> }
+                        @if (cp2.PricingCategory is not null && p.PricingCategory is not null
+                             && cp2.PricingCategory != p.PricingCategory)
+                        { <span class="delta-up"> · different band — expect different ratios</span> }
+                    </div>
+                }
+            }
 
-            @foreach (var w in p.Warnings) { <div class="msg-warn">⚠ @w</div> }
+            @if (BigMoves(p.DeltaPct) is { } moves)
+            {
+                <div class="msg-warn">⚠ Beyond ±30%: @moves — double-check the EUR invoice price before posting.</div>
+            }
             @if (p.Error is not null && p.Found) { <div class="msg-err">@p.Error</div> }
 
             <div style="margin-top:12px">
                 <form method="post" asp-page-handler="Preview" class="inline-form" style="display:inline-flex">
                     <input type="hidden" name="itemCode" value="@p.ItemCode" />
-                    <label>New EUR cost:</label>
+                    <input type="hidden" name="compareItem" value="@Model.CompareItem" />
+                    <label>New EUR invoice price:</label>
                     <input type="number" name="eurCost" step="0.01" min="0.01"
                            value="@(Model.EnteredEurCost?.ToString("0.##"))" required />
                     <button class="btn" type="submit">Preview change</button>
                 </form>
-                @if (p.CanApply && Model.EnteredEurCost is not null)
+            </div>
+            <div style="margin-top:8px">
+                <form method="post" asp-page-handler="TargetPreview" class="inline-form" style="display:inline-flex">
+                    <input type="hidden" name="itemCode" value="@p.ItemCode" />
+                    <input type="hidden" name="compareItem" value="@Model.CompareItem" />
+                    <label>Or target selling price (incl VAT):</label>
+                    <select name="targetPl">
+                        <option value="1" selected="@(Model.TargetPl == 1)">PL1 Retail</option>
+                        <option value="2" selected="@(Model.TargetPl == 2)">PL2 Dealer</option>
+                        <option value="3" selected="@(Model.TargetPl == 3)">PL3 Super Dealer</option>
+                        <option value="4" selected="@(Model.TargetPl == 4)">PL4 Maasai</option>
+                    </select>
+                    <input type="number" name="targetPrice" step="1000" min="1000"
+                           placeholder="e.g. 230000" value="@(Model.TargetPrice?.ToString("0"))" required />
+                    <button class="btn" type="submit">Solve from target</button>
+                </form>
+                @if (Model.ImpliedEur is not null)
                 {
-                    <form method="post" asp-page-handler="Apply" class="inline-form" style="display:inline-flex; margin-left:10px">
+                    <span class="meta" style="margin-left:8px">Implied EUR invoice price: <b>€@Model.ImpliedEur?.ToString("N2")</b></span>
+                }
+            </div>
+            @if (p.CanApply && Model.EnteredEurCost is not null)
+            {
+                <div style="margin-top:10px">
+                    <form method="post" asp-page-handler="Apply" class="inline-form" style="display:inline-flex">
                         <input type="hidden" name="itemCode" value="@p.ItemCode" />
+                    <input type="hidden" name="compareItem" value="@Model.CompareItem" />
                         <input type="hidden" name="eurCost" value="@Model.EnteredEurCost" />
-                        <input type="text" name="note" placeholder="reason / note (optional)" />
+                        <input type="text" name="note" placeholder="reason / note (optional)"
+                               value="@(Model.TargetPl is { } tpl && Model.TargetPrice is { } tp ? $"target PL{tpl}={tp:N0}" : "")" />
                         <button class="btn btn-primary" type="submit"
                                 onclick="return confirm('Post these prices to SAP, Neon and Odoo?')">Confirm &amp; Post</button>
                     </form>
-                }
-            </div>
+                </div>
+            }
         }
     }
 
@@ -170,15 +273,22 @@
     {
         <h4 style="margin:16px 0 6px">Price history</h4>
         <table class="price-grid">
-            <tr><th>When (UTC)</th><th>Mode</th><th>EUR</th><th>Rate</th><th>PL1</th><th>PL2</th><th>PL3</th><th>PL4</th><th>Note</th></tr>
+            <tr>
+                <th style="text-align:left">When (UTC)</th><th>Mode</th><th>EUR</th><th>Rate</th>
+                <th>PL1 incl</th><th>PL2 incl</th><th>PL3 incl</th><th>PL4 incl</th>
+                <th style="text-align:left">Note</th>
+            </tr>
             @foreach (var h in Model.History)
             {
                 <tr>
-                    <td>@h.ChangedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                    <td style="text-align:left">@h.ChangedAt.ToString("yyyy-MM-dd HH:mm")</td>
                     <td>@h.Mode</td>
                     <td>@(h.EurCost?.ToString("N2") ?? "—")</td>
                     <td>@(h.Rate?.ToString("N0") ?? "—")</td>
-                    <td>@Money(h.NewPl1)</td><td>@Money(h.NewPl2)</td><td>@Money(h.NewPl3)</td><td>@Money(h.NewPl4)</td>
+                    <td>@Money(Math.Round(h.NewPl1 * 1.18m, 0))</td>
+                    <td>@Money(Math.Round(h.NewPl2 * 1.18m, 0))</td>
+                    <td>@Money(Math.Round(h.NewPl3 * 1.18m, 0))</td>
+                    <td>@Money(Math.Round(h.NewPl4 * 1.18m, 0))</td>
                     <td style="text-align:left">@h.Note</td>
                 </tr>
             }
@@ -218,15 +328,20 @@
     {
         <div class="bulk-scroll" style="margin-top:10px">
             <table class="price-grid">
-                <tr><th>Item</th><th>EUR</th><th>PL1 old→new</th><th>PL2 old→new</th><th>PL3 old→new</th><th>PL4 old→new</th><th>Δ PL1</th><th>Status</th></tr>
+                <tr>
+                    <th style="text-align:left">Item</th><th>EUR</th>
+                    <th>PL1 incl VAT old→new</th><th>PL2 incl VAT old→new</th>
+                    <th>PL3 incl VAT old→new</th><th>PL4 incl VAT old→new</th>
+                    <th>Δ PL1</th><th style="text-align:left">Status</th>
+                </tr>
                 @foreach (var l in Model.BulkLines)
                 {
                     <tr>
-                        <td>@l.ItemCode</td>
+                        <td style="text-align:left">@l.ItemCode</td>
                         <td>@(l.EurCost?.ToString("N2") ?? "—")</td>
                         @for (int pl = 1; pl <= 4; pl++)
                         {
-                            <td>@Money(l.OldNet.GetValueOrDefault(pl)) → @Money(l.NewNet?.GetValueOrDefault(pl))</td>
+                            <td>@InclOf(l.OldNet, pl) → @Money(NetOf(l.NewInclVat, pl))</td>
                         }
                         <td class="@DeltaCls(l.DeltaPct?.GetValueOrDefault(1))">@DeltaTxt(l.DeltaPct?.GetValueOrDefault(1))</td>
                         <td style="text-align:left">

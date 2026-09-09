@@ -20,6 +20,9 @@ public record RepricePreviewLine(
     string? CategoryPath,
     Dictionary<int, decimal> OldNet,
     Dictionary<int, decimal>? NewNet,
+    /// <summary>New INCL-VAT shelf prices per price list — the exact rounded values
+    /// the calculator produced (the business-primary figures).</summary>
+    Dictionary<int, decimal>? NewInclVat,
     Dictionary<int, decimal?>? DeltaPct,
     List<string> Warnings,
     PricingTrace? Trace)
@@ -40,6 +43,17 @@ public interface ILubesRepriceService
     /// </summary>
     Task<RepricePreviewLine> PreviewAsync(
         string itemCode, decimal? eurCost, decimal? rateOverride, bool includeTrace, CancellationToken ct);
+
+    /// <summary>
+    /// TARGET-PRICE mode: given a desired INCL-VAT selling price on ONE price list
+    /// (1=Retail, 2=Dealer, 3=SuperDealer, 4=Maasai), back-solves the implied EUR
+    /// invoice cost (binary search over the monotonic banded calculator) and returns
+    /// the full forward preview at that cost — the remaining tiers recompute through
+    /// the standard workflow. When the exact target is unreachable on the rounding
+    /// grid, the nearest achievable price is returned with a warning.
+    /// </summary>
+    Task<(decimal? ImpliedEur, RepricePreviewLine Preview)> PreviewFromTargetAsync(
+        string itemCode, int targetPl, decimal targetInclVat, decimal? rateOverride, CancellationToken ct);
 
     /// <summary>
     /// Applies a reprice: SAP price lists 1-4 (one Items.Update), Neon price rows,
@@ -88,7 +102,7 @@ public class LubesRepriceService : ILubesRepriceService
         {
             return new RepricePreviewLine(itemCode, false, null,
                 "Item not found in NeonProducts — was it provisioned through the pipeline?",
-                null, null, 0m, null, null, null, new(), null, null, warnings, null);
+                null, null, 0m, null, null, null, new(), null, null, null, warnings, null);
         }
 
         var rate = rateOverride ?? (await _pricingRepo.GetEffectiveRateAsync(ct)).Rate;
@@ -131,6 +145,7 @@ public class LubesRepriceService : ILubesRepriceService
             error = $"Pricing category unresolvable: {categoryPath}";
 
         Dictionary<int, decimal>? newNet = null;
+        Dictionary<int, decimal>? newInclVat = null;
         Dictionary<int, decimal?>? deltas = null;
         PricingTrace? trace = null;
 
@@ -143,6 +158,13 @@ public class LubesRepriceService : ILubesRepriceService
                 [2] = Math.Round(trace.Net.Dealer, 2),
                 [3] = Math.Round(trace.Net.SuperDealer, 2),
                 [4] = Math.Round(trace.Net.Maasai, 2),
+            };
+            newInclVat = new Dictionary<int, decimal>
+            {
+                [1] = trace.RetailInclVat,
+                [2] = trace.DealerInclVat,
+                [3] = trace.SuperDealerInclVat,
+                [4] = trace.MaasaiInclVat,
             };
             deltas = new Dictionary<int, decimal?>();
             foreach (var (pl, np) in newNet)
@@ -165,8 +187,73 @@ public class LubesRepriceService : ILubesRepriceService
             itemCode, true, snapshot.ItemName, error,
             eur, eurSource, rate, eur is null ? null : eur.Value * rate,
             category, categoryPath,
-            snapshot.StoredNetPrices, newNet, deltas, warnings,
+            snapshot.StoredNetPrices, newNet, newInclVat, deltas, warnings,
             includeTrace ? trace : null);
+    }
+
+    public async Task<(decimal? ImpliedEur, RepricePreviewLine Preview)> PreviewFromTargetAsync(
+        string itemCode, int targetPl, decimal targetInclVat, decimal? rateOverride, CancellationToken ct)
+    {
+        // Base preview resolves item existence, category, and the effective rate;
+        // it may carry a "no EUR cost" error, which is irrelevant here.
+        var basePrev = await PreviewAsync(itemCode, null, rateOverride, includeTrace: false, ct);
+        if (!basePrev.Found)
+            return (null, basePrev);
+        if (basePrev.PricingCategory is null)
+            return (null, basePrev with
+            {
+                Error = $"Cannot solve a target price: {basePrev.CategoryPath}"
+            });
+
+        var rate = basePrev.Rate;
+        var category = basePrev.PricingCategory;
+
+        decimal TierOf(decimal cif)
+        {
+            var t = _calc.ComputeNetPricesWithTrace(cif, category);
+            return targetPl switch
+            {
+                1 => t.RetailInclVat,
+                2 => t.DealerInclVat,
+                3 => t.SuperDealerInclVat,
+                4 => t.MaasaiInclVat,
+                _ => t.RetailInclVat,
+            };
+        }
+
+        // Every tier is a monotonic non-decreasing step function of CIF (ratios < 1
+        // ⇒ price > cif, so the target itself bounds the search from above; widen
+        // defensively in case of exotic ratio overrides).
+        decimal lo = 0.01m, hi = targetInclVat;
+        for (int i = 0; i < 6 && TierOf(hi) < targetInclVat; i++) hi *= 2m;
+        if (TierOf(hi) < targetInclVat)
+            return (null, basePrev with { Error = $"Target PL{targetPl} {targetInclVat:N0} is unreachable with the current ratios." });
+
+        for (int i = 0; i < 64 && hi - lo > 0.005m; i++)
+        {
+            var mid = (lo + hi) / 2m;
+            if (TierOf(mid) >= targetInclVat) hi = mid; else lo = mid;
+        }
+        var cif = hi;   // minimal CIF whose tier output reaches the target
+
+        var impliedEur = Math.Round(cif / rate, 2, MidpointRounding.AwayFromZero);
+        // 2-dp rounding of the EUR can nudge CIF below a rounding boundary — bump a cent.
+        if (impliedEur <= 0m) impliedEur = 0.01m;
+        if (TierOf(impliedEur * rate) < targetInclVat) impliedEur += 0.01m;
+
+        var preview = await PreviewAsync(itemCode, impliedEur, rateOverride, includeTrace: false, ct);
+        var achieved = preview.NewInclVat is not null && preview.NewInclVat.TryGetValue(targetPl, out var a)
+            ? a : (decimal?)null;
+        if (achieved is { } got && got != targetInclVat)
+            preview.Warnings.Add(
+                $"Target PL{targetPl} of {targetInclVat:N0} is not exactly reachable on the banded rounding grid — " +
+                $"nearest achievable is {got:N0}.");
+
+        _logger.LogInformation(
+            "Target-price solve for {ItemCode}: PL{Pl} target {Target} → implied EUR {Eur} (CIF {Cif}), achieved {Achieved}",
+            itemCode, targetPl, targetInclVat, impliedEur, impliedEur * rate, achieved);
+
+        return (impliedEur, preview);
     }
 
     public async Task<RepriceApplyResult> ApplyAsync(
