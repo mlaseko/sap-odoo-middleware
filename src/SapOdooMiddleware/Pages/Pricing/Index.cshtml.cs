@@ -183,15 +183,40 @@ public class IndexModel : PageModel
         string itemCode, string? compareItem, CancellationToken ct)
     {
         Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
-        if (string.IsNullOrWhiteSpace(itemCode)) { Error = "Enter an item code."; return Page(); }
+        if (string.IsNullOrWhiteSpace(itemCode)) { Error = "Enter an item code or name."; return Page(); }
 
-        LookedUpItem = itemCode.Trim();
+        LookedUpItem = await ResolveItemInputAsync(itemCode.Trim(), ct);
         Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
         EnteredEurCost = Preview.EurCost;
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
         await LoadClassificationSourcesAsync(ct);
         await LoadCompareAsync(compareItem, ct);
         return Page();
+    }
+
+    /// <summary>
+    /// Accepts a code OR a (partial) name: when the input isn't an exact item code,
+    /// a unique search match is used automatically; several matches surface as a
+    /// "did you mean" list.
+    /// </summary>
+    private async Task<string> ResolveItemInputAsync(string input, CancellationToken ct)
+    {
+        if (await _neon.GetPricingSnapshotAsync(input, ct) is not null)
+            return input;   // exact item code
+
+        var hits = await _neon.SearchProductsAsync(input, 6, ct);
+        if (hits.Count == 1)
+        {
+            Message = $"Resolved '{input}' → {hits[0].ItemCode} — {hits[0].ItemName}.";
+            return hits[0].ItemCode;
+        }
+        if (hits.Count > 1)
+        {
+            Error = $"'{input}' matches several items — did you mean: "
+                    + string.Join(" · ", hits.Select(h => $"{h.ItemCode} ({h.ItemName})"))
+                    + "? Pick one from the suggestions.";
+        }
+        return input;   // fall through — preview will report not-found (or the error above shows)
     }
 
     /// <summary>Sticky state for target-price mode.</summary>
@@ -207,6 +232,13 @@ public class IndexModel : PageModel
     {
         CompareItem = string.IsNullOrWhiteSpace(compareItem) ? null : compareItem.Trim();
         if (CompareItem is null) return;
+
+        // A name (unique match) works too, not just an exact code.
+        if (await _neon.GetPricingSnapshotAsync(CompareItem, ct) is null)
+        {
+            var hits = await _neon.SearchProductsAsync(CompareItem, 2, ct);
+            if (hits.Count == 1) CompareItem = hits[0].ItemCode;
+        }
         ComparePreview = await _reprice.PreviewAsync(CompareItem, null, null, includeTrace: false, ct);
     }
 
