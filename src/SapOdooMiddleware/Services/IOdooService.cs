@@ -62,4 +62,14 @@ public interface IOdooService
     /// </summary>
     Task<List<string>> UpdateLubesPricesAsync(
         string itemCode, decimal retailNet, decimal dealerNet, decimal superDealerNet, decimal maasaiNet);
+
+    /// <summary>
+    /// Moves the Odoo product (matched by default_code = item code) into a product
+    /// category, resolved in order: <paramref name="categoryExternalId"/> via
+    /// ir.model.data (exact, naming-independent — preferred), then the category's
+    /// complete name, then the last path segment. Best-effort — outcomes come back
+    /// as notes.
+    /// </summary>
+    Task<List<string>> UpdateLubesCategoryAsync(
+        string itemCode, string? categoryFullPath, string? categoryExternalId);
 }

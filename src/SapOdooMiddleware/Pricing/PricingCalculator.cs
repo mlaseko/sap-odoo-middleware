@@ -25,6 +25,29 @@ public record PricingTrace(
     decimal MaasaiInclVat,
     PriceTiers Net);
 
+/// <summary>A runtime override of one category+band's three tier ratios.</summary>
+public record BandRatioOverride(string Category, string Band, decimal Sp, decimal Dealer, decimal Retail);
+
+/// <summary>A runtime override of one category+band's Maasai (PL04÷PL03) ratio. BandIndex 0-3 = A-D.</summary>
+public record MaasaiRatioOverride(string Category, int BandIndex, decimal Ratio);
+
+/// <summary>One category+band row in the ratio snapshot (with whether it deviates from the default).</summary>
+public record BandRatioRow(
+    string Category, string Band,
+    decimal Sp, decimal Dealer, decimal Retail,
+    bool IsOverridden);
+
+/// <summary>One category+Maasai-band row in the ratio snapshot.</summary>
+public record MaasaiRatioRow(string Category, int BandIndex, string BandLabel, decimal Ratio, bool IsOverridden);
+
+/// <summary>The calculator's full effective ratio state (for the editor UI).</summary>
+public record PricingRatioSnapshot(
+    IReadOnlyList<string> Categories,
+    IReadOnlyList<string> Bands,
+    IReadOnlyList<string> MaasaiBandLabels,
+    IReadOnlyList<BandRatioRow> BandRatios,
+    IReadOnlyList<MaasaiRatioRow> MaasaiRatios);
+
 public interface IPricingCalculator
 {
     /// <summary>Compute Retail/Dealer/Super-Dealer NET (excl-VAT) prices from CIF cost in TZS.</summary>
@@ -32,6 +55,26 @@ public interface IPricingCalculator
 
     /// <summary>Same computation as <see cref="ComputeNetPrices"/>, returning the full derivation.</summary>
     PricingTrace ComputeNetPricesWithTrace(decimal cifCostTzs, string pricingCategory);
+
+    /// <summary>The calculator's current effective ratio tables (defaults + applied overrides).</summary>
+    PricingRatioSnapshot GetRatioSnapshot();
+
+    /// <summary>
+    /// Replaces the active override set: effective tables become the hard-coded
+    /// defaults with these overrides applied on top (atomically, thread-safe).
+    /// </summary>
+    void ApplyRatioOverrides(
+        IReadOnlyList<BandRatioOverride> bandOverrides,
+        IReadOnlyList<MaasaiRatioOverride> maasaiOverrides);
+
+    /// <summary>
+    /// What-if computation: runs the full trace with an EPHEMERAL ratio override on
+    /// top of the current effective tables — global state is not touched. Used by the
+    /// ratio editor's Simulate before an override is approved and saved.
+    /// </summary>
+    PricingTrace Simulate(
+        decimal cifCostTzs, string pricingCategory,
+        BandRatioOverride? tempBand, MaasaiRatioOverride? tempMaasai);
 
     /// <summary>Resolve a scraped/LM category string to a canonical pricing-category key.</summary>
     string ResolvePricingCategory(string? scrapedCategory);
@@ -85,9 +128,11 @@ public class PricingCalculator : IPricingCalculator
         return "1M and above";
     }
 
-    // (sp, d, r) ratios. Cost = price × ratio, so price = cost / ratio.
+    // (sp, d, r) DEFAULT ratios (the ported HTML tool). Cost = price × ratio, so
+    // price = cost / ratio. Runtime overrides are applied on top via
+    // ApplyRatioOverrides; the effective tables live in _bandRatios/_maasaiRatios.
     private static readonly IReadOnlyDictionary<string,
-        IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>> BandRatios
+        IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>> DefaultBandRatios
         = new Dictionary<string, IReadOnlyDictionary<string, (decimal, decimal, decimal)>>
     {
         ["Additives"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -247,8 +292,8 @@ public class PricingCalculator : IPricingCalculator
         return MaasaiBandDefs.Length - 1;  // D band fallback
     }
 
-    // [category] → { bandA, bandB, bandC, bandD } ratios  (PL04 ÷ PL03)
-    private static readonly IReadOnlyDictionary<string, decimal[]> MaasaiRatios
+    // [category] → { bandA, bandB, bandC, bandD } DEFAULT ratios (PL04 ÷ PL03)
+    private static readonly IReadOnlyDictionary<string, decimal[]> DefaultMaasaiRatios
         = new Dictionary<string, decimal[]>
     {
         ["Additives"]                       = new[] { 0.6953m, 0.7121m, 0.6994m, 0.6994m },
@@ -290,13 +335,123 @@ public class PricingCalculator : IPricingCalculator
         ["marine additives"]                 = "Additives",
     };
 
+    // ── Runtime-editable effective tables ─────────────────────────────
+    // Swapped atomically under _ratioLock; reads take a volatile-style local copy.
+    private readonly object _ratioLock = new();
+    private IReadOnlyDictionary<string, IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>>
+        _bandRatios = DefaultBandRatios;
+    private IReadOnlyDictionary<string, decimal[]> _maasaiRatios = DefaultMaasaiRatios;
+    private IReadOnlyList<BandRatioOverride> _bandOverrides = Array.Empty<BandRatioOverride>();
+    private IReadOnlyList<MaasaiRatioOverride> _maasaiOverrides = Array.Empty<MaasaiRatioOverride>();
+
+    private static readonly string[] MaasaiBandLabels =
+    {
+        "A: up to 50,000", "B: 50k to 200k", "C: 200k to 600k", "D: 600k+",
+    };
+
+    public PricingRatioSnapshot GetRatioSnapshot()
+    {
+        var bandRatios = _bandRatios;
+        var maasai = _maasaiRatios;
+        var bandOv = _bandOverrides.Select(o => (o.Category, o.Band)).ToHashSet();
+        var maasaiOv = _maasaiOverrides.Select(o => (o.Category, o.BandIndex)).ToHashSet();
+
+        var bandRows = new List<BandRatioRow>();
+        foreach (var (cat, bands) in bandRatios)
+            foreach (var (lo, hi, label) in BandDefs)
+                if (bands.TryGetValue(label, out var r))
+                    bandRows.Add(new BandRatioRow(cat, label, r.sp, r.d, r.r, bandOv.Contains((cat, label))));
+
+        var maasaiRows = new List<MaasaiRatioRow>();
+        foreach (var (cat, ratios) in maasai)
+            for (int i = 0; i < ratios.Length; i++)
+                maasaiRows.Add(new MaasaiRatioRow(cat, i, MaasaiBandLabels[i], ratios[i], maasaiOv.Contains((cat, i))));
+
+        return new PricingRatioSnapshot(
+            bandRatios.Keys.OrderBy(k => k).ToList(),
+            BandDefs.Select(b => b.Label).ToList(),
+            MaasaiBandLabels,
+            bandRows,
+            maasaiRows);
+    }
+
+    public void ApplyRatioOverrides(
+        IReadOnlyList<BandRatioOverride> bandOverrides,
+        IReadOnlyList<MaasaiRatioOverride> maasaiOverrides)
+    {
+        lock (_ratioLock)
+        {
+            _bandRatios = BuildBandTable(bandOverrides);
+            _maasaiRatios = BuildMaasaiTable(maasaiOverrides);
+            _bandOverrides = bandOverrides.ToList();
+            _maasaiOverrides = maasaiOverrides.ToList();
+        }
+    }
+
+    public PricingTrace Simulate(
+        decimal cifCostTzs, string pricingCategory,
+        BandRatioOverride? tempBand, MaasaiRatioOverride? tempMaasai)
+    {
+        var bandTable = _bandRatios;
+        var maasaiTable = _maasaiRatios;
+
+        if (tempBand is not null)
+        {
+            var merged = bandTable.ToDictionary(kv => kv.Key, kv => kv.Value);
+            var catDict = merged.TryGetValue(tempBand.Category, out var existing)
+                ? existing.ToDictionary(kv => kv.Key, kv => kv.Value)
+                : new Dictionary<string, (decimal sp, decimal d, decimal r)>();
+            catDict[tempBand.Band] = (tempBand.Sp, tempBand.Dealer, tempBand.Retail);
+            merged[tempBand.Category] = catDict;
+            bandTable = merged;
+        }
+        if (tempMaasai is not null && maasaiTable.TryGetValue(tempMaasai.Category, out var arr))
+        {
+            var merged = maasaiTable.ToDictionary(kv => kv.Key, kv => (decimal[])kv.Value.Clone());
+            merged[tempMaasai.Category][Math.Clamp(tempMaasai.BandIndex, 0, 3)] = tempMaasai.Ratio;
+            maasaiTable = merged;
+        }
+
+        return ComputeCore(cifCostTzs, pricingCategory, bandTable, maasaiTable);
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>>
+        BuildBandTable(IReadOnlyList<BandRatioOverride> overrides)
+    {
+        var table = DefaultBandRatios.ToDictionary(
+            kv => kv.Key,
+            kv => kv.Value.ToDictionary(b => b.Key, b => b.Value));
+        foreach (var o in overrides)
+        {
+            if (!table.TryGetValue(o.Category, out var cat))
+                table[o.Category] = cat = new Dictionary<string, (decimal, decimal, decimal)>();
+            cat[o.Band] = (o.Sp, o.Dealer, o.Retail);
+        }
+        return table.ToDictionary(
+            kv => kv.Key,
+            kv => (IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>)kv.Value);
+    }
+
+    private static IReadOnlyDictionary<string, decimal[]> BuildMaasaiTable(
+        IReadOnlyList<MaasaiRatioOverride> overrides)
+    {
+        var table = DefaultMaasaiRatios.ToDictionary(kv => kv.Key, kv => (decimal[])kv.Value.Clone());
+        foreach (var o in overrides)
+        {
+            if (!table.TryGetValue(o.Category, out var arr))
+                table[o.Category] = arr = (decimal[])DefaultMaasaiRatios["Service"].Clone();
+            arr[Math.Clamp(o.BandIndex, 0, 3)] = o.Ratio;
+        }
+        return table;
+    }
+
     public string ResolvePricingCategory(string? scrapedCategory)
     {
         if (string.IsNullOrWhiteSpace(scrapedCategory))
             throw new InvalidOperationException("No category supplied for pricing.");
         var key = scrapedCategory.Trim();
         if (CategoryAliases.TryGetValue(key, out var mapped)) return mapped;
-        if (BandRatios.ContainsKey(key)) return key; // exact match
+        if (_bandRatios.ContainsKey(key)) return key; // exact match
 
         // DGX returns hierarchical Odoo categories like "Service Products / Coolant / antifreeze" or
         // "Workshop Pro-Line / Petrol injector / system cleaners". The TOP-LEVEL segment is the pricing
@@ -309,7 +464,7 @@ public class PricingCalculator : IPricingCalculator
             {
                 var c = segment.Trim();
                 if (CategoryAliases.TryGetValue(c, out mapped)) return mapped;
-                if (BandRatios.ContainsKey(c)) return c;
+                if (_bandRatios.ContainsKey(c)) return c;
             }
         }
 
@@ -341,10 +496,16 @@ public class PricingCalculator : IPricingCalculator
         => ComputeNetPricesWithTrace(cifCostTzs, pricingCategory).Net;
 
     public PricingTrace ComputeNetPricesWithTrace(decimal cifCostTzs, string pricingCategory)
+        => ComputeCore(cifCostTzs, pricingCategory, _bandRatios, _maasaiRatios);
+
+    private static PricingTrace ComputeCore(
+        decimal cifCostTzs, string pricingCategory,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>> bandRatios,
+        IReadOnlyDictionary<string, decimal[]> maasaiRatios)
     {
         if (cifCostTzs <= 0m)
             throw new ArgumentOutOfRangeException(nameof(cifCostTzs), "CIF cost must be > 0.");
-        if (!BandRatios.TryGetValue(pricingCategory, out var catRatios))
+        if (!bandRatios.TryGetValue(pricingCategory, out var catRatios))
             throw new InvalidOperationException($"Unknown pricing category '{pricingCategory}'.");
 
         var band = "25k to 50k";   // seed band, matches the HTML tool
@@ -369,10 +530,10 @@ public class PricingCalculator : IPricingCalculator
 
         // ── PL04 Maasai: derived from the converged PL03 (sp) incl-VAT price. ──
         var maasaiCat = pricingCategory;
-        if (!MaasaiRatios.ContainsKey(maasaiCat))
+        if (!maasaiRatios.ContainsKey(maasaiCat))
             maasaiCat = "Service";   // fallback (covers Accessories + unmapped)
         int maasaiBand = GetMaasaiBand(sp);
-        var maasaiRatio = MaasaiRatios[maasaiCat][maasaiBand];
+        var maasaiRatio = maasaiRatios[maasaiCat][maasaiBand];
         var maasai = Math.Ceiling(sp * maasaiRatio / 1000m) * 1000m;
 
         // The HTML tool's rounded values are Incl-VAT (shelf prices).
@@ -404,9 +565,9 @@ public class PricingCalculator : IPricingCalculator
         if (pl03Net <= 0m) return 0m;
         var sp = pl03Net * VAT;   // reconstruct incl-VAT PL03
         var cat = pricingCategory;
-        if (!MaasaiRatios.ContainsKey(cat))
+        if (!_maasaiRatios.ContainsKey(cat))
             cat = "Service";
-        var ratio = MaasaiRatios[cat][GetMaasaiBand(sp)];
+        var ratio = _maasaiRatios[cat][GetMaasaiBand(sp)];
         var maasai = Math.Ceiling(sp * ratio / 1000m) * 1000m;
         return maasai / VAT;
     }

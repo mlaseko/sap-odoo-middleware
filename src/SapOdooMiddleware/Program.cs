@@ -132,6 +132,8 @@ builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
 builder.Services.AddScoped<ILubesPricingRepository, LubesPricingRepository>();
 builder.Services.AddScoped<ILubesRepriceService, LubesRepriceService>();
 builder.Services.AddSingleton<LubesBulkRepriceJobService>();
+// Applies UI-approved ratio overrides to the singleton calculator at startup.
+builder.Services.AddHostedService<PricingRatioLoaderHostedService>();
 builder.Services.AddScoped<INeonLiquiMolyRepository, NeonLiquiMolyRepository>();
 builder.Services.Configure<CategoryTaxonomySettings>(builder.Configuration.GetSection(CategoryTaxonomySettings.SectionName));
 builder.Services.AddSingleton<ICategoryTaxonomy, CategoryTaxonomyService>();

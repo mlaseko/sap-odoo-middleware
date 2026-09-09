@@ -1,0 +1,167 @@
+@page "/pricing/ratios"
+@using System.Text.Json
+@model SapOdooMiddleware.Pages.Pricing.RatiosModel
+@functions {
+    static string Money(decimal? v) => v is null ? "—" : v.Value.ToString("N0");
+}
+
+<style>
+    .card { border: 1px solid #e2e2e2; border-radius: 8px; padding: 14px 16px; margin: 14px 0; background: #fff; }
+    .inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .inline-form input, .inline-form select { padding: 5px 8px; border: 1px solid #ccc; border-radius: 5px; }
+    .ratio-in { width: 110px; }
+    .msg-ok { background: #ecfdf5; border: 1px solid #10b981; color: #065f46; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
+    .msg-err { background: #fef2f2; border: 1px solid #ef4444; color: #991b1b; padding: 8px 12px; border-radius: 6px; margin: 10px 0; }
+    .meta { color: #666; font-size: 12px; }
+    .price-grid { border-collapse: collapse; font-size: 13px; }
+    .price-grid th, .price-grid td { border: 1px solid #ddd; padding: 5px 9px; text-align: right; }
+    .price-grid th { background: #f5f5f5; }
+    .ovr { color: #b45309; font-weight: 600; }
+</style>
+
+<div class="page-head">
+    <div>
+        <h2>Pricing Ratios</h2>
+        <div class="sub">Edit the calculator's category/band ratios — simulate first, then approve to make them live</div>
+    </div>
+    <a class="btn" href="/pricing">← Price Management</a>
+</div>
+
+@if (Model.Message is not null) { <div class="msg-ok">@Model.Message</div> }
+@if (Model.Error is not null) { <div class="msg-err">@Model.Error</div> }
+
+<div class="card">
+    <h3>Edit &amp; simulate</h3>
+    <div class="meta" style="margin-bottom:8px">
+        price = cost ÷ ratio (so a LOWER ratio raises the price). Expected ordering: sp &gt; dealer &gt; retail.
+        Simulation cost unit EUR converts at the current rate (@Model.Rate.Rate.ToString("N0")).
+        Rows marked <span class="ovr">override</span> deviate from the built-in defaults.
+    </div>
+
+    <form method="post" id="ratioForm">
+        <div class="inline-form">
+            <label>Category:</label>
+            <select name="category" id="selCategory">
+                @foreach (var c in Model.Snapshot.Categories)
+                { <option value="@c" selected="@(c == Model.SelCategory)">@c</option> }
+            </select>
+            <label>Cost band:</label>
+            <select name="band" id="selBand">
+                @foreach (var b in Model.Snapshot.Bands)
+                { <option value="@b" selected="@(b == Model.SelBand)">@b</option> }
+            </select>
+            <span id="bandOverrideFlag" class="ovr"></span>
+        </div>
+        <div class="inline-form" style="margin-top:8px">
+            <label>sp ratio:</label><input class="ratio-in" type="number" step="0.000001" name="sp" id="inSp" value="@Model.SpIn" required />
+            <label>dealer:</label><input class="ratio-in" type="number" step="0.000001" name="dealer" id="inDealer" value="@Model.DealerIn" required />
+            <label>retail:</label><input class="ratio-in" type="number" step="0.000001" name="retail" id="inRetail" value="@Model.RetailIn" required />
+        </div>
+        <div class="inline-form" style="margin-top:8px">
+            <label>Maasai band:</label>
+            <select name="maasaiBand" id="selMaasaiBand">
+                @for (int i = 0; i < Model.Snapshot.MaasaiBandLabels.Count; i++)
+                { <option value="@i" selected="@(i == Model.SelMaasaiBand)">@Model.Snapshot.MaasaiBandLabels[i]</option> }
+            </select>
+            <label>ratio:</label><input class="ratio-in" type="number" step="0.0001" name="maasaiRatio" id="inMaasai" value="@Model.MaasaiIn" required />
+            <span id="maasaiOverrideFlag" class="ovr"></span>
+        </div>
+        <div class="inline-form" style="margin-top:10px">
+            <label>Simulate with cost:</label>
+            <input type="number" step="0.01" min="0.01" name="simCost" value="@Model.SimCost" />
+            <select name="simUnit">
+                <option value="eur" selected="@(Model.SimUnit == "eur")">EUR (× rate)</option>
+                <option value="tzs" selected="@(Model.SimUnit == "tzs")">CIF TZS</option>
+            </select>
+            <button class="btn" type="submit" asp-page-handler="Simulate">Simulate</button>
+        </div>
+        <div class="inline-form" style="margin-top:10px">
+            <input type="text" name="note" placeholder="reason / note (optional)" style="min-width:220px" />
+            <button class="btn btn-primary" type="submit" asp-page-handler="SaveBand"
+                    onclick="return confirm('Approve these sp/dealer/retail ratios? All future pricing uses them immediately.')">
+                Approve &amp; Save band ratios</button>
+            <button class="btn btn-primary" type="submit" asp-page-handler="SaveMaasai"
+                    onclick="return confirm('Approve this Maasai ratio? All future pricing uses it immediately.')">
+                Approve &amp; Save Maasai ratio</button>
+            <button class="btn" type="submit" asp-page-handler="ResetBand"
+                    onclick="return confirm('Revert this category/band to the built-in default ratios?')">Reset band to default</button>
+            <button class="btn" type="submit" asp-page-handler="ResetMaasai"
+                    onclick="return confirm('Revert this Maasai band to the built-in default?')">Reset Maasai to default</button>
+        </div>
+    </form>
+
+    @if (Model.SimResult is { } sim)
+    {
+        <h4 style="margin:14px 0 6px">Simulation — CIF @sim.CifCostTzs.ToString("N0") TZS, @sim.PricingCategory</h4>
+        <table class="price-grid">
+            <tr><th>Pass</th><th>Band</th><th>sp ratio</th><th>dealer</th><th>retail</th><th>SP incl-VAT</th><th>Dealer incl-VAT</th><th>Retail incl-VAT</th></tr>
+            @foreach (var it in sim.Iterations)
+            {
+                <tr>
+                    <td>@it.Iteration</td><td style="text-align:left">@it.Band</td>
+                    <td>@it.SpRatio</td><td>@it.DealerRatio</td><td>@it.RetailRatio</td>
+                    <td>@Money(it.SpInclVat)</td><td>@Money(it.DealerInclVat)</td><td>@Money(it.RetailInclVat)</td>
+                </tr>
+            }
+        </table>
+        <table class="price-grid" style="margin-top:8px">
+            <tr><th></th><th>SP</th><th>Dealer</th><th>Retail</th><th>Maasai (ratio @sim.MaasaiRatio, band @((char)('A' + sim.MaasaiBandIndex)))</th></tr>
+            <tr>
+                <td style="text-align:left"><b>With edited ratios</b> (incl-VAT)</td>
+                <td>@Money(sim.SuperDealerInclVat)</td><td>@Money(sim.DealerInclVat)</td>
+                <td>@Money(sim.RetailInclVat)</td><td>@Money(sim.MaasaiInclVat)</td>
+            </tr>
+            @if (Model.SimBaseline is { } baseTrace)
+            {
+                <tr>
+                    <td style="text-align:left">Current live ratios (incl-VAT)</td>
+                    <td>@Money(baseTrace.SuperDealerInclVat)</td><td>@Money(baseTrace.DealerInclVat)</td>
+                    <td>@Money(baseTrace.RetailInclVat)</td><td>@Money(baseTrace.MaasaiInclVat)</td>
+                </tr>
+            }
+            <tr>
+                <td style="text-align:left">Stored as NET (÷1.18)</td>
+                <td>@Money(Math.Round(sim.Net.SuperDealer, 2))</td><td>@Money(Math.Round(sim.Net.Dealer, 2))</td>
+                <td>@Money(Math.Round(sim.Net.Retail, 2))</td><td>@Money(Math.Round(sim.Net.Maasai, 2))</td>
+            </tr>
+        </table>
+    }
+</div>
+
+@{
+    var ratioJson = JsonSerializer.Serialize(new
+    {
+        band = Model.Snapshot.BandRatios.Select(r => new
+        { c = r.Category, b = r.Band, sp = r.Sp, d = r.Dealer, r = r.Retail, o = r.IsOverridden }),
+        maasai = Model.Snapshot.MaasaiRatios.Select(r => new
+        { c = r.Category, i = r.BandIndex, r = r.Ratio, o = r.IsOverridden }),
+    });
+}
+<script>
+    const RATIOS = @Html.Raw(ratioJson);
+    const $ = id => document.getElementById(id);
+
+    function fillBand() {
+        const c = $("selCategory").value, b = $("selBand").value;
+        const row = RATIOS.band.find(x => x.c === c && x.b === b);
+        if (row) {
+            $("inSp").value = row.sp; $("inDealer").value = row.d; $("inRetail").value = row.r;
+            $("bandOverrideFlag").textContent = row.o ? "override active" : "";
+        }
+        fillMaasai();
+    }
+    function fillMaasai() {
+        const c = $("selCategory").value, i = parseInt($("selMaasaiBand").value);
+        const row = RATIOS.maasai.find(x => x.c === c && x.i === i);
+        if (row) {
+            $("inMaasai").value = row.r;
+            $("maasaiOverrideFlag").textContent = row.o ? "override active" : "";
+        }
+    }
+    $("selCategory").addEventListener("change", fillBand);
+    $("selBand").addEventListener("change", fillBand);
+    $("selMaasaiBand").addEventListener("change", fillMaasai);
+    // Prefill on first load / when the server didn't echo sticky values.
+    if (!$("inSp").value) fillBand(); else fillMaasai();
+    if (!$("inMaasai").value) fillMaasai();
+</script>

@@ -24,6 +24,7 @@
         var navDocs   = (reqPath.StartsWith(docsBase, StringComparison.OrdinalIgnoreCase) && !reqPath.EndsWith("/upload")) ? "nav-active" : "";
         var navUpload = reqPath.EndsWith("/upload", StringComparison.OrdinalIgnoreCase) ? "nav-active" : "";
         var navAdmin  = reqPath.StartsWith("/admin", StringComparison.OrdinalIgnoreCase) ? "nav-active" : "";
+        var navPricing = reqPath.StartsWith("/pricing", StringComparison.OrdinalIgnoreCase) ? "nav-active" : "";
     }
     <header class="topbar">
         <div class="topbar-inner">
@@ -31,6 +32,10 @@
             <nav class="topnav">
                 <a href="@docsBase" class="@navDocs">Documents</a>
                 <a href="@docsBase/upload" class="@navUpload">Upload</a>
+                @if (!isAutohub)
+                {
+                    <a href="/pricing" class="@navPricing">Pricing</a>
+                }
                 <a href="/admin" class="@navAdmin">Admin</a>
             </nav>
             <div class="tenant-switch">

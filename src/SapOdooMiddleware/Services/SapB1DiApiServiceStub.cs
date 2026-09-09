@@ -270,6 +270,15 @@ internal class SapB1DiApiServiceStub : ISapB1Service
         int absEntry, List<PickListLineWrite> lines, string? note, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<List<(int Code, string Name)>> GetItemGroupsAsync(CancellationToken ct) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task SetItemClassificationAsync(
+        string itemCode, int groupCode, string? odooCategoryName, CancellationToken ct) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 }
 
 /// <summary>Non-Windows stub for the Autohub-company SAP connection (<see cref="IAutohubSapB1Service"/>).</summary>

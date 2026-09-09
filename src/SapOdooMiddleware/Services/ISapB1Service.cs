@@ -468,4 +468,15 @@ public interface ISapB1Service
     /// </summary>
     Task<bool> PickPickListLinesAsync(
         int absEntry, List<PickListLineWrite> lines, string? note, CancellationToken ct);
+
+    /// <summary>All item groups (OITB): code + name. For classification dropdowns.</summary>
+    Task<List<(int Code, string Name)>> GetItemGroupsAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Reclassifies an OITM item: sets ItemsGroupCode and (when supplied) the
+    /// U_Odoo_Category UDF, in one Items.Update. Used by the pricing UI's
+    /// classification editor — the group drives the pricing band.
+    /// </summary>
+    Task SetItemClassificationAsync(
+        string itemCode, int groupCode, string? odooCategoryName, CancellationToken ct);
 }

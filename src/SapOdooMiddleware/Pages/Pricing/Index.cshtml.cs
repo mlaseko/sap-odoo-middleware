@@ -1,8 +1,11 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
+using Microsoft.Extensions.Caching.Memory;
+using SapOdooMiddleware.Integrations.Classifier;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Pricing;
+using SapOdooMiddleware.Services;
 
 namespace SapOdooMiddleware.Pages.Pricing;
 
@@ -20,18 +23,103 @@ public class IndexModel : PageModel
     private readonly ILubesPricingRepository _pricingRepo;
     private readonly ILubesRepriceService _reprice;
     private readonly LubesBulkRepriceJobService _bulkJobs;
+    private readonly ISapB1Service _sap;
+    private readonly IOdooService _odoo;
+    private readonly INeonProductRepository _neon;
+    private readonly ICategoryTaxonomy _taxonomy;
+    private readonly IMemoryCache _cache;
     private readonly ILogger<IndexModel> _logger;
 
     public IndexModel(
         ILubesPricingRepository pricingRepo,
         ILubesRepriceService reprice,
         LubesBulkRepriceJobService bulkJobs,
+        ISapB1Service sap,
+        IOdooService odoo,
+        INeonProductRepository neon,
+        ICategoryTaxonomy taxonomy,
+        IMemoryCache cache,
         ILogger<IndexModel> logger)
     {
         _pricingRepo = pricingRepo;
         _reprice = reprice;
         _bulkJobs = bulkJobs;
+        _sap = sap;
+        _odoo = odoo;
+        _neon = neon;
+        _taxonomy = taxonomy;
+        _cache = cache;
         _logger = logger;
+    }
+
+    /// <summary>SAP item groups (OITB) for the classification dropdown, cached 10 min.</summary>
+    public List<(int Code, string Name)> SapGroups { get; private set; } = new();
+
+    /// <summary>Odoo category full paths for the classification datalist.</summary>
+    public IReadOnlyList<CategoryEntry> OdooCategories { get; private set; } = Array.Empty<CategoryEntry>();
+
+    private async Task LoadClassificationSourcesAsync(CancellationToken ct)
+    {
+        try
+        {
+            SapGroups = (await _cache.GetOrCreateAsync("lubes-sap-item-groups", async e =>
+            {
+                e.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(10);
+                return await _sap.GetItemGroupsAsync(ct);
+            }))!;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not load SAP item groups — classification editor disabled this render.");
+            SapGroups = new();
+        }
+        OdooCategories = _taxonomy.All();
+    }
+
+    public async Task<IActionResult> OnPostReclassifyAsync(
+        string itemCode, int groupCode, string? odooCategoryPath, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        LookedUpItem = itemCode.Trim();
+        await LoadClassificationSourcesAsync(ct);
+
+        try
+        {
+            var groupName = SapGroups.FirstOrDefault(g => g.Code == groupCode).Name;
+            var path = string.IsNullOrWhiteSpace(odooCategoryPath) ? null : odooCategoryPath.Trim();
+            var extId = path is null
+                ? null
+                : OdooCategories.FirstOrDefault(c =>
+                    string.Equals(c.FullPath, path, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.Name, path, StringComparison.OrdinalIgnoreCase))?.ExternalId;
+
+            // 1. SAP (authoritative for the pricing band).
+            await _sap.SetItemClassificationAsync(LookedUpItem, groupCode, path, ct);
+
+            // 2. Neon mirror.
+            await _neon.UpdateClassificationAsync(LookedUpItem, groupCode, groupName, path, extId, ct);
+
+            // 3. Odoo — best-effort, matched by external id first (naming-independent).
+            var notes = new List<string>();
+            if (path is not null)
+            {
+                try { notes = await _odoo.UpdateLubesCategoryAsync(LookedUpItem, path, extId); }
+                catch (Exception ex) { notes.Add($"Odoo category update failed: {ex.Message}"); }
+            }
+
+            Message = $"✅ {LookedUpItem} reclassified to SAP group {groupCode} ({groupName}). "
+                      + string.Join(" ", notes)
+                      + " If the pricing band changed, run a reprice preview to update the prices.";
+        }
+        catch (Exception ex)
+        {
+            Error = ex.Message;
+        }
+
+        Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
+        EnteredEurCost = Preview.EurCost;
+        History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        return Page();
     }
 
     // ── View state ───────────────────────────────────────────────────
@@ -88,6 +176,7 @@ public class IndexModel : PageModel
         Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
         EnteredEurCost = Preview.EurCost;
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        await LoadClassificationSourcesAsync(ct);
         return Page();
     }
 
