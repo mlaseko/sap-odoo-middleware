@@ -37,6 +37,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
     private readonly MeguinProductScraperService    _meguinScraper;
     private readonly ICategoryTaxonomy              _taxonomy;
     private readonly PricingSettings                _pricingSettings;
+    private readonly ILubesPricingRepository        _lubesPricingRepo;
     private readonly ILogger<LubesItemProvisioningService> _logger;
 
     public LubesItemProvisioningService(
@@ -49,6 +50,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         MeguinProductScraperService meguinScraper,
         ICategoryTaxonomy taxonomy,
         IOptions<PricingSettings> pricingSettings,
+        ILubesPricingRepository lubesPricingRepo,
         ILogger<LubesItemProvisioningService> logger)
     {
         _classifier      = classifier;
@@ -60,6 +62,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         _meguinScraper   = meguinScraper;
         _taxonomy        = taxonomy;
         _pricingSettings = pricingSettings.Value;
+        _lubesPricingRepo = lubesPricingRepo;
         _logger          = logger;
     }
 
@@ -322,7 +325,8 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         {
             return new LubesProvisioningResult("needs_review", code, ReviewReason: ex.Message);
         }
-        var rate   = req.EurTzsRateOverride ?? _pricingSettings.EurTzsRate;
+        var rate   = req.EurTzsRateOverride
+                     ?? (await _lubesPricingRepo.GetEffectiveRateAsync(ct)).Rate;
         var cifTzs = req.EurCost * rate;
         var prices = _pricing.ComputeNetPrices(cifTzs, pricingCat);
 
@@ -426,6 +430,9 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             await _productRepo.UpsertPricesAsync(
                 code, prices.Retail, prices.Dealer, prices.SuperDealer,
                 prices.Maasai, ct);
+
+            // Stamp the inputs so the /pricing tools can reprice and detect drift later.
+            await _lubesPricingRepo.StampPricingInputsAsync(code, req.EurCost, rate, ct);
         }
         catch (Exception ex)
         {

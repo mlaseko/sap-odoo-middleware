@@ -1,0 +1,231 @@
+using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.RazorPages;
+using SapOdooMiddleware.Persistence;
+using SapOdooMiddleware.Pricing;
+
+namespace SapOdooMiddleware.Pages.Pricing;
+
+/// <summary>
+/// Operator UI for Lubes price management: EUR→TZS rate, single-item reprice
+/// (lookup → preview diff → post), Excel/filter bulk reprice, and price history.
+/// All work goes through <see cref="ILubesRepriceService"/> — identical behavior
+/// to the /api/pricing endpoints.
+/// </summary>
+public class IndexModel : PageModel
+{
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+    private const int BulkPreviewCap = 500;
+
+    private readonly ILubesPricingRepository _pricingRepo;
+    private readonly ILubesRepriceService _reprice;
+    private readonly LubesBulkRepriceJobService _bulkJobs;
+    private readonly ILogger<IndexModel> _logger;
+
+    public IndexModel(
+        ILubesPricingRepository pricingRepo,
+        ILubesRepriceService reprice,
+        LubesBulkRepriceJobService bulkJobs,
+        ILogger<IndexModel> logger)
+    {
+        _pricingRepo = pricingRepo;
+        _reprice = reprice;
+        _bulkJobs = bulkJobs;
+        _logger = logger;
+    }
+
+    // ── View state ───────────────────────────────────────────────────
+    public EffectiveRate Rate { get; private set; } = new(0m, "", null);
+    public string? Message { get; private set; }
+    public string? Error { get; private set; }
+
+    public RepricePreviewLine? Preview { get; private set; }
+    public IReadOnlyList<PriceChangeEntry> History { get; private set; } = Array.Empty<PriceChangeEntry>();
+    public string? LookedUpItem { get; private set; }
+    public decimal? EnteredEurCost { get; private set; }
+
+    public List<RepricePreviewLine> BulkLines { get; private set; } = new();
+    public List<string> BulkParseErrors { get; private set; } = new();
+    public string? PendingBulkJson { get; private set; }
+    public decimal? BulkRate { get; private set; }
+
+    public BulkRepriceJob? Job => _bulkJobs.Current;
+
+    public static readonly string[] CategoryOptions =
+    {
+        "Engine Oils", "Additives", "Gear Oils & Transmission Fluids", "Greases",
+        "Oils (Industrial/Other Fluids)", "Service", "Vehicle Care",
+        "Workshop Pro-Line", "Pastes", "Adhesives & Sealants", "Repair Aids",
+    };
+
+    public async Task OnGetAsync(CancellationToken ct)
+        => Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+
+    // ── Rate ─────────────────────────────────────────────────────────
+
+    public async Task<IActionResult> OnPostRateAsync(decimal newRate, CancellationToken ct)
+    {
+        if (newRate <= 0m)
+            Error = "Rate must be greater than zero.";
+        else
+        {
+            await _pricingRepo.SetRateAsync(newRate, ct);
+            _logger.LogInformation("EUR→TZS rate set to {Rate} via /pricing UI.", newRate);
+            Message = $"EUR→TZS rate set to {newRate:N0}. Provisioning and repricing use it immediately.";
+        }
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        return Page();
+    }
+
+    // ── Single item ──────────────────────────────────────────────────
+
+    public async Task<IActionResult> OnPostLookupAsync(string itemCode, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        if (string.IsNullOrWhiteSpace(itemCode)) { Error = "Enter an item code."; return Page(); }
+
+        LookedUpItem = itemCode.Trim();
+        Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
+        EnteredEurCost = Preview.EurCost;
+        History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        return Page();
+    }
+
+    public async Task<IActionResult> OnPostPreviewAsync(
+        string itemCode, decimal eurCost, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        LookedUpItem = itemCode.Trim();
+        EnteredEurCost = eurCost;
+        Preview = await _reprice.PreviewAsync(LookedUpItem, eurCost, null, includeTrace: false, ct);
+        History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        if (Preview.CanApply)
+            Message = "Preview only — nothing posted yet. Review the diff, then Confirm & Post.";
+        return Page();
+    }
+
+    public async Task<IActionResult> OnPostApplyAsync(
+        string itemCode, decimal eurCost, string? note, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        LookedUpItem = itemCode.Trim();
+        EnteredEurCost = eurCost;
+
+        var result = await _reprice.ApplyAsync(LookedUpItem, eurCost, null, "manual", note, ct);
+        if (result.Applied)
+        {
+            Message = $"✅ {LookedUpItem} repriced and posted to SAP + Neon. "
+                      + string.Join(" ", result.OdooNotes);
+        }
+        else
+        {
+            Error = result.Error;
+        }
+
+        Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
+        History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        return Page();
+    }
+
+    // ── Bulk ─────────────────────────────────────────────────────────
+
+    public async Task<IActionResult> OnPostUploadAsync(
+        IFormFile? file, decimal? bulkRate, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        BulkRate = bulkRate;
+        if (file is null || file.Length == 0) { Error = "Choose an .xlsx file first."; return Page(); }
+
+        try
+        {
+            var (rows, errors) = ExcelRepriceParser.Parse(file.OpenReadStream());
+            BulkParseErrors = errors;
+            var items = rows.Select(r => new RepriceItemInput(r.ItemCode, r.EurCost)).ToList();
+            await BuildBulkPreviewAsync(items, bulkRate, ct);
+        }
+        catch (Exception ex)
+        {
+            Error = $"Could not read the Excel file: {ex.Message}";
+        }
+        return Page();
+    }
+
+    public async Task<IActionResult> OnPostFilterPreviewAsync(
+        string category, decimal? bulkRate, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        BulkRate = bulkRate;
+
+        // Category → SAP group codes (same mapping the calculator owns).
+        var calc = HttpContext.RequestServices.GetRequiredService<IPricingCalculator>();
+        var groups = new List<int>();
+        for (int code = 100; code <= 130; code++)
+            if (string.Equals(calc.TryPricingBandForSapGroup(code), category, StringComparison.OrdinalIgnoreCase))
+                groups.Add(code);
+        if (groups.Count == 0) { Error = $"No SAP groups map to band '{category}'."; return Page(); }
+
+        var candidates = await _pricingRepo.GetRepriceCandidatesAsync(groups, ct);
+        if (candidates.Count == 0)
+        {
+            Error = $"No items in '{category}' carry a stored EUR cost yet — items get a stored cost when "
+                    + "provisioned or repriced. Use the Excel upload for these.";
+            return Page();
+        }
+        var items = candidates.Select(c => new RepriceItemInput(c.ItemCode, c.LastEurCost)).ToList();
+        await BuildBulkPreviewAsync(items, bulkRate, ct);
+        return Page();
+    }
+
+    public async Task<IActionResult> OnPostBulkApplyAsync(
+        string pendingJson, decimal? bulkRate, string? note, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        try
+        {
+            var items = JsonSerializer.Deserialize<List<RepriceItemInput>>(pendingJson, JsonOpts);
+            if (items is null || items.Count == 0) { Error = "Nothing pending to apply — preview first."; return Page(); }
+
+            var job = _bulkJobs.Start(items, bulkRate, "ui", note);
+            Message = $"Bulk reprice started: {items.Count} items (job {job.JobId:N}). Refresh this page for progress.";
+        }
+        catch (InvalidOperationException ex)
+        {
+            Error = ex.Message;
+        }
+        catch (JsonException)
+        {
+            Error = "Pending list was corrupted — re-run the preview.";
+        }
+        return Page();
+    }
+
+    public async Task<IActionResult> OnPostStopJobAsync(CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        Message = _bulkJobs.Stop()
+            ? "Stop requested — the job halts after the current item."
+            : "No bulk job is running.";
+        return Page();
+    }
+
+    private async Task BuildBulkPreviewAsync(
+        List<RepriceItemInput> items, decimal? bulkRate, CancellationToken ct)
+    {
+        if (items.Count == 0) { Error = "No usable rows found."; return; }
+        if (items.Count > BulkPreviewCap)
+        {
+            Error = $"{items.Count} items exceed the {BulkPreviewCap}-item preview cap — split the file or narrow the filter.";
+            return;
+        }
+
+        foreach (var i in items)
+            BulkLines.Add(await _reprice.PreviewAsync(i.ItemCode, i.EurCost, bulkRate, includeTrace: false, ct));
+
+        // Only applicable lines get carried into the apply step.
+        var pending = items
+            .Where(i => BulkLines.First(l => l.ItemCode == i.ItemCode).CanApply)
+            .ToList();
+        PendingBulkJson = JsonSerializer.Serialize(pending, JsonOpts);
+        Message = $"Preview only — {pending.Count} of {items.Count} lines are ready to apply. Nothing posted yet.";
+    }
+}

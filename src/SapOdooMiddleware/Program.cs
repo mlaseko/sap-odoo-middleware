@@ -127,6 +127,11 @@ builder.Services.AddHostedService<IndexWarmupHostedService<MeguinProductScraperS
 
 // --- Item Provisioning components ---
 builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
+// Lubes price management: runtime EUR→TZS rate + audit log (Neon), the reprice
+// engine (SAP+Neon+Odoo), and the background bulk-reprice job.
+builder.Services.AddScoped<ILubesPricingRepository, LubesPricingRepository>();
+builder.Services.AddScoped<ILubesRepriceService, LubesRepriceService>();
+builder.Services.AddSingleton<LubesBulkRepriceJobService>();
 builder.Services.AddScoped<INeonLiquiMolyRepository, NeonLiquiMolyRepository>();
 builder.Services.Configure<CategoryTaxonomySettings>(builder.Configuration.GetSection(CategoryTaxonomySettings.SectionName));
 builder.Services.AddSingleton<ICategoryTaxonomy, CategoryTaxonomyService>();

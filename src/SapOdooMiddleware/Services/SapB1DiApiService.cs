@@ -5579,6 +5579,55 @@ ORDER BY PostingDate, DocumentNumber";
         }
     }
 
+    /// <inheritdoc/>
+    public async Task SetPriceListPricesAsync(
+        string itemCode, IReadOnlyDictionary<int, decimal> netPricesByIndex, CancellationToken ct)
+    {
+        if (netPricesByIndex.Count == 0) return;
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException(
+                        $"SAP item '{itemCode}' not found — cannot set price lists.");
+
+                foreach (var (index, net) in netPricesByIndex)
+                {
+                    items.PriceList.SetCurrentLine(index);
+                    items.PriceList.Price    = (double)net;
+                    items.PriceList.Currency = "TZS";
+                }
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed setting {netPricesByIndex.Count} price list(s) " +
+                        $"for {itemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP PriceLists set: ItemCode={ItemCode}, Lists={Lists}",
+                    itemCode, string.Join(",", netPricesByIndex.Select(kv => $"idx{kv.Key}={kv.Value:0.##}")));
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     // ================================
     // INVENTORY APP (Autohub)
     // ================================

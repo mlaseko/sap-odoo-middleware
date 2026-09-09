@@ -53,4 +53,13 @@ public interface IOdooService
     /// Does not modify any data in Odoo.
     /// </summary>
     Task<OdooPingResponse> PingAsync();
+
+    /// <summary>
+    /// Pushes updated Lubes price tiers (net TZS) to Odoo: sets the product's
+    /// list_price to Retail (matching provisioning) and updates/creates fixed-price
+    /// rules on the pricelists mapped in <c>Pricing:OdooPricelistNames</c>.
+    /// Best-effort — per-tier failures are reported in the returned notes, not thrown.
+    /// </summary>
+    Task<List<string>> UpdateLubesPricesAsync(
+        string itemCode, decimal retailNet, decimal dealerNet, decimal superDealerNet, decimal maasaiNet);
 }
