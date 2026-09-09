@@ -180,6 +180,42 @@ public class IndexModel : PageModel
         return Page();
     }
 
+    /// <summary>Sticky state for target-price mode.</summary>
+    public int? TargetPl { get; private set; }
+    public decimal? TargetPrice { get; private set; }
+    public decimal? ImpliedEur { get; private set; }
+
+    public async Task<IActionResult> OnPostTargetPreviewAsync(
+        string itemCode, int targetPl, decimal targetPrice, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        LookedUpItem = itemCode.Trim();
+        TargetPl = targetPl;
+        TargetPrice = targetPrice;
+
+        if (targetPl is < 1 or > 4 || targetPrice <= 0m)
+        {
+            Error = "Pick a price list and enter a positive target price (incl VAT).";
+        }
+        else
+        {
+            var (implied, preview) = await _reprice.PreviewFromTargetAsync(
+                LookedUpItem, targetPl, targetPrice, null, ct);
+            Preview = preview;
+            ImpliedEur = implied;
+            EnteredEurCost = implied;
+            if (implied is not null && preview.CanApply)
+                Message = $"Solved: PL{targetPl} target {targetPrice:N0} ⇒ implied EUR invoice price €{implied:N2}. " +
+                          "Preview only — review all four tiers, then Confirm & Post.";
+            else
+                Error ??= preview.Error;
+        }
+
+        History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        await LoadClassificationSourcesAsync(ct);
+        return Page();
+    }
+
     public async Task<IActionResult> OnPostPreviewAsync(
         string itemCode, decimal eurCost, CancellationToken ct)
     {

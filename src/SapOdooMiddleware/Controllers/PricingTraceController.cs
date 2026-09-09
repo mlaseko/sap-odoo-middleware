@@ -245,16 +245,40 @@ public class PricingTraceController : ControllerBase
     {
         if (string.IsNullOrWhiteSpace(request.ItemCode))
             return BadRequest(ApiResponse<object>.Fail("item_code is required."));
+        var itemCode = request.ItemCode.Trim();
+
+        // ── Target-price mode: back-solve the EUR cost from one tier's target. ──
+        if (request.TargetInclVat is > 0m || request.TargetPl is not null)
+        {
+            if (request.TargetInclVat is not > 0m || request.TargetPl is not (>= 1 and <= 4))
+                return BadRequest(ApiResponse<object>.Fail(
+                    "Target mode needs target_pl (1=Retail, 2=Dealer, 3=SuperDealer, 4=Maasai) and a positive target_incl_vat."));
+            if (request.EurCost is not null)
+                return BadRequest(ApiResponse<object>.Fail("Provide either eur_cost OR a target price, not both."));
+
+            var (impliedEur, targetPreview) = await _reprice.PreviewFromTargetAsync(
+                itemCode, request.TargetPl.Value, request.TargetInclVat.Value, request.Rate, ct);
+
+            if (request.DryRun || impliedEur is null)
+                return Ok(ApiResponse<object>.Ok(new { implied_eur_cost = impliedEur, preview = targetPreview }));
+
+            var targetNote = $"target PL{request.TargetPl}={request.TargetInclVat:N0}" +
+                             (string.IsNullOrWhiteSpace(request.Note) ? "" : $"; {request.Note}");
+            var applied = await _reprice.ApplyAsync(itemCode, impliedEur, request.Rate, "manual", targetNote, ct);
+            return applied.Applied
+                ? Ok(ApiResponse<object>.Ok(new { implied_eur_cost = impliedEur, result = applied }))
+                : BadRequest(ApiResponse<object>.Fail(applied.Error ?? "Reprice failed."));
+        }
 
         if (request.DryRun)
         {
             var preview = await _reprice.PreviewAsync(
-                request.ItemCode.Trim(), request.EurCost, request.Rate, includeTrace: true, ct);
+                itemCode, request.EurCost, request.Rate, includeTrace: true, ct);
             return Ok(ApiResponse<RepricePreviewLine>.Ok(preview));
         }
 
         var result = await _reprice.ApplyAsync(
-            request.ItemCode.Trim(), request.EurCost, request.Rate, "manual", request.Note, ct);
+            itemCode, request.EurCost, request.Rate, "manual", request.Note, ct);
         return result.Applied
             ? Ok(ApiResponse<RepriceApplyResult>.Ok(result))
             : BadRequest(ApiResponse<RepriceApplyResult>.Fail(result.Error ?? "Reprice failed."));
@@ -433,6 +457,12 @@ public class RepriceRequest
     public decimal? Rate { get; set; }
     public bool DryRun { get; set; } = true;
     public string? Note { get; set; }
+
+    /// <summary>Target-price mode: the price list the target applies to (1=Retail,
+    /// 2=Dealer, 3=SuperDealer, 4=Maasai). Mutually exclusive with eur_cost.</summary>
+    public int? TargetPl { get; set; }
+    /// <summary>Target-price mode: the desired INCL-VAT selling price on that list.</summary>
+    public decimal? TargetInclVat { get; set; }
 }
 
 public class BulkRepriceItemDto

@@ -160,22 +160,44 @@
             <div style="margin-top:12px">
                 <form method="post" asp-page-handler="Preview" class="inline-form" style="display:inline-flex">
                     <input type="hidden" name="itemCode" value="@p.ItemCode" />
-                    <label>New EUR cost:</label>
+                    <label>New EUR invoice price:</label>
                     <input type="number" name="eurCost" step="0.01" min="0.01"
                            value="@(Model.EnteredEurCost?.ToString("0.##"))" required />
                     <button class="btn" type="submit">Preview change</button>
                 </form>
-                @if (p.CanApply && Model.EnteredEurCost is not null)
+            </div>
+            <div style="margin-top:8px">
+                <form method="post" asp-page-handler="TargetPreview" class="inline-form" style="display:inline-flex">
+                    <input type="hidden" name="itemCode" value="@p.ItemCode" />
+                    <label>Or target selling price (incl VAT):</label>
+                    <select name="targetPl">
+                        <option value="1" selected="@(Model.TargetPl == 1)">PL1 Retail</option>
+                        <option value="2" selected="@(Model.TargetPl == 2)">PL2 Dealer</option>
+                        <option value="3" selected="@(Model.TargetPl == 3)">PL3 Super Dealer</option>
+                        <option value="4" selected="@(Model.TargetPl == 4)">PL4 Maasai</option>
+                    </select>
+                    <input type="number" name="targetPrice" step="1000" min="1000"
+                           placeholder="e.g. 230000" value="@(Model.TargetPrice?.ToString("0"))" required />
+                    <button class="btn" type="submit">Solve from target</button>
+                </form>
+                @if (Model.ImpliedEur is not null)
                 {
-                    <form method="post" asp-page-handler="Apply" class="inline-form" style="display:inline-flex; margin-left:10px">
+                    <span class="meta" style="margin-left:8px">Implied EUR invoice price: <b>€@Model.ImpliedEur?.ToString("N2")</b></span>
+                }
+            </div>
+            @if (p.CanApply && Model.EnteredEurCost is not null)
+            {
+                <div style="margin-top:10px">
+                    <form method="post" asp-page-handler="Apply" class="inline-form" style="display:inline-flex">
                         <input type="hidden" name="itemCode" value="@p.ItemCode" />
                         <input type="hidden" name="eurCost" value="@Model.EnteredEurCost" />
-                        <input type="text" name="note" placeholder="reason / note (optional)" />
+                        <input type="text" name="note" placeholder="reason / note (optional)"
+                               value="@(Model.TargetPl is { } tpl && Model.TargetPrice is { } tp ? $"target PL{tpl}={tp:N0}" : "")" />
                         <button class="btn btn-primary" type="submit"
                                 onclick="return confirm('Post these prices to SAP, Neon and Odoo?')">Confirm &amp; Post</button>
                     </form>
-                }
-            </div>
+                </div>
+            }
         }
     }
 
