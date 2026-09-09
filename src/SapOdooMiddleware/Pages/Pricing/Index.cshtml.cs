@@ -132,7 +132,28 @@ public class IndexModel : PageModel
     public string? LookedUpItem { get; private set; }
     public decimal? EnteredEurCost { get; private set; }
 
-    public List<RepricePreviewLine> BulkLines { get; private set; } = new();
+    /// <summary>One bulk-preview line: preview + how its EUR was determined + benchmark.</summary>
+    public sealed record BulkRow(
+        RepricePreviewLine Preview,
+        decimal? ResolvedEur,
+        int? TargetPl,
+        decimal? TargetInclVat,
+        string? CompareItem,
+        RepricePreviewLine? Benchmark);
+
+    /// <summary>Editable grid row posted back by the Recompute button.</summary>
+    public sealed class BulkRowEdit
+    {
+        public string ItemCode { get; set; } = "";
+        public decimal? EurCost { get; set; }
+        public string? CompareItem { get; set; }
+    }
+
+    /// <summary>Internal normalized bulk input (from Excel, filter, or grid edits).</summary>
+    private sealed record BulkInput(
+        string ItemCode, decimal? EurCost, int? TargetPl, decimal? TargetInclVat, string? CompareItem);
+
+    public List<BulkRow> BulkRows { get; private set; } = new();
     public List<string> BulkParseErrors { get; private set; } = new();
     public string? PendingBulkJson { get; private set; }
     public decimal? BulkRate { get; private set; }
@@ -325,7 +346,8 @@ public class IndexModel : PageModel
         {
             var (rows, errors) = ExcelRepriceParser.Parse(file.OpenReadStream());
             BulkParseErrors = errors;
-            var items = rows.Select(r => new RepriceItemInput(r.ItemCode, r.EurCost)).ToList();
+            var items = rows.Select(r =>
+                new BulkInput(r.ItemCode, r.EurCost, r.TargetPl, r.TargetInclVat, r.CompareItem)).ToList();
             await BuildBulkPreviewAsync(items, bulkRate, ct);
         }
         catch (Exception ex)
@@ -356,7 +378,27 @@ public class IndexModel : PageModel
                     + "provisioned or repriced. Use the Excel upload for these.";
             return Page();
         }
-        var items = candidates.Select(c => new RepriceItemInput(c.ItemCode, c.LastEurCost)).ToList();
+        var items = candidates.Select(c =>
+            new BulkInput(c.ItemCode, c.LastEurCost, null, null, null)).ToList();
+        await BuildBulkPreviewAsync(items, bulkRate, ct);
+        return Page();
+    }
+
+    /// <summary>
+    /// Re-previews the bulk grid with per-row EUR costs edited in place. Rows that
+    /// originally came from a target keep the implied EUR that was pre-filled unless
+    /// the user changed it — either way the (possibly edited) EUR is authoritative.
+    /// </summary>
+    public async Task<IActionResult> OnPostBulkRecomputeAsync(
+        List<BulkRowEdit> rows, decimal? bulkRate, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        BulkRate = bulkRate;
+        var items = (rows ?? new())
+            .Where(r => !string.IsNullOrWhiteSpace(r.ItemCode))
+            .Select(r => new BulkInput(r.ItemCode.Trim(), r.EurCost, null, null,
+                string.IsNullOrWhiteSpace(r.CompareItem) ? null : r.CompareItem.Trim()))
+            .ToList();
         await BuildBulkPreviewAsync(items, bulkRate, ct);
         return Page();
     }
@@ -394,7 +436,7 @@ public class IndexModel : PageModel
     }
 
     private async Task BuildBulkPreviewAsync(
-        List<RepriceItemInput> items, decimal? bulkRate, CancellationToken ct)
+        List<BulkInput> items, decimal? bulkRate, CancellationToken ct)
     {
         if (items.Count == 0) { Error = "No usable rows found."; return; }
         if (items.Count > BulkPreviewCap)
@@ -403,12 +445,42 @@ public class IndexModel : PageModel
             return;
         }
 
+        var benchCache = new Dictionary<string, RepricePreviewLine>(StringComparer.OrdinalIgnoreCase);
         foreach (var i in items)
-            BulkLines.Add(await _reprice.PreviewAsync(i.ItemCode, i.EurCost, bulkRate, includeTrace: false, ct));
+        {
+            RepricePreviewLine preview;
+            decimal? resolvedEur;
+            if (i.TargetInclVat is > 0m && i.TargetPl is >= 1 and <= 4)
+            {
+                // Target mode: solve to an implied EUR so the apply step (and audit)
+                // still runs off one cost per item.
+                (resolvedEur, preview) = await _reprice.PreviewFromTargetAsync(
+                    i.ItemCode, i.TargetPl.Value, i.TargetInclVat.Value, bulkRate, ct);
+            }
+            else
+            {
+                preview = await _reprice.PreviewAsync(i.ItemCode, i.EurCost, bulkRate, includeTrace: false, ct);
+                resolvedEur = i.EurCost ?? preview.EurCost;   // stored/staging fallback surfaces here
+            }
 
-        // Only applicable lines get carried into the apply step.
-        var pending = items
-            .Where(i => BulkLines.First(l => l.ItemCode == i.ItemCode).CanApply)
+            RepricePreviewLine? bench = null;
+            if (!string.IsNullOrWhiteSpace(i.CompareItem))
+            {
+                var key = i.CompareItem.Trim();
+                if (!benchCache.TryGetValue(key, out bench))
+                {
+                    bench = await _reprice.PreviewAsync(key, null, null, includeTrace: false, ct);
+                    benchCache[key] = bench;
+                }
+            }
+
+            BulkRows.Add(new BulkRow(preview, resolvedEur, i.TargetPl, i.TargetInclVat, i.CompareItem, bench));
+        }
+
+        // Only applicable lines get carried into the apply step, with their FINAL EUR.
+        var pending = BulkRows
+            .Where(r => r.Preview.CanApply && r.ResolvedEur is > 0m)
+            .Select(r => new RepriceItemInput(r.Preview.ItemCode, r.ResolvedEur))
             .ToList();
         PendingBulkJson = JsonSerializer.Serialize(pending, JsonOpts);
         Message = $"Preview only — {pending.Count} of {items.Count} lines are ready to apply. Nothing posted yet.";

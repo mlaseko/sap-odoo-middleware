@@ -302,8 +302,10 @@
 <div class="card">
     <h3>Bulk reprice</h3>
     <div class="meta" style="margin-bottom:8px">
-        Excel: columns <b>ItemCode</b> and <b>EurCost</b> (header row optional). Filter: reprices every item in a
-        band from its stored EUR cost — use it after a rate change.
+        Excel columns (header row recommended): <b>ItemCode</b> · <b>EurCost</b> <i>or</i>
+        <b>TargetList</b>+<b>TargetPrice</b> (incl VAT; list = 1-4 or retail/dealer/superdealer/maasai)
+        · optional <b>Benchmark</b> item. Rows with neither cost nor target use the stored /
+        latest-invoice EUR cost. Filter mode reprices a whole band from stored costs — use it after a rate change.
     </div>
 
     <form method="post" asp-page-handler="Upload" enctype="multipart/form-data" class="inline-form">
@@ -326,35 +328,73 @@
 
     @foreach (var e in Model.BulkParseErrors) { <div class="msg-warn">@e</div> }
 
-    @if (Model.BulkLines.Count > 0)
+    @if (Model.BulkRows.Count > 0)
     {
-        <div class="bulk-scroll" style="margin-top:10px">
-            <table class="price-grid">
-                <tr>
-                    <th style="text-align:left">Item</th><th>EUR</th>
-                    <th>PL1 incl VAT old→new</th><th>PL2 incl VAT old→new</th>
-                    <th>PL3 incl VAT old→new</th><th>PL4 incl VAT old→new</th>
-                    <th>Δ PL1</th><th style="text-align:left">Status</th>
-                </tr>
-                @foreach (var l in Model.BulkLines)
-                {
+        <form method="post" asp-page-handler="BulkRecompute">
+            <input type="hidden" name="bulkRate" value="@Model.BulkRate" />
+            <div class="bulk-scroll" style="margin-top:10px">
+                <table class="price-grid">
                     <tr>
-                        <td style="text-align:left">@l.ItemCode</td>
-                        <td>@(l.EurCost?.ToString("N2") ?? "—")</td>
-                        @for (int pl = 1; pl <= 4; pl++)
-                        {
-                            <td>@InclOf(l.OldNet, pl) → @Money(NetOf(l.NewInclVat, pl))</td>
-                        }
-                        <td class="@DeltaCls(l.DeltaPct?.GetValueOrDefault(1))">@DeltaTxt(l.DeltaPct?.GetValueOrDefault(1))</td>
-                        <td style="text-align:left">
-                            @if (!l.CanApply) { <span class="delta-big">@l.Error</span> }
-                            else if (l.Warnings.Count > 0) { <span class="delta-up">⚠ &gt;30%</span> }
-                            else { <text>ok</text> }
-                        </td>
+                        <th style="text-align:left">Item</th><th>EUR (editable)</th>
+                        <th>PL1 incl VAT old→new</th><th>PL2 incl VAT old→new</th>
+                        <th>PL3 incl VAT old→new</th><th>PL4 incl VAT old→new</th>
+                        <th>Δ PL1</th><th>Vs bench PL1</th><th style="text-align:left">Status</th>
                     </tr>
-                }
-            </table>
-        </div>
+                    @for (int i = 0; i < Model.BulkRows.Count; i++)
+                    {
+                        var row = Model.BulkRows[i];
+                        var l = row.Preview;
+                        var bench = row.Benchmark is { Found: true } b ? b : null;
+                        <tr>
+                            <td style="text-align:left">
+                                @l.ItemCode
+                                <input type="hidden" name="rows[@i].ItemCode" value="@l.ItemCode" />
+                                <input type="hidden" name="rows[@i].CompareItem" value="@row.CompareItem" />
+                                @if (row.TargetInclVat is not null)
+                                {
+                                    <div class="meta">target PL@(row.TargetPl)=@row.TargetInclVat?.ToString("N0")</div>
+                                }
+                            </td>
+                            <td>
+                                <input type="number" name="rows[@i].EurCost" step="0.01" min="0"
+                                       value="@(row.ResolvedEur?.ToString("0.##"))"
+                                       style="width:90px; padding:3px 6px; border:1px solid var(--border); border-radius:6px; background:var(--surface-2); color:var(--text); text-align:right" />
+                            </td>
+                            @for (int pl = 1; pl <= 4; pl++)
+                            {
+                                <td>
+                                    @InclOf(l.OldNet, pl) → @Money(NetOf(l.NewInclVat, pl))
+                                    @if (bench is not null)
+                                    {
+                                        <div class="meta" style="color:var(--teal)">b: @InclOf(bench.OldNet, pl)</div>
+                                    }
+                                </td>
+                            }
+                            <td class="@DeltaCls(l.DeltaPct?.GetValueOrDefault(1))">@DeltaTxt(l.DeltaPct?.GetValueOrDefault(1))</td>
+                            <td>
+                                @{
+                                    decimal? vsBench = null;
+                                    var mine1 = NetOf(l.NewNet, 1) ?? NetOf(l.OldNet, 1);
+                                    var their1 = bench is null ? null : NetOf(bench.OldNet, 1);
+                                    if (mine1 is { } m1 && their1 is { } t1 && t1 > 0m)
+                                        vsBench = Math.Round((m1 - t1) / t1 * 100m, 1);
+                                }
+                                <span class="@DeltaCls(vsBench)">@(vsBench is null ? "—" : $"{vsBench:+0.#;-0.#}%")</span>
+                            </td>
+                            <td style="text-align:left">
+                                @if (!l.CanApply) { <span class="delta-big">@l.Error</span> }
+                                else if (l.Warnings.Count > 0) { <span class="delta-up">⚠ check</span> }
+                                else { <text>ok</text> }
+                            </td>
+                        </tr>
+                    }
+                </table>
+            </div>
+            <div class="inline-form" style="margin-top:8px">
+                <button class="btn" type="submit">Recompute with edited EUR costs</button>
+                <span class="meta">Edit any EUR cell (target rows are pre-filled with their implied EUR) and recompute before applying.</span>
+            </div>
+        </form>
 
         @if (Model.PendingBulkJson is not null)
         {

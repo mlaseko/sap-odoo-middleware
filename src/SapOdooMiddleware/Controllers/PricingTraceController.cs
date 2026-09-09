@@ -317,10 +317,23 @@ public class PricingTraceController : ControllerBase
 
         if (request.Items is { Count: > 0 })
         {
-            items = request.Items
-                .Where(i => !string.IsNullOrWhiteSpace(i.ItemCode))
-                .Select(i => new RepriceItemInput(i.ItemCode.Trim(), i.EurCost))
-                .ToList();
+            items = new List<RepriceItemInput>();
+            foreach (var dto in request.Items.Where(i => !string.IsNullOrWhiteSpace(i.ItemCode)))
+            {
+                var code = dto.ItemCode.Trim();
+                if (dto.TargetInclVat is > 0m && dto.TargetPl is >= 1 and <= 4)
+                {
+                    // Target rows resolve to an implied EUR up front, so the job and
+                    // audit trail run off one cost per item like every other reprice.
+                    var (implied, _) = await _reprice.PreviewFromTargetAsync(
+                        code, dto.TargetPl.Value, dto.TargetInclVat.Value, request.Rate, ct);
+                    items.Add(new RepriceItemInput(code, implied));
+                }
+                else
+                {
+                    items.Add(new RepriceItemInput(code, dto.EurCost));
+                }
+            }
             source = "list";
         }
         else
@@ -469,6 +482,10 @@ public class BulkRepriceItemDto
 {
     public string ItemCode { get; set; } = "";
     public decimal? EurCost { get; set; }
+    /// <summary>Target-price mode per row (mutually exclusive with eur_cost): 1-4.</summary>
+    public int? TargetPl { get; set; }
+    /// <summary>Desired INCL-VAT price on that list; solved to an implied EUR cost.</summary>
+    public decimal? TargetInclVat { get; set; }
 }
 
 /// <summary>POST /api/pricing/reprice/bulk body.</summary>
