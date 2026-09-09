@@ -99,11 +99,11 @@ public class IndexModel : PageModel
             // 2. Neon mirror.
             await _neon.UpdateClassificationAsync(LookedUpItem, groupCode, groupName, path, extId, ct);
 
-            // 3. Odoo — best-effort.
+            // 3. Odoo — best-effort, matched by external id first (naming-independent).
             var notes = new List<string>();
             if (path is not null)
             {
-                try { notes = await _odoo.UpdateLubesCategoryAsync(LookedUpItem, path); }
+                try { notes = await _odoo.UpdateLubesCategoryAsync(LookedUpItem, path, extId); }
                 catch (Exception ex) { notes.Add($"Odoo category update failed: {ex.Message}"); }
             }
 

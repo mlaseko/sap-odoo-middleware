@@ -126,7 +126,8 @@ public class OdooJsonRpcService : IOdooService
     }
 
     /// <inheritdoc/>
-    public async Task<List<string>> UpdateLubesCategoryAsync(string itemCode, string categoryFullPath)
+    public async Task<List<string>> UpdateLubesCategoryAsync(
+        string itemCode, string? categoryFullPath, string? categoryExternalId)
     {
         if (!_settings.UseBearerAuth)
             await EnsureAuthenticatedAsync();
@@ -143,27 +144,68 @@ public class OdooJsonRpcService : IOdooService
             return notes;
         }
 
-        // Try the full hierarchical name first, then the last segment.
-        var catIds = await SearchAsync("product.category", new JsonArray
+        // 1. External id via ir.model.data — exact and immune to display-name differences.
+        int? catId = null;
+        string matchedBy = "";
+        if (!string.IsNullOrWhiteSpace(categoryExternalId))
         {
-            new JsonArray { JsonValue.Create("complete_name"), JsonValue.Create("="), JsonValue.Create(categoryFullPath) }
-        });
-        if (catIds.Count == 0)
-        {
-            var leaf = categoryFullPath.Split('/')[^1].Trim();
-            catIds = await SearchAsync("product.category", new JsonArray
+            var extId = categoryExternalId.Trim();
+            var dot = extId.IndexOf('.');
+            var domain = new JsonArray
             {
-                new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(leaf) }
-            });
-            if (catIds.Count == 0)
+                new JsonArray { JsonValue.Create("model"), JsonValue.Create("="), JsonValue.Create("product.category") }
+            };
+            if (dot > 0)
             {
-                notes.Add($"Odoo: no product.category matching '{categoryFullPath}' — category not updated.");
-                return notes;
+                domain.Add(new JsonArray { JsonValue.Create("module"), JsonValue.Create("="), JsonValue.Create(extId[..dot]) });
+                domain.Add(new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(extId[(dot + 1)..]) });
+            }
+            else
+            {
+                domain.Add(new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(extId) });
+            }
+
+            var rows = await SearchReadAsync("ir.model.data", domain,
+                new JsonArray { JsonValue.Create("res_id") });
+            if (rows.Count > 0 && rows[0]["res_id"]?.GetValue<int>() is int resId and > 0)
+            {
+                catId = resId;
+                matchedBy = $"external id '{extId}'";
+            }
+            else
+            {
+                notes.Add($"Odoo: external id '{extId}' not found in ir.model.data — trying name match.");
             }
         }
 
-        await WriteAsync("product.product", productIds[0], new JsonObject { ["categ_id"] = catIds[0] });
-        notes.Add($"Odoo: product {productIds[0]} category set to '{categoryFullPath}' (categ_id {catIds[0]}).");
+        // 2/3. Complete name, then the last path segment.
+        if (catId is null && !string.IsNullOrWhiteSpace(categoryFullPath))
+        {
+            var catIds = await SearchAsync("product.category", new JsonArray
+            {
+                new JsonArray { JsonValue.Create("complete_name"), JsonValue.Create("="), JsonValue.Create(categoryFullPath) }
+            });
+            if (catIds.Count > 0) { catId = catIds[0]; matchedBy = $"complete_name '{categoryFullPath}'"; }
+            else
+            {
+                var leaf = categoryFullPath.Split('/')[^1].Trim();
+                catIds = await SearchAsync("product.category", new JsonArray
+                {
+                    new JsonArray { JsonValue.Create("name"), JsonValue.Create("="), JsonValue.Create(leaf) }
+                });
+                if (catIds.Count > 0) { catId = catIds[0]; matchedBy = $"name '{leaf}'"; }
+            }
+        }
+
+        if (catId is null)
+        {
+            notes.Add($"Odoo: no product.category matched (external id '{categoryExternalId}', " +
+                      $"path '{categoryFullPath}') — category not updated.");
+            return notes;
+        }
+
+        await WriteAsync("product.product", productIds[0], new JsonObject { ["categ_id"] = catId.Value });
+        notes.Add($"Odoo: product {productIds[0]} category set (categ_id {catId}, matched by {matchedBy}).");
         return notes;
     }
 
