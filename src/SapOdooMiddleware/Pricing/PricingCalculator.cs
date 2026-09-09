@@ -3,10 +3,35 @@ namespace SapOdooMiddleware.Pricing;
 /// <summary>Four net (excl-VAT) prices in TZS.</summary>
 public record PriceTiers(decimal Retail, decimal Dealer, decimal SuperDealer, decimal Maasai);
 
+/// <summary>One band-convergence pass of the pricing algorithm (diagnostics).</summary>
+public record PricingTraceStep(
+    int Iteration, string Band,
+    decimal SpRatio, decimal DealerRatio, decimal RetailRatio,
+    decimal SpInclVat, decimal DealerInclVat, decimal RetailInclVat);
+
+/// <summary>Full derivation of one pricing computation (diagnostics / trace endpoint).</summary>
+public record PricingTrace(
+    decimal CifCostTzs,
+    string PricingCategory,
+    List<PricingTraceStep> Iterations,
+    string FinalBand,
+    bool OrderingAdjusted,
+    decimal RetailInclVat,
+    decimal DealerInclVat,
+    decimal SuperDealerInclVat,
+    string MaasaiCategory,
+    int MaasaiBandIndex,
+    decimal MaasaiRatio,
+    decimal MaasaiInclVat,
+    PriceTiers Net);
+
 public interface IPricingCalculator
 {
     /// <summary>Compute Retail/Dealer/Super-Dealer NET (excl-VAT) prices from CIF cost in TZS.</summary>
     PriceTiers ComputeNetPrices(decimal cifCostTzs, string pricingCategory);
+
+    /// <summary>Same computation as <see cref="ComputeNetPrices"/>, returning the full derivation.</summary>
+    PricingTrace ComputeNetPricesWithTrace(decimal cifCostTzs, string pricingCategory);
 
     /// <summary>Resolve a scraped/LM category string to a canonical pricing-category key.</summary>
     string ResolvePricingCategory(string? scrapedCategory);
@@ -313,6 +338,9 @@ public class PricingCalculator : IPricingCalculator
         => SapGroupBand.TryGetValue(sapGroupCode, out var band) ? band : null;
 
     public PriceTiers ComputeNetPrices(decimal cifCostTzs, string pricingCategory)
+        => ComputeNetPricesWithTrace(cifCostTzs, pricingCategory).Net;
+
+    public PricingTrace ComputeNetPricesWithTrace(decimal cifCostTzs, string pricingCategory)
     {
         if (cifCostTzs <= 0m)
             throw new ArgumentOutOfRangeException(nameof(cifCostTzs), "CIF cost must be > 0.");
@@ -321,6 +349,7 @@ public class PricingCalculator : IPricingCalculator
 
         var band = "25k to 50k";   // seed band, matches the HTML tool
         decimal sp = 0, dealer = 0, retail = 0;
+        var steps = new List<PricingTraceStep>();
 
         for (int i = 0; i < 5; i++)
         {
@@ -328,28 +357,46 @@ public class PricingCalculator : IPricingCalculator
             sp     = Math.Ceiling(cifCostTzs / r.sp / 1000m) * 1000m;
             dealer = Math.Round  (cifCostTzs / r.d  / 5000m, MidpointRounding.AwayFromZero) * 5000m;
             retail = Math.Floor  (cifCostTzs / r.r  / 5000m) * 5000m;
+            steps.Add(new PricingTraceStep(i + 1, band, r.sp, r.d, r.r, sp, dealer, retail));
             var nb = GetBand(sp);
             if (nb == band) break;
             band = nb;
         }
 
-        if (dealer >= retail) dealer = retail - 5000m;
-        if (sp >= dealer)     sp     = dealer - 1000m;
+        bool adjusted = false;
+        if (dealer >= retail) { dealer = retail - 5000m; adjusted = true; }
+        if (sp >= dealer)     { sp     = dealer - 1000m; adjusted = true; }
 
         // ── PL04 Maasai: derived from the converged PL03 (sp) incl-VAT price. ──
         var maasaiCat = pricingCategory;
         if (!MaasaiRatios.ContainsKey(maasaiCat))
             maasaiCat = "Service";   // fallback (covers Accessories + unmapped)
-        var maasaiRatio = MaasaiRatios[maasaiCat][GetMaasaiBand(sp)];
+        int maasaiBand = GetMaasaiBand(sp);
+        var maasaiRatio = MaasaiRatios[maasaiCat][maasaiBand];
         var maasai = Math.Ceiling(sp * maasaiRatio / 1000m) * 1000m;
 
         // The HTML tool's rounded values are Incl-VAT (shelf prices).
         // SAP/Odoo price lists store NET (Excl-VAT) prices = Incl / 1.18.
-        return new PriceTiers(
+        var net = new PriceTiers(
             Retail:      retail / VAT,
             Dealer:      dealer / VAT,
             SuperDealer: sp     / VAT,
             Maasai:      maasai / VAT);
+
+        return new PricingTrace(
+            CifCostTzs: cifCostTzs,
+            PricingCategory: pricingCategory,
+            Iterations: steps,
+            FinalBand: band,
+            OrderingAdjusted: adjusted,
+            RetailInclVat: retail,
+            DealerInclVat: dealer,
+            SuperDealerInclVat: sp,
+            MaasaiCategory: maasaiCat,
+            MaasaiBandIndex: maasaiBand,
+            MaasaiRatio: maasaiRatio,
+            MaasaiInclVat: maasai,
+            Net: net);
     }
 
     public decimal ComputeMaasaiNetFromPl03Net(decimal pl03Net, string pricingCategory)

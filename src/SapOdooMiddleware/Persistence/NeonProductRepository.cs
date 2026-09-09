@@ -25,6 +25,18 @@ public record NeonProductForBackref(string ItemCode, string OdooProductId);
 public record NeonPl03Item(
     string ItemCode, int? ItemsGroupCode, string? OdooCategoryName, decimal Pl03NetPrice);
 
+/// <summary>One item's pricing-relevant Neon state (for the pricing-trace endpoint).</summary>
+public record NeonPricingSnapshot(
+    string ItemCode,
+    string? ItemName,
+    int? ItemGroupCode,
+    string? ItemGroupName,
+    string? OdooCategoryName,
+    string? SapStatus,
+    DateTime? SyncedAt,
+    /// <summary>PriceList (1-4) → stored NET price.</summary>
+    Dictionary<int, decimal> StoredNetPrices);
+
 public interface INeonProductRepository
 {
     Task UpsertProductAsync(NeonProductWrite write, CancellationToken ct);
@@ -45,6 +57,9 @@ public interface INeonProductRepository
     /// <summary>Upsert a single price list row for one item.</summary>
     Task UpsertSinglePriceAsync(
         string itemCode, int priceList, decimal netPrice, CancellationToken ct);
+
+    /// <summary>One item's pricing-relevant fields + stored price lists, or null when absent.</summary>
+    Task<NeonPricingSnapshot?> GetPricingSnapshotAsync(string itemCode, CancellationToken ct);
 }
 
 /// <summary>
@@ -231,5 +246,57 @@ public class NeonProductRepository : INeonProductRepository
         cmd.Parameters.AddWithValue("PriceList", priceList);
         cmd.Parameters.AddWithValue("Price", netPrice);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<NeonPricingSnapshot?> GetPricingSnapshotAsync(string itemCode, CancellationToken ct)
+    {
+        const string productSql = """
+            SELECT "ItemName","ItemGroupCode","ItemGroupName","OdooCategoryName","SapStatus","SyncedAt"
+            FROM public."NeonProducts"
+            WHERE "ItemCode" = @ItemCode
+            LIMIT 1;
+            """;
+        const string pricesSql = """
+            SELECT "PriceList","Price"
+            FROM public."NeonPriceLists"
+            WHERE "ItemCode" = @ItemCode;
+            """;
+
+        await using var conn = await OpenAsync(ct);
+
+        string? itemName = null, groupName = null, category = null, sapStatus = null;
+        int? groupCode = null;
+        DateTime? syncedAt = null;
+        bool found = false;
+
+        await using (var cmd = new NpgsqlCommand(productSql, conn))
+        {
+            cmd.Parameters.AddWithValue("ItemCode", itemCode);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            if (await r.ReadAsync(ct))
+            {
+                found = true;
+                itemName  = r.IsDBNull(0) ? null : r.GetString(0);
+                groupCode = r.IsDBNull(1) ? null : r.GetInt32(1);
+                groupName = r.IsDBNull(2) ? null : r.GetString(2);
+                category  = r.IsDBNull(3) ? null : r.GetString(3);
+                sapStatus = r.IsDBNull(4) ? null : r.GetString(4);
+                syncedAt  = r.IsDBNull(5) ? null : r.GetDateTime(5);
+            }
+        }
+        if (!found)
+            return null;
+
+        var prices = new Dictionary<int, decimal>();
+        await using (var cmd = new NpgsqlCommand(pricesSql, conn))
+        {
+            cmd.Parameters.AddWithValue("ItemCode", itemCode);
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                prices[r.GetInt32(0)] = r.GetDecimal(1);
+        }
+
+        return new NeonPricingSnapshot(
+            itemCode, itemName, groupCode, groupName, category, sapStatus, syncedAt, prices);
     }
 }

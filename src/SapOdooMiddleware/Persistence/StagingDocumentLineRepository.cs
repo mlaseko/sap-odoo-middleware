@@ -52,6 +52,15 @@ public interface IStagingDocumentLineRepository
     Task RecordCreatedAsync(Guid lineId, string createdSku, CancellationToken ct);
     Task RecordCreateFailedAsync(Guid lineId, string error, CancellationToken ct);
     Task<Dictionary<string, int>> GetStatusCountsAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>
+    /// Most recently uploaded invoice line carrying this article number with a unit
+    /// price — the EUR cost the pricing was (or would be) computed from. Returns the
+    /// line plus its document's upload timestamp, or null when the article never
+    /// appeared on an extracted invoice.
+    /// </summary>
+    Task<(StagingDocumentLineRow Line, DateTime UploadedAt)?> FindLatestByArticleAsync(
+        string articleNumber, CancellationToken ct);
 }
 
 public class StagingDocumentLineRepository : IStagingDocumentLineRepository
@@ -94,6 +103,29 @@ public class StagingDocumentLineRepository : IStagingDocumentLineRepository
         CreateErrorMessage: r.IsDBNull(19) ? null : r.GetString(19),
         EditedAt:           r.IsDBNull(20) ? null : r.GetDateTime(20),
         EditedBy:           r.IsDBNull(21) ? null : r.GetString(21));
+
+    public async Task<(StagingDocumentLineRow Line, DateTime UploadedAt)?> FindLatestByArticleAsync(
+        string articleNumber, CancellationToken ct)
+    {
+        // Qualified column list (l.) so the joined staging_document columns can't collide.
+        var qualifiedCols = string.Join(",", Cols.Split(',').Select(c => "l." + c));
+        var sql = $"""
+            SELECT {qualifiedCols}, d."UploadedAt"
+            FROM public."staging_document_line" l
+            JOIN public."staging_document" d ON d."Id" = l."DocumentId"
+            WHERE l."ArticleNumber" = @art AND l."UnitPrice" IS NOT NULL
+            ORDER BY d."UploadedAt" DESC, l."LineNo"
+            LIMIT 1;
+            """;
+
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("art", articleNumber);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct))
+            return null;
+        return (Map(r), r.GetDateTime(22));
+    }
 
     public async Task<IReadOnlyList<StagingDocumentLineRow>> ListByDocumentAsync(Guid documentId, CancellationToken ct)
     {
