@@ -57,6 +57,8 @@
     .row-new td { background: var(--accent-soft); }
     .row-net td { color: var(--muted); font-size: 12px; }
     .row-cmp td { color: var(--teal); }
+    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .card-head h3 { margin: 0; }
 </style>
 
 <div class="page-head">
@@ -86,8 +88,14 @@
 
 @* ── Single item ──────────────────────────────────────────────── *@
 <div class="card">
-    <h3>Single item reprice</h3>
-    <form method="post" asp-page-handler="Lookup" class="inline-form">
+    <div class="card-head">
+        <h3>Single item reprice</h3>
+        @if (Model.Preview is not null)
+        {
+            <a class="btn btn-sm" href="/pricing" title="Clear this review and start over">✕ Clear review</a>
+        }
+    </div>
+    <form method="post" asp-page-handler="Lookup" class="inline-form" style="margin-top:8px">
         <input type="text" name="itemCode" list="itemSearch" autocomplete="off"
                placeholder="code or name (e.g. 4702, Top Tec)"
                value="@Model.LookedUpItem" required data-itemsearch />
@@ -300,8 +308,14 @@
 
 @* ── Bulk ─────────────────────────────────────────────────────── *@
 <div class="card">
-    <h3>Bulk reprice</h3>
-    <div class="meta" style="margin-bottom:8px">
+    <div class="card-head">
+        <h3>Bulk reprice</h3>
+        @if (Model.BulkRows.Count > 0)
+        {
+            <a class="btn btn-sm" href="/pricing" title="Discard this preview (nothing was posted)">✕ Clear preview</a>
+        }
+    </div>
+    <div class="meta" style="margin:8px 0">
         Excel columns (header row recommended): <b>ItemCode</b> · <b>EurCost</b> <i>or</i>
         <b>TargetList</b>+<b>TargetPrice</b> (incl VAT; list = 1-4 or retail/dealer/superdealer/maasai)
         · optional <b>Benchmark</b> item. Rows with neither cost nor target use the stored /

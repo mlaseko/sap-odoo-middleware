@@ -37,7 +37,13 @@
 @if (Model.Error is not null) { <div class="msg-err">@Model.Error</div> }
 
 <div class="card">
-    <h3>Edit &amp; simulate</h3>
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px">
+        <h3 style="margin:0">Edit &amp; simulate</h3>
+        @if (Model.SimResult is not null)
+        {
+            <a class="btn btn-sm" href="/pricing/ratios" title="Discard this simulation (nothing was saved)">✕ Clear simulation</a>
+        }
+    </div>
     <div class="meta" style="margin-bottom:8px">
         price = cost ÷ ratio (so a LOWER ratio raises the price). Expected ordering: sp &gt; dealer &gt; retail.
         Simulation cost unit EUR converts at the current rate (@Model.Rate.Rate.ToString("N0")).
