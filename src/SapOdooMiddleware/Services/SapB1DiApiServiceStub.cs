@@ -266,6 +266,11 @@ internal class SapB1DiApiServiceStub : ISapB1Service
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
+    public Task<bool> UpdateSalesOrderLineWarehouseAsync(
+        int orderEntry, int orderLine, string whsCode, CancellationToken ct) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
     public Task<bool> PickPickListLinesAsync(
         int absEntry, List<PickListLineWrite> lines, string? note, CancellationToken ct) =>
         throw new PlatformNotSupportedException(

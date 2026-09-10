@@ -459,6 +459,16 @@ public interface ISapB1Service
         int absEntry, List<PickListLineWrite> lines, string? note, CancellationToken ct);
 
     /// <summary>
+    /// Sets WarehouseCode on one OPEN sales-order line via <c>Documents.Update</c>
+    /// (oOrders). Used to re-source a released pick-list line: SAP propagates the
+    /// new warehouse onto the linked pick line in place. Returns false when the
+    /// line already carries the requested warehouse (no-op); throws when the
+    /// order/line is missing, the line is closed, or SAP refuses the update.
+    /// </summary>
+    Task<bool> UpdateSalesOrderLineWarehouseAsync(
+        int orderEntry, int orderLine, string whsCode, CancellationToken ct);
+
+    /// <summary>
     /// Picks pick-list lines via <c>PickLists.Update</c>: sets the ABSOLUTE
     /// PickedQuantity per planned line (below the releasable total leaves the line
     /// Partially Picked) and replaces the line's bin allocation rows with the plan's

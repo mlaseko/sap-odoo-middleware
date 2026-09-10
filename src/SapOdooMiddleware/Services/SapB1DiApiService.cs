@@ -839,6 +839,70 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     /// change WhsCode on a line that has been picked or partially
     /// delivered, so we avoid that class of bug).
     /// </summary>
+    /// <inheritdoc/>
+    public async Task<bool> UpdateSalesOrderLineWarehouseAsync(
+        int orderEntry, int orderLine, string whsCode, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var order = (Documents)_company!.GetBusinessObject(BoObjectTypes.oOrders);
+            try
+            {
+                if (!order.GetByKey(orderEntry))
+                    throw new InvalidOperationException(
+                        $"SAP B1 Sales Order with DocEntry={orderEntry} not found.");
+                if (order.DocumentStatus != BoStatus.bost_Open)
+                    throw new InvalidOperationException(
+                        $"Sales Order DocEntry={orderEntry} is closed; its lines cannot be re-sourced.");
+
+                int lineIndex = -1;
+                for (int i = 0; i < order.Lines.Count; i++)
+                {
+                    order.Lines.SetCurrentLine(i);
+                    if (order.Lines.LineNum == orderLine) { lineIndex = i; break; }
+                }
+                if (lineIndex < 0)
+                    throw new InvalidOperationException(
+                        $"Sales Order DocEntry={orderEntry} has no line LineNum={orderLine}.");
+
+                order.Lines.SetCurrentLine(lineIndex);
+                if (order.Lines.LineStatus != BoStatus.bost_Open)
+                    throw new InvalidOperationException(
+                        $"Sales Order DocEntry={orderEntry} line {orderLine} is closed; " +
+                        "its warehouse cannot be changed.");
+
+                string oldWhs = order.Lines.WarehouseCode ?? "";
+                if (string.Equals(oldWhs.Trim(), whsCode.Trim(), StringComparison.OrdinalIgnoreCase))
+                    return false;   // already in the requested warehouse — no-op
+
+                order.Lines.WarehouseCode = whsCode;
+
+                int result = order.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SO line re-sourced: DocEntry={DocEntry}, LineNum={LineNum}, Whs {OldWhs} -> {NewWhs}",
+                    orderEntry, orderLine, oldWhs, whsCode);
+                return true;
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(order);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private void _UpdateSalesOrderLines(Documents order, SapSalesOrderRequest request)
     {
         int sapLineCount = order.Lines.Count;
