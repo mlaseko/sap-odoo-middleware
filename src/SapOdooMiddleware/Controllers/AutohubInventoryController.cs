@@ -1678,6 +1678,87 @@ public class AutohubInventoryController : ControllerBase
     }
 
     /// <summary>
+    /// PATCH /api/autohub/inv/pick-lists/{absEntry}/line-warehouse
+    /// Re-sources one RELEASED, unpicked pick-list line to another warehouse by
+    /// updating the underlying sales-order line's WarehouseCode; SAP propagates
+    /// the change onto the existing pick list in place (same AbsEntry). The
+    /// response reports whether the pick line already shows the new warehouse.
+    /// Requesting the line's current warehouse returns already_applied.
+    /// </summary>
+    [HttpPatch("pick-lists/{absEntry:int}/line-warehouse")]
+    [ProducesResponseType(typeof(ApiResponse<PickLineWarehouseResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<PickLineWarehouseResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<PickLineWarehouseResult>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<PickLineWarehouseResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> ChangePickLineWarehouse(
+        int absEntry, [FromBody] PickLineWarehouseChange request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<PickLineWarehouseResult>.Fail(errors));
+
+        try
+        {
+            var snapshot = await _sql.GetPickListSnapshotAsync(absEntry, ct);
+            if (snapshot is null)
+                return NotFound(ApiResponse<PickLineWarehouseResult>.Fail($"Pick list {absEntry} was not found."));
+
+            var warehouses = await _sql.GetWarehousesAsync(ct);
+            var plan = PickLineWarehouseChangePlanner.Plan(
+                snapshot, request, warehouses.Select(w => w.WhsCode).ToList());
+            if (plan.Errors.Count > 0)
+                return BadRequest(ApiResponse<PickLineWarehouseResult>.Fail(plan.Errors));
+
+            var result = new PickLineWarehouseResult
+            {
+                AbsEntry = absEntry,
+                PickEntry = plan.PickEntry,
+                OrderEntry = plan.OrderEntry,
+                OrderLine = plan.OrderLine,
+                ItemCode = plan.ItemCode,
+                OldWhsCode = plan.SourceWhs,
+                NewWhsCode = plan.TargetWhs,
+            };
+            if (plan.AlreadyApplied)
+            {
+                result.AlreadyApplied = true;
+                result.PickLineFollowed = true;
+                return Ok(ApiResponse<PickLineWarehouseResult>.Ok(result));
+            }
+
+            await _sap.UpdateSalesOrderLineWarehouseAsync(
+                plan.OrderEntry, plan.OrderLine, plan.TargetWhs, ct);
+
+            // Confirm from SAP whether the pick line followed the SO change —
+            // the app freezes the line until its mirror shows the new warehouse,
+            // and this flag lets operators spot a non-propagating edge case.
+            var after = await _sql.GetPickListSnapshotAsync(absEntry, ct);
+            var afterLine = after?.Lines.FirstOrDefault(l => l.PickEntry == plan.PickEntry);
+            result.PickLineFollowed = string.Equals(
+                afterLine?.WhsCode?.Trim(), plan.TargetWhs, StringComparison.OrdinalIgnoreCase);
+
+            _logger.LogInformation(
+                "Pick list {AbsEntry} line {PickEntry} ({ItemCode}) re-sourced {OldWhs} -> {NewWhs} " +
+                "via SO {OrderEntry}/{OrderLine} by {ChangedBy} (app_ref={AppRef}, followed={Followed}).",
+                absEntry, plan.PickEntry, plan.ItemCode, plan.SourceWhs, plan.TargetWhs,
+                plan.OrderEntry, plan.OrderLine, request.ChangedBy, request.AppRef, result.PickLineFollowed);
+            return Ok(ApiResponse<PickLineWarehouseResult>.Ok(result));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ApiResponse<PickLineWarehouseResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Pick line warehouse change failed (abs_entry={AbsEntry}, pick_entry={PickEntry}, app_ref={AppRef})",
+                absEntry, request.PickEntry, request.AppRef);
+            return StatusCode(500, ApiResponse<PickLineWarehouseResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/autohub/inv/pick-lists/{absEntry}/pick
     /// Picks lines by setting the ABSOLUTE picked quantity (with the full bin
     /// breakdown for bin-managed warehouses). Below the releasable total leaves the
