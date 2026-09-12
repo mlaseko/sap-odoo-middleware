@@ -627,10 +627,11 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                    I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
                    T1.Quantity, T1.OpenQty, T1.WhsCode,
                    T1.BaseType, T1.BaseEntry, T1.BaseLine,
-                   T0.Comments
+                   T0.Comments, S.SlpName
             FROM ORRR T0
             JOIN RRR1 T1 ON T1.DocEntry = T0.DocEntry
             JOIN OITM I ON I.ItemCode = T1.ItemCode
+            LEFT JOIN OSLP S ON S.SlpCode = T0.SlpCode
             WHERE T0.DocStatus = 'O' AND T1.LineStatus = 'O' AND T1.OpenQty > 0
               AND T0.CANCELED = 'N'
               AND (@card IS NULL OR T0.CardCode = @card)
@@ -674,6 +675,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                         ? Convert.ToInt32(reader.GetValue(15))
                         : null,
                 Comments = reader.IsDBNull(16) ? null : reader.GetString(16),
+                SalesEmployee = reader.IsDBNull(17) ? null : reader.GetString(17),
             });
         }
         return list;
