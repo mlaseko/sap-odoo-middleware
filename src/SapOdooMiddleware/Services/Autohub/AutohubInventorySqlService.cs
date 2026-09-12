@@ -625,7 +625,8 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             SELECT T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
                    T1.LineNum, T1.ItemCode,
                    I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
-                   T1.Quantity, T1.OpenQty, T1.WhsCode
+                   T1.Quantity, T1.OpenQty, T1.WhsCode,
+                   T1.BaseType, T1.BaseEntry, T1.BaseLine
             FROM ORRR T0
             JOIN RRR1 T1 ON T1.DocEntry = T0.DocEntry
             JOIN OITM I ON I.ItemCode = T1.ItemCode
@@ -658,6 +659,19 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 Quantity = (double)reader.GetDecimal(10),
                 OpenQty = (double)reader.GetDecimal(11),
                 WhsCode = reader.IsDBNull(12) ? "" : reader.GetString(12),
+                // Base invoice references (BaseType 13 = A/R Invoice) let callers
+                // compute the exact remaining returnable quantity per invoice
+                // line without relying on their own records.
+                InvoiceDocEntry =
+                    !reader.IsDBNull(13) && Convert.ToInt32(reader.GetValue(13)) == 13 &&
+                    !reader.IsDBNull(14)
+                        ? Convert.ToInt32(reader.GetValue(14))
+                        : null,
+                InvoiceLineNum =
+                    !reader.IsDBNull(13) && Convert.ToInt32(reader.GetValue(13)) == 13 &&
+                    !reader.IsDBNull(15)
+                        ? Convert.ToInt32(reader.GetValue(15))
+                        : null,
             });
         }
         return list;
