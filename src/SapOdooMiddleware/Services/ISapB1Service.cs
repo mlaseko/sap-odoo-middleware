@@ -446,7 +446,13 @@ public interface ISapB1Service
     /// SAP creates the cancellation document itself; a closed request (already fully
     /// drawn to a Goods Return) is rejected by SAP with its own message.
     /// </summary>
-    Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, CancellationToken ct);
+    /// <summary>
+    /// Cancels a Return Request. When <paramref name="remarks"/> is given it is
+    /// appended to the document's Comments BEFORE cancellation (and the call
+    /// fails rather than losing the reason), so the originating app can show
+    /// why the request was rejected.
+    /// </summary>
+    Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, string? remarks, CancellationToken ct);
 
     /// <summary>
     /// Re-bins RELEASED pick list lines (OPKL/PKL1/PKL2) via

@@ -626,7 +626,8 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                    T1.LineNum, T1.ItemCode,
                    I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
                    T1.Quantity, T1.OpenQty, T1.WhsCode,
-                   T1.BaseType, T1.BaseEntry, T1.BaseLine
+                   T1.BaseType, T1.BaseEntry, T1.BaseLine,
+                   T0.Comments
             FROM ORRR T0
             JOIN RRR1 T1 ON T1.DocEntry = T0.DocEntry
             JOIN OITM I ON I.ItemCode = T1.ItemCode
@@ -672,6 +673,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                     !reader.IsDBNull(15)
                         ? Convert.ToInt32(reader.GetValue(15))
                         : null,
+                Comments = reader.IsDBNull(16) ? null : reader.GetString(16),
             });
         }
         return list;
@@ -735,14 +737,15 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                    T0.DocStatus, T0.CANCELED,
                    COUNT(T1.LineNum) AS TotalLines,
                    SUM(T1.Quantity) AS TotalQty,
-                   SUM(T1.OpenQty) AS OpenQty
+                   SUM(T1.OpenQty) AS OpenQty,
+                   T0.Comments
             FROM {header} T0
             JOIN {lines} T1 ON T1.DocEntry = T0.DocEntry
             WHERE T0.CANCELED <> 'C'
               AND (@card IS NULL OR T0.CardCode = @card)
               {statusFilter}
             GROUP BY T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
-                     T0.DocStatus, T0.CANCELED
+                     T0.DocStatus, T0.CANCELED, T0.Comments
             ORDER BY T0.DocEntry DESC;
             """;
 
@@ -767,6 +770,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 TotalLines = reader.GetInt32(7),
                 TotalQty = reader.IsDBNull(8) ? 0d : (double)reader.GetDecimal(8),
                 OpenQty = reader.IsDBNull(9) ? 0d : (double)reader.GetDecimal(9),
+                Comments = reader.IsDBNull(10) ? null : reader.GetString(10),
             });
         }
         return list;

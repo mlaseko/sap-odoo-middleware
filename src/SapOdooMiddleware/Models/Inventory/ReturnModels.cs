@@ -77,6 +77,10 @@ public class OpenReturnRequestLine
 
     /// <summary>Base A/R Invoice line number, alongside <see cref="InvoiceDocEntry"/>.</summary>
     public int? InvoiceLineNum { get; set; }
+
+    /// <summary>Header comments — carries the return reason entered at creation
+    /// (and the rejection note once cancelled with remarks).</summary>
+    public string? Comments { get; set; }
 }
 
 // ── Goods Return (ORDN, copy from Return Request) ────────────────────
@@ -123,6 +127,18 @@ public class ReturnDocumentSummary
     public double TotalQty { get; set; }
     /// <summary>Remaining open quantity across lines (0 when fully drawn/closed).</summary>
     public double OpenQty { get; set; }
+
+    /// <summary>Header comments — return reason, plus the rejection note on
+    /// requests cancelled with remarks.</summary>
+    public string? Comments { get; set; }
+}
+
+/// <summary>POST body for document cancellations that carry a reason.</summary>
+public class DocCancelRequest
+{
+    /// <summary>Why the document is being cancelled/rejected. Appended to the
+    /// document's Comments before cancellation so the originating app can show it.</summary>
+    public string? Remarks { get; set; }
 }
 
 /// <summary>Result of cancelling a document (idempotent on already-cancelled).</summary>

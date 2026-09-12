@@ -1502,7 +1502,9 @@ public class AutohubInventoryController : ControllerBase
 
     /// <summary>
     /// POST /api/autohub/inv/return-requests/{docEntry}/cancel
-    /// Cancels an open Return Request. Idempotent: an already-cancelled request
+    /// Cancels an open Return Request. Optional body <c>{ "remarks": "..." }</c>:
+    /// the reason is appended to the document's Comments before cancellation so
+    /// the originating app can show it. Idempotent: an already-cancelled request
     /// returns 200 with <c>already_cancelled = true</c>. A request already fully
     /// drawn to a credit memo is rejected by SAP with its own message.
     /// </summary>
@@ -1510,11 +1512,12 @@ public class AutohubInventoryController : ControllerBase
     [ProducesResponseType(typeof(ApiResponse<DocCancelResult>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ApiResponse<DocCancelResult>), StatusCodes.Status404NotFound)]
     [ProducesResponseType(typeof(ApiResponse<DocCancelResult>), StatusCodes.Status500InternalServerError)]
-    public async Task<IActionResult> CancelReturnRequest(int docEntry, CancellationToken ct)
+    public async Task<IActionResult> CancelReturnRequest(
+        int docEntry, [FromBody] DocCancelRequest? request, CancellationToken ct)
     {
         try
         {
-            var result = await _sap.CancelAutohubReturnRequestAsync(docEntry, ct);
+            var result = await _sap.CancelAutohubReturnRequestAsync(docEntry, request?.Remarks, ct);
             return Ok(ApiResponse<DocCancelResult>.Ok(result));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("not found"))
