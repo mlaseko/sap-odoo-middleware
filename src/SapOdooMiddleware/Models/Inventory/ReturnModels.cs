@@ -81,6 +81,10 @@ public class OpenReturnRequestLine
     /// <summary>Header comments — carries the return reason entered at creation
     /// (and the rejection note once cancelled with remarks).</summary>
     public string? Comments { get; set; }
+
+    /// <summary>Sales employee name from the request header (OSLP.SlpName);
+    /// null when the header carries no sales employee.</summary>
+    public string? SalesEmployee { get; set; }
 }
 
 // ── Goods Return (ORDN, copy from Return Request) ────────────────────
