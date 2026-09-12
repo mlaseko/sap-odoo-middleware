@@ -141,6 +141,38 @@ public class ReturnDocumentSummary
     public string? SalesEmployee { get; set; }
 }
 
+/// <summary>
+/// GET /return-requests/{docEntry}: one Return Request document with all of its
+/// lines regardless of status — lets the apps open closed/canceled requests.
+/// </summary>
+public class ReturnRequestDocumentDetail
+{
+    public int DocEntry { get; set; }
+    public int DocNum { get; set; }
+    public string DocDate { get; set; } = "";
+    public string CardCode { get; set; } = "";
+    public string? CardName { get; set; }
+    /// <summary>open | closed | canceled.</summary>
+    public string Status { get; set; } = "";
+    public string? Comments { get; set; }
+    public string? SalesEmployee { get; set; }
+    public List<ReturnRequestDocumentLine> Lines { get; set; } = new();
+}
+
+public class ReturnRequestDocumentLine
+{
+    public int LineNum { get; set; }
+    public string ItemCode { get; set; } = "";
+    public string? ItemName { get; set; }
+    public string? ArticleNumber { get; set; }
+    public string? Manufacturer { get; set; }
+    public double Quantity { get; set; }
+    public double OpenQty { get; set; }
+    public string WhsCode { get; set; } = "";
+    /// <summary>open | closed.</summary>
+    public string LineStatus { get; set; } = "";
+}
+
 /// <summary>POST body for document cancellations that carry a reason.</summary>
 public class DocCancelRequest
 {
