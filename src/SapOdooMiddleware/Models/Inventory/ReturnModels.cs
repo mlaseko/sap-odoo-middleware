@@ -135,6 +135,10 @@ public class ReturnDocumentSummary
     /// <summary>Header comments — return reason, plus the rejection note on
     /// requests cancelled with remarks.</summary>
     public string? Comments { get; set; }
+
+    /// <summary>Sales employee name from the document header (OSLP.SlpName);
+    /// null when the header carries no sales employee.</summary>
+    public string? SalesEmployee { get; set; }
 }
 
 /// <summary>POST body for document cancellations that carry a reason.</summary>

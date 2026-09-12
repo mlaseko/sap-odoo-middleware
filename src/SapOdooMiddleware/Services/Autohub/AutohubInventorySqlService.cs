@@ -740,14 +740,15 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                    COUNT(T1.LineNum) AS TotalLines,
                    SUM(T1.Quantity) AS TotalQty,
                    SUM(T1.OpenQty) AS OpenQty,
-                   T0.Comments
+                   T0.Comments, S.SlpName
             FROM {header} T0
             JOIN {lines} T1 ON T1.DocEntry = T0.DocEntry
+            LEFT JOIN OSLP S ON S.SlpCode = T0.SlpCode
             WHERE T0.CANCELED <> 'C'
               AND (@card IS NULL OR T0.CardCode = @card)
               {statusFilter}
             GROUP BY T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
-                     T0.DocStatus, T0.CANCELED, T0.Comments
+                     T0.DocStatus, T0.CANCELED, T0.Comments, S.SlpName
             ORDER BY T0.DocEntry DESC;
             """;
 
@@ -773,6 +774,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 TotalQty = reader.IsDBNull(8) ? 0d : (double)reader.GetDecimal(8),
                 OpenQty = reader.IsDBNull(9) ? 0d : (double)reader.GetDecimal(9),
                 Comments = reader.IsDBNull(10) ? null : reader.GetString(10),
+                SalesEmployee = reader.IsDBNull(11) ? null : reader.GetString(11),
             });
         }
         return list;
