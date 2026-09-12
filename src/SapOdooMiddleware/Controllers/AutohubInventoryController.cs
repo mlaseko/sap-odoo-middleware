@@ -1328,6 +1328,25 @@ public class AutohubInventoryController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/autohub/inv/return-requests/{docEntry}
+    /// One Return Request document with all of its lines regardless of status —
+    /// lets the apps open closed, rejected, and canceled requests read-only.
+    /// </summary>
+    [HttpGet("return-requests/{docEntry:int}")]
+    [ProducesResponseType(typeof(ApiResponse<ReturnRequestDocumentDetail>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<ReturnRequestDocumentDetail>), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetReturnRequestDocument(int docEntry, CancellationToken ct)
+    {
+        var doc = await _sql.GetReturnRequestDocumentAsync(docEntry, ct);
+        if (doc is null)
+        {
+            return NotFound(ApiResponse<ReturnRequestDocumentDetail>.Fail(
+                $"Return Request {docEntry} was not found."));
+        }
+        return Ok(ApiResponse<ReturnRequestDocumentDetail>.Ok(doc));
+    }
+
+    /// <summary>
     /// POST /api/autohub/inv/returns
     /// Posts the customer return as an A/R Credit Memo (ORIN) by copying from open
     /// Return Request lines — the one document SAP allows for invoice-based requests

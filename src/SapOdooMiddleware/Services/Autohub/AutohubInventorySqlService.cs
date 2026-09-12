@@ -72,6 +72,12 @@ public interface IAutohubInventorySqlService
     Task<List<OpenReturnRequestLine>> GetOpenReturnRequestLinesAsync(
         string? cardCode, CancellationToken ct);
 
+    /// <summary>One Return Request document with all of its lines regardless of
+    /// status, or null when the DocEntry does not exist. Lets the apps open
+    /// closed, rejected, and canceled requests read-only.</summary>
+    Task<ReturnRequestDocumentDetail?> GetReturnRequestDocumentAsync(
+        int docEntry, CancellationToken ct);
+
     /// <summary>
     /// Customer picker list (OCRD CardType 'C', not frozen), filtered by a search
     /// string matching code or name, alphabetical, capped at <paramref name="limit"/>.
@@ -679,6 +685,61 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             });
         }
         return list;
+    }
+
+    public async Task<ReturnRequestDocumentDetail?> GetReturnRequestDocumentAsync(
+        int docEntry, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
+                   T0.DocStatus, T0.CANCELED, T0.Comments, S.SlpName,
+                   T1.LineNum, T1.ItemCode, I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
+                   T1.Quantity, T1.OpenQty, T1.WhsCode, T1.LineStatus
+            FROM ORRR T0
+            JOIN RRR1 T1 ON T1.DocEntry = T0.DocEntry
+            JOIN OITM I ON I.ItemCode = T1.ItemCode
+            LEFT JOIN OSLP S ON S.SlpCode = T0.SlpCode
+            WHERE T0.DocEntry = @doc
+            ORDER BY T1.LineNum;
+            """;
+
+        ReturnRequestDocumentDetail? doc = null;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@doc", System.Data.SqlDbType.Int).Value = docEntry;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (doc is null)
+            {
+                bool cancelled = !reader.IsDBNull(6) && reader.GetString(6) == "Y";
+                string docStatus = reader.IsDBNull(5) ? "" : reader.GetString(5);
+                doc = new ReturnRequestDocumentDetail
+                {
+                    DocEntry = reader.GetInt32(0),
+                    DocNum = reader.GetInt32(1),
+                    DocDate = reader.IsDBNull(2) ? "" : reader.GetDateTime(2).ToString("yyyy-MM-dd"),
+                    CardCode = reader.GetString(3),
+                    CardName = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    Status = cancelled ? "canceled" : docStatus == "O" ? "open" : "closed",
+                    Comments = reader.IsDBNull(7) ? null : reader.GetString(7),
+                    SalesEmployee = reader.IsDBNull(8) ? null : reader.GetString(8),
+                };
+            }
+            doc.Lines.Add(new ReturnRequestDocumentLine
+            {
+                LineNum = reader.GetInt32(9),
+                ItemCode = reader.GetString(10),
+                ItemName = reader.IsDBNull(11) ? null : reader.GetString(11),
+                ArticleNumber = reader.IsDBNull(12) ? null : reader.GetString(12),
+                Manufacturer = reader.IsDBNull(13) ? null : reader.GetString(13),
+                Quantity = (double)reader.GetDecimal(14),
+                OpenQty = (double)reader.GetDecimal(15),
+                WhsCode = reader.IsDBNull(16) ? "" : reader.GetString(16),
+                LineStatus = !reader.IsDBNull(17) && reader.GetString(17) == "O" ? "open" : "closed",
+            });
+        }
+        return doc;
     }
 
     public async Task<List<CustomerSummary>> GetCustomersAsync(
