@@ -6823,7 +6823,7 @@ ORDER BY PostingDate, DocumentNumber";
     }
 
     /// <inheritdoc/>
-    public async Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, CancellationToken ct)
+    public async Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, string? remarks, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
@@ -6861,6 +6861,30 @@ ORDER BY PostingDate, DocumentNumber";
                 if (!rr.GetByKey(docEntry))
                     throw new InvalidOperationException(
                         $"Return Request DocEntry={docEntry} not found via DI API.");
+
+                // Persist the rejection reason on the document BEFORE cancelling,
+                // so the originating app (sales) can read why. Failing to write
+                // it fails the whole call — a silent, reasonless rejection is
+                // worse than asking the user to retry.
+                var trimmedRemarks = remarks?.Trim();
+                if (!string.IsNullOrEmpty(trimmedRemarks))
+                {
+                    string existing = rr.Comments ?? "";
+                    string combined = string.IsNullOrWhiteSpace(existing)
+                        ? trimmedRemarks
+                        : existing + " | " + trimmedRemarks;
+                    rr.Comments = combined.Length > 254 ? combined[..254] : combined;
+                    int updateResult = rr.Update();
+                    if (updateResult != 0)
+                    {
+                        _company.GetLastError(out int updErrCode, out string updErrMsg);
+                        throw new InvalidOperationException(
+                            $"Could not record the rejection reason before cancelling: SAP DI API error {updErrCode}: {updErrMsg}");
+                    }
+                    if (!rr.GetByKey(docEntry))
+                        throw new InvalidOperationException(
+                            $"Return Request DocEntry={docEntry} disappeared after the remarks update.");
+                }
 
                 int result = rr.Cancel();
                 if (result != 0)

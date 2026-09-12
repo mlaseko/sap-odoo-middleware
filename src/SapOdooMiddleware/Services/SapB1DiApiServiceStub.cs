@@ -257,7 +257,7 @@ internal class SapB1DiApiServiceStub : ISapB1Service
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
-    public Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, CancellationToken ct) =>
+    public Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, string? remarks, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
