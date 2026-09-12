@@ -243,7 +243,7 @@ internal class SapB1DiApiServiceStub : ISapB1Service
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
-    public Task<InventoryDocResult> CreateAutohubGoodsReturnAsync(
+    public Task<InventoryDocResult> CreateAutohubCreditMemoAsync(
         GoodsReturnCreate request, int series, int? bplId, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
