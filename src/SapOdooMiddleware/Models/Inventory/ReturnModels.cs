@@ -69,6 +69,14 @@ public class OpenReturnRequestLine
     public double Quantity { get; set; }
     public double OpenQty { get; set; }
     public string WhsCode { get; set; } = "";
+
+    /// <summary>Base A/R Invoice DocEntry when the request line was created from
+    /// an invoice line (RRR1.BaseType = 13); null otherwise (e.g. a request
+    /// keyed in manually in the SAP client without a base document).</summary>
+    public int? InvoiceDocEntry { get; set; }
+
+    /// <summary>Base A/R Invoice line number, alongside <see cref="InvoiceDocEntry"/>.</summary>
+    public int? InvoiceLineNum { get; set; }
 }
 
 // ── Goods Return (ORDN, copy from Return Request) ────────────────────
