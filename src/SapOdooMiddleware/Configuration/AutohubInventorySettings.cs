@@ -33,6 +33,7 @@ public class AutohubInventorySettings
     /// <summary>Series for sales Return Requests (ORRR). 0 = SAP default series.</summary>
     public int SalesReturnRequestSeries { get; set; } = 0;
 
-    /// <summary>Series for Goods Returns (object 16, ORDN). 0 = SAP default series.</summary>
-    public int GoodsReturnSeries { get; set; } = 0;
+    /// <summary>Series for A/R Credit Memos (object 14, ORIN) posted for customer
+    /// returns. 0 = SAP default series.</summary>
+    public int CreditMemoSeries { get; set; } = 0;
 }

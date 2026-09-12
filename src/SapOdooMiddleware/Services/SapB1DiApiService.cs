@@ -6670,7 +6670,7 @@ ORDER BY PostingDate, DocumentNumber";
     }
 
     /// <inheritdoc/>
-    public async Task<InventoryDocResult> CreateAutohubGoodsReturnAsync(
+    public async Task<InventoryDocResult> CreateAutohubCreditMemoAsync(
         GoodsReturnCreate request, int series, int? bplId, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
@@ -6678,7 +6678,10 @@ ORDER BY PostingDate, DocumentNumber";
         {
             EnsureConnected();
 
-            var ret = (Documents)_company!.GetBusinessObject(BoObjectTypes.oReturns);
+            // A/R Credit Memo: the only valid copy target for an invoice-based
+            // Return Request (ORDN is rejected by SAP with -5002). Brings the
+            // stock back in AND credits the customer in one document.
+            var ret = (Documents)_company!.GetBusinessObject(BoObjectTypes.oCreditNotes);
             try
             {
                 if (series > 0) ret.Series = series;
@@ -6725,7 +6728,7 @@ ORDER BY PostingDate, DocumentNumber";
                 int docNum = ret.DocNum;
 
                 _logger.LogInformation(
-                    "SAP Goods Return created (Autohub app): DocEntry={DocEntry}, DocNum={DocNum}, " +
+                    "SAP A/R Credit Memo created (Autohub return): DocEntry={DocEntry}, DocNum={DocNum}, " +
                     "CardCode={CardCode}, Lines={Lines}, AppRef={AppRef}",
                     docEntry, docNum, request.CardCode, request.Lines.Count, request.AppRef);
 

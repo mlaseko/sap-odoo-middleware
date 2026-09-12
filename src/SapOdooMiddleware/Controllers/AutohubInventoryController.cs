@@ -1179,7 +1179,7 @@ public class AutohubInventoryController : ControllerBase
         }
     }
 
-    // ── Customer returns: Return Request ← invoice, Goods Return ← request ──
+    // ── Customer returns: Return Request ← invoice, Credit Memo ← request ──
 
     /// <summary>
     /// GET /api/autohub/inv/invoices?card_code=C00001&amp;status=open
@@ -1329,16 +1329,18 @@ public class AutohubInventoryController : ControllerBase
 
     /// <summary>
     /// POST /api/autohub/inv/returns
-    /// Posts the Goods Return (ORDN) by copying from open Return Request lines —
-    /// SAP closes the request's open quantities (partials allowed) and the stock
-    /// comes back into the warehouse. Destination bins resolve server-side like
-    /// receipts. Idempotent on <c>app_ref</c>.
+    /// Posts the customer return as an A/R Credit Memo (ORIN) by copying from open
+    /// Return Request lines — the one document SAP allows for invoice-based requests
+    /// (a Goods Return is rejected with -5002). SAP closes the request's open
+    /// quantities (partials allowed), stock comes back into the warehouse, and the
+    /// customer's receivable is credited at the invoiced prices. Destination bins
+    /// resolve server-side like receipts. Idempotent on <c>app_ref</c>.
     /// </summary>
     [HttpPost("returns")]
     [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ApiResponse<InventoryDocResult>), StatusCodes.Status500InternalServerError)]
-    public async Task<IActionResult> CreateGoodsReturn(
+    public async Task<IActionResult> CreateReturnCreditMemo(
         [FromBody] GoodsReturnCreate request, CancellationToken ct)
     {
         var errors = new List<string>();
@@ -1361,7 +1363,7 @@ public class AutohubInventoryController : ControllerBase
         try
         {
             // Idempotency: same app_ref already posted → return it.
-            var existing = await _sql.FindDocEntryByAppRefAsync("ORDN", request.AppRef, ct);
+            var existing = await _sql.FindDocEntryByAppRefAsync("ORIN", request.AppRef, ct);
             if (existing is not null)
                 return Ok(ApiResponse<InventoryDocResult>.Ok(new InventoryDocResult
                 {
@@ -1426,8 +1428,8 @@ public class AutohubInventoryController : ControllerBase
             if (branchError is not null)
                 return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
 
-            var result = await _sap.CreateAutohubGoodsReturnAsync(
-                request, _settings.GoodsReturnSeries, bplId, ct);
+            var result = await _sap.CreateAutohubCreditMemoAsync(
+                request, _settings.CreditMemoSeries, bplId, ct);
             return Ok(ApiResponse<InventoryDocResult>.Ok(result));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
@@ -1437,7 +1439,7 @@ public class AutohubInventoryController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex,
-                "Goods return creation failed (app_ref={AppRef}, card_code={CardCode})",
+                "Return credit memo creation failed (app_ref={AppRef}, card_code={CardCode})",
                 request.AppRef, request.CardCode);
             return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
         }
@@ -1483,17 +1485,17 @@ public class AutohubInventoryController : ControllerBase
 
     /// <summary>
     /// GET /api/autohub/inv/returns/list?card_code=&amp;status=all
-    /// Posted Goods Return documents (ORDN) with status, newest first, with
+    /// Posted return credit memos (ORIN) with status, newest first, with
     /// line/quantity totals.
     /// </summary>
     [HttpGet("returns/list")]
     [ProducesResponseType(typeof(ApiResponse<List<ReturnDocumentSummary>>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> ListGoodsReturns(
+    public async Task<IActionResult> ListReturnCreditMemos(
         [FromQuery(Name = "card_code")] string? cardCode = null,
         [FromQuery(Name = "status")] string status = "all",
         CancellationToken ct = default)
     {
-        var docs = await _sql.GetReturnDocumentsAsync("ORDN", NormalizeWhs(cardCode), status.Trim(), ct);
+        var docs = await _sql.GetReturnDocumentsAsync("ORIN", NormalizeWhs(cardCode), status.Trim(), ct);
         return Ok(ApiResponse<List<ReturnDocumentSummary>>.Ok(
             docs, new Dictionary<string, object> { ["count"] = docs.Count, ["status"] = status }));
     }
@@ -1502,7 +1504,7 @@ public class AutohubInventoryController : ControllerBase
     /// POST /api/autohub/inv/return-requests/{docEntry}/cancel
     /// Cancels an open Return Request. Idempotent: an already-cancelled request
     /// returns 200 with <c>already_cancelled = true</c>. A request already fully
-    /// drawn to a Goods Return is rejected by SAP with its own message.
+    /// drawn to a credit memo is rejected by SAP with its own message.
     /// </summary>
     [HttpPost("return-requests/{docEntry:int}/cancel")]
     [ProducesResponseType(typeof(ApiResponse<DocCancelResult>), StatusCodes.Status200OK)]

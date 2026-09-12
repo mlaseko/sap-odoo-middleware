@@ -409,13 +409,16 @@ public interface ISapB1Service
         ReturnRequestCreate request, int series, int? bplId, CancellationToken ct);
 
     /// <summary>
-    /// Creates a Goods Return (ORDN, object 16) for the Autohub inventory app by
-    /// copying from open Return Request lines (BaseType = ORRR) — SAP closes the
-    /// request's open quantities and stock comes back in. Lines carry a destination
-    /// bin allocation when a bin is set. <paramref name="bplId"/> stamps the header
-    /// branch when set.
+    /// Creates an A/R Credit Memo (ORIN, object 14) for the Autohub inventory app by
+    /// copying from open Return Request lines (BaseType = ORRR). One document does the
+    /// whole return: stock comes back into the warehouse (destination bin allocation
+    /// when a bin is set) and the customer's receivable is credited at the invoiced
+    /// prices flowing down the base chain. SAP closes the request's open quantities.
+    /// NOTE: a Goods Return (ORDN) is NOT a valid target for an invoice-based Return
+    /// Request — SAP rejects it with -5002 — which is why returns post as credit
+    /// memos. <paramref name="bplId"/> stamps the header branch when set.
     /// </summary>
-    Task<InventoryDocResult> CreateAutohubGoodsReturnAsync(
+    Task<InventoryDocResult> CreateAutohubCreditMemoAsync(
         GoodsReturnCreate request, int series, int? bplId, CancellationToken ct);
 
     /// <summary>

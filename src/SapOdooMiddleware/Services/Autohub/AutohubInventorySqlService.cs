@@ -80,8 +80,8 @@ public interface IAutohubInventorySqlService
 
     /// <summary>
     /// Return document headers with status. <paramref name="docTable"/> is "ORRR"
-    /// (Return Requests) or "ORDN" (Goods Returns). <paramref name="status"/>:
-    /// open | closed | canceled | all. Newest first.
+    /// (Return Requests) or "ORIN" (A/R Credit Memos posted for returns).
+    /// <paramref name="status"/>: open | closed | canceled | all. Newest first.
     /// </summary>
     Task<List<ReturnDocumentSummary>> GetReturnDocumentsAsync(
         string docTable, string? cardCode, string status, CancellationToken ct);
@@ -140,9 +140,10 @@ public interface IAutohubInventorySqlService
 public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
 {
     // U_AppRef idempotency probes are limited to the inventory header tables
-    // (the five from spec §6.3, plus OPDN for GRPO and ORRR/ORDN for returns).
+    // (the five from spec §6.3, plus OPDN for GRPO and ORRR/ORIN for returns —
+    // customer returns post as A/R Credit Memos).
     private static readonly HashSet<string> AllowedAppRefTables =
-        new(StringComparer.OrdinalIgnoreCase) { "OIGN", "OWTQ", "OWTR", "OINC", "OIQR", "OPDN", "ORRR", "ORDN" };
+        new(StringComparer.OrdinalIgnoreCase) { "OIGN", "OWTQ", "OWTR", "OINC", "OIQR", "OPDN", "ORRR", "ORIN" };
 
     private static readonly TimeSpan WarehouseCacheTtl = TimeSpan.FromMinutes(5);
 
@@ -702,7 +703,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         (string header, string lines) = docTable.ToUpperInvariant() switch
         {
             "ORRR" => ("ORRR", "RRR1"),
-            "ORDN" => ("ORDN", "RDN1"),
+            "ORIN" => ("ORIN", "RIN1"),
             _ => throw new ArgumentException($"Unsupported return table '{docTable}'.", nameof(docTable)),
         };
 
