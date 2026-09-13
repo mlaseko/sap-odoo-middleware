@@ -36,4 +36,14 @@ public class AutohubInventorySettings
     /// <summary>Series for A/R Credit Memos (object 14, ORIN) posted for customer
     /// returns. 0 = SAP default series.</summary>
     public int CreditMemoSeries { get; set; } = 0;
+
+    /// <summary>Base URL of the zone-fulfillment sync service's internal refresh
+    /// hook, as reachable from this host (e.g. http://localhost:5100). Empty
+    /// disables the hook — picks then mirror via that service's 30-second
+    /// reconciliation poll instead.</summary>
+    public string PickMirrorHookBaseUrl { get; set; } = "";
+
+    /// <summary>X-API-Key value for the sync service's internal endpoints. Set via
+    /// configuration/environment on the host only — never committed.</summary>
+    public string PickMirrorHookApiKey { get; set; } = "";
 }
