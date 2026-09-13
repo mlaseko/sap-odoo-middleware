@@ -24,6 +24,7 @@ public class AutohubInventoryController : ControllerBase
     private readonly IAutohubSapB1Service _sap;
     private readonly AutohubInventorySettings _settings;
     private readonly DefaultBinSeedJobService _binSeed;
+    private readonly IPickMirrorRefreshNotifier _pickMirror;
     private readonly ILogger<AutohubInventoryController> _logger;
 
     public AutohubInventoryController(
@@ -32,6 +33,7 @@ public class AutohubInventoryController : ControllerBase
         IAutohubSapB1Service sap,
         IOptions<AutohubInventorySettings> settings,
         DefaultBinSeedJobService binSeed,
+        IPickMirrorRefreshNotifier pickMirror,
         ILogger<AutohubInventoryController> logger)
     {
         _sql = sql;
@@ -39,6 +41,7 @@ public class AutohubInventoryController : ControllerBase
         _sap = sap;
         _settings = settings.Value;
         _binSeed = binSeed;
+        _pickMirror = pickMirror;
         _logger = logger;
     }
 
@@ -1681,6 +1684,7 @@ public class AutohubInventoryController : ControllerBase
                 ? null
                 : PickListUpdatePlanner.AppendNote(snapshot.Remarks, plan.Note);
             var noteWritten = await _sap.UpdatePickListAllocationsAsync(absEntry, plan.Lines, remarks, ct);
+            _pickMirror.NotifyPickListChanged(absEntry);
 
             _logger.LogInformation(
                 "Pick list {AbsEntry}: allocations updated ({Lines} line(s)) by {ChangedBy} (app_ref={AppRef}).",
@@ -1753,6 +1757,7 @@ public class AutohubInventoryController : ControllerBase
 
             await _sap.UpdateSalesOrderLineWarehouseAsync(
                 plan.OrderEntry, plan.OrderLine, plan.TargetWhs, ct);
+            _pickMirror.NotifyPickListChanged(absEntry);
 
             // Confirm from SAP whether the pick line followed the SO change —
             // the app freezes the line until its mirror shows the new warehouse,
@@ -1824,6 +1829,7 @@ public class AutohubInventoryController : ControllerBase
                 ? null
                 : PickListUpdatePlanner.AppendNote(snapshot.Remarks, plan.Note);
             var noteWritten = await _sap.PickPickListLinesAsync(absEntry, plan.Lines, remarks, ct);
+            _pickMirror.NotifyPickListChanged(absEntry);
 
             _logger.LogInformation(
                 "Pick list {AbsEntry}: {Lines} line(s) picked by {ChangedBy} (app_ref={AppRef}).",

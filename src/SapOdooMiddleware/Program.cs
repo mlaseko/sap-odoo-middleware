@@ -279,6 +279,9 @@ builder.Services.AddSingleton<IAutohubInventorySqlService, AutohubInventorySqlSe
 builder.Services.AddSingleton<IBinResolver, BinResolver>();
 // Numbering series per inventory doc type (spec §6.4) — defaults in code, overridable in config.
 builder.Services.Configure<AutohubInventorySettings>(builder.Configuration.GetSection(AutohubInventorySettings.SectionName));
+// Fire-and-forget mirror refresh nudge to the zone-fulfillment sync service after
+// pick-list writes; inert until its base URL and API key are configured.
+builder.Services.AddHttpClient<IPickMirrorRefreshNotifier, PickMirrorRefreshNotifier>();
 // One-time default-bin seeding job (spec §10) — background runner + dry-run analysis.
 builder.Services.AddSingleton<DefaultBinSeedJobService>();
 
