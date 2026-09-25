@@ -7223,57 +7223,6 @@ ORDER BY PostingDate, DocumentNumber";
         }
     }
 
-    // Per-instance (per-company): the Autohub connection ensures its own UDF.
-    private bool _oeNumbersUdfEnsured;
-
-    /// <summary>
-    /// Creates OITM.U_OE_Numbers if missing (new UDF introduced with the Item Master
-    /// API) — once per process, tolerant of already-exists. Caller holds <see cref="_lock"/>.
-    /// </summary>
-    private void EnsureOeNumbersUdf()
-    {
-        if (_oeNumbersUdfEnsured) return;
-        try
-        {
-            var udfMD = (UserFieldsMD)_company!.GetBusinessObject(BoObjectTypes.oUserFields);
-            try
-            {
-                udfMD.TableName = "OITM";
-                udfMD.Name = "OE_Numbers";
-                udfMD.Description = "OE Numbers";
-                udfMD.Type = BoFieldTypes.db_Alpha;
-                udfMD.Size = 254;
-
-                int result = udfMD.Add();
-                if (result == 0)
-                {
-                    _logger.LogInformation("UDF created: OITM.U_OE_Numbers (alphanumeric 254).");
-                }
-                else
-                {
-                    _company.GetLastError(out int errCode, out string errMsg);
-                    bool exists = errMsg.Contains("already exists", StringComparison.OrdinalIgnoreCase)
-                                  || errCode is -1120 or -5002;
-                    if (!exists)
-                        _logger.LogWarning(
-                            "Could not create OITM.U_OE_Numbers [{Code}]: {Msg} — U_OE_Numbers values " +
-                            "will be skipped until the UDF exists (create it manually in B1 if this persists).",
-                            errCode, errMsg);
-                }
-            }
-            finally
-            {
-                Marshal.ReleaseComObject(udfMD);
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "OITM.U_OE_Numbers ensure threw — U_OE_Numbers values will be skipped until the UDF exists.");
-        }
-        _oeNumbersUdfEnsured = true;   // never retry-spam metadata operations
-    }
-
     /// <inheritdoc/>
     public async Task CreateItemMasterAsync(SapItemCreateApiRequest request, CancellationToken ct)
     {
@@ -7281,7 +7230,6 @@ ORDER BY PostingDate, DocumentNumber";
         try
         {
             EnsureConnected();
-            EnsureOeNumbersUdf();
 
             var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
             try
