@@ -3,6 +3,7 @@ using Microsoft.Extensions.Caching.Memory;
 using SapOdooMiddleware.Models.Api;
 using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services;
+using SapOdooMiddleware.Services.Autohub;
 
 namespace SapOdooMiddleware.Controllers;
 
@@ -17,15 +18,48 @@ namespace SapOdooMiddleware.Controllers;
 public class SapItemsController : ControllerBase
 {
     private readonly IAutohubSapB1Service _sap;
+    private readonly IAutohubInventorySqlService _sql;
     private readonly IMemoryCache _cache;
     private readonly ILogger<SapItemsController> _logger;
 
     public SapItemsController(
-        IAutohubSapB1Service sap, IMemoryCache cache, ILogger<SapItemsController> logger)
+        IAutohubSapB1Service sap, IAutohubInventorySqlService sql, IMemoryCache cache,
+        ILogger<SapItemsController> logger)
     {
         _sap = sap;
+        _sql = sql;
         _cache = cache;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// GET /api/sap/items/{itemCode}
+    /// The live item master row: item name, group, the four editable UDFs plus
+    /// U_OE_Numbers, active/frozen flags, total on-hand and PL01-PL05 prices.
+    /// Direct SQL read (no DI API seat), so the frontend can call it on every
+    /// item view and does not depend on the Neon products mirror.
+    /// </summary>
+    [HttpGet("items/{itemCode}")]
+    [ProducesResponseType(typeof(ApiResponse<SapItemMasterDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> GetItem(string itemCode, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(itemCode))
+            return BadRequest(ApiResponse<object>.Fail("itemCode is required in the URL."));
+        try
+        {
+            var item = await _sql.GetItemMasterAsync(itemCode.Trim(), ct);
+            if (item is null)
+                return NotFound(ApiResponse<object>.Fail($"Item '{itemCode.Trim()}' does not exist in SAP."));
+            return Ok(ApiResponse<SapItemMasterDto>.Ok(item));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Item Master read failed for {ItemCode}", itemCode);
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
     }
 
     /// <summary>

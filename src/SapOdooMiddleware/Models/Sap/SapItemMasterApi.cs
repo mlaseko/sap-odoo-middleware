@@ -61,3 +61,40 @@ public class SapItemUpdateApiRequest
     [JsonPropertyName("U_Item_Name")] public string? UItemName { get; set; }
     [JsonPropertyName("U_Article_No")] public string? UArticleNo { get; set; }
 }
+
+/// <summary>Prices per list (PL01-PL05) as read from ITM1; a missing list is null.</summary>
+public class SapItemPricesReadDto
+{
+    [JsonPropertyName("PL01")] public decimal? PL01 { get; set; }
+    [JsonPropertyName("PL02")] public decimal? PL02 { get; set; }
+    [JsonPropertyName("PL03")] public decimal? PL03 { get; set; }
+    [JsonPropertyName("PL04")] public decimal? PL04 { get; set; }
+    [JsonPropertyName("PL05")] public decimal? PL05 { get; set; }
+    [JsonPropertyName("currency")] public string? Currency { get; set; }
+}
+
+/// <summary>
+/// GET /api/sap/items/{itemCode} response — the live OITM row with its group,
+/// the four editable UDFs plus U_OE_Numbers, flags, total on-hand and prices.
+/// Read by direct SQL (no DI API seat), so it is safe to call on every page view.
+/// </summary>
+public class SapItemMasterDto
+{
+    [JsonPropertyName("item_code")] public string ItemCode { get; set; } = "";
+    [JsonPropertyName("item_name")] public string ItemName { get; set; } = "";
+    [JsonPropertyName("item_group_code")] public int? ItemGroupCode { get; set; }
+    [JsonPropertyName("item_group_name")] public string? ItemGroupName { get; set; }
+    [JsonPropertyName("U_MdlTEST")] public string? UMdlTest { get; set; }
+    [JsonPropertyName("U_Item_Name")] public string? UItemName { get; set; }
+    [JsonPropertyName("U_Article_No")] public string? UArticleNo { get; set; }
+    [JsonPropertyName("U_OE_Numbers")] public string? UOeNumbers { get; set; }
+    /// <summary>OITM.validFor = 'Y'.</summary>
+    [JsonPropertyName("active")] public bool Active { get; set; }
+    /// <summary>OITM.frozenFor = 'Y'.</summary>
+    [JsonPropertyName("frozen")] public bool Frozen { get; set; }
+    [JsonPropertyName("on_hand")] public decimal OnHand { get; set; }
+    [JsonPropertyName("prices")] public SapItemPricesReadDto Prices { get; set; } = new();
+    [JsonPropertyName("created_at")] public DateTime? CreatedAt { get; set; }
+    [JsonPropertyName("updated_at")] public DateTime? UpdatedAt { get; set; }
+}
+
