@@ -2,6 +2,7 @@ using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Models.Inventory;
+using SapOdooMiddleware.Models.Sap;
 
 namespace SapOdooMiddleware.Services.Autohub;
 
@@ -45,6 +46,12 @@ public interface IAutohubInventorySqlService
     /// (Inventory Counting/Posting) when SAP's multi-branch feature is enabled.
     /// </summary>
     Task<WarehouseBranch?> GetWarehouseBranchAsync(string whsCode, CancellationToken ct);
+
+    /// <summary>
+    /// The live item master row for the Item Master API (OITM + OITB group + ITM1
+    /// prices PL01-PL05), or null when the item does not exist.
+    /// </summary>
+    Task<SapItemMasterDto?> GetItemMasterAsync(string itemCode, CancellationToken ct);
 
     /// <summary>Open transfer request lines with item details (spec §8.1), oldest first.</summary>
     Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
@@ -223,6 +230,79 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         if (whs is null)
             throw new InvalidOperationException($"Warehouse '{whsCode}' does not exist in SAP.");
         return whs.BinActivated;
+    }
+
+    // ── Item master ──────────────────────────────────────────────────
+
+    public async Task<SapItemMasterDto?> GetItemMasterAsync(string itemCode, CancellationToken ct)
+    {
+        const string itemSql = """
+            SELECT I.ItemCode, I.ItemName, I.ItmsGrpCod, G.ItmsGrpNam,
+                   I.U_MdlTEST, I.U_Item_Name, I.U_Article_No, I.U_OE_Numbers,
+                   ISNULL(I.validFor, 'N'), ISNULL(I.frozenFor, 'N'), ISNULL(I.OnHand, 0),
+                   I.CreateDate, I.UpdateDate
+            FROM OITM I
+            LEFT JOIN OITB G ON G.ItmsGrpCod = I.ItmsGrpCod
+            WHERE I.ItemCode = @item;
+            """;
+        const string priceSql = """
+            SELECT PriceList, Price, Currency
+            FROM ITM1
+            WHERE ItemCode = @item AND PriceList BETWEEN 1 AND 5
+            ORDER BY PriceList;
+            """;
+
+        await using var conn = await OpenAsync(ct);
+        SapItemMasterDto? item = null;
+
+        await using (var cmd = new SqlCommand(itemSql, conn))
+        {
+            cmd.Parameters.AddWithValue("@item", itemCode);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct))
+            {
+                item = new SapItemMasterDto
+                {
+                    ItemCode = reader.GetString(0),
+                    ItemName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    ItemGroupCode = reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2)),
+                    ItemGroupName = reader.IsDBNull(3) ? null : reader.GetString(3),
+                    UMdlTest = reader.IsDBNull(4) ? null : reader.GetString(4),
+                    UItemName = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    UArticleNo = reader.IsDBNull(6) ? null : reader.GetString(6),
+                    UOeNumbers = reader.IsDBNull(7) ? null : reader.GetString(7),
+                    Active = string.Equals(reader.GetString(8), "Y", StringComparison.OrdinalIgnoreCase),
+                    Frozen = string.Equals(reader.GetString(9), "Y", StringComparison.OrdinalIgnoreCase),
+                    OnHand = Convert.ToDecimal(reader.GetValue(10)),
+                    CreatedAt = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                    UpdatedAt = reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+                };
+            }
+        }
+        if (item is null) return null;
+
+        await using (var cmd = new SqlCommand(priceSql, conn))
+        {
+            cmd.Parameters.AddWithValue("@item", itemCode);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var list = Convert.ToInt32(reader.GetValue(0));
+                var price = reader.IsDBNull(1) ? (decimal?)null : Convert.ToDecimal(reader.GetValue(1));
+                var currency = reader.IsDBNull(2) ? null : reader.GetString(2);
+                if (!string.IsNullOrWhiteSpace(currency) && string.IsNullOrWhiteSpace(item.Prices.Currency))
+                    item.Prices.Currency = currency.Trim();
+                switch (list)
+                {
+                    case 1: item.Prices.PL01 = price; break;
+                    case 2: item.Prices.PL02 = price; break;
+                    case 3: item.Prices.PL03 = price; break;
+                    case 4: item.Prices.PL04 = price; break;
+                    case 5: item.Prices.PL05 = price; break;
+                }
+            }
+        }
+        return item;
     }
 
     // ── Stock ────────────────────────────────────────────────────────
