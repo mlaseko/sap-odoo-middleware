@@ -498,4 +498,20 @@ public interface ISapB1Service
     /// </summary>
     Task SetItemClassificationAsync(
         string itemCode, int groupCode, string? odooCategoryName, CancellationToken ct);
+
+    /// <summary>
+    /// Creates an OITM item for the Autohub Item Master API (/api/sap/items):
+    /// Inventory/Sales/Purchase = Y, VAT groups TZ / TZS, UoM group Manual (-1),
+    /// no Manufacturer/FirmCode, the U_MdlTEST / U_Item_Name / U_Article_No /
+    /// U_OE_Numbers UDFs, and TZS prices on PL01-PL05 (indexes 0-4).
+    /// Throws when the ItemCode already exists.
+    /// </summary>
+    Task CreateItemMasterAsync(SapItemCreateApiRequest request, CancellationToken ct);
+
+    /// <summary>
+    /// Updates ONLY ItemName + the U_MdlTEST / U_Item_Name / U_Article_No UDFs on an
+    /// existing OITM item (null fields are left untouched) in one Items.Update.
+    /// </summary>
+    Task UpdateItemMasterFieldsAsync(
+        string itemCode, SapItemUpdateApiRequest request, CancellationToken ct);
 }
