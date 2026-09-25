@@ -7222,7 +7222,143 @@ ORDER BY PostingDate, DocumentNumber";
             _lock.Release();
         }
     }
+
+    /// <inheritdoc/>
+    public async Task CreateItemMasterAsync(SapItemCreateApiRequest request, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (items.GetByKey(request.ItemCode))
+                    throw new InvalidOperationException(
+                        $"Item '{request.ItemCode}' already exists in SAP.");
+
+                items.ItemCode       = request.ItemCode;
+                items.ItemName       = Truncate(request.ItemName, 200);
+                items.ItemType       = ItemTypeEnum.itItems;
+                items.ItemsGroupCode = request.ItemGroupCode;
+
+                // Fixed by the backend (per reference item VAG13289) — not client-editable.
+                items.InventoryItem  = BoYesNoEnum.tYES;
+                items.SalesItem      = BoYesNoEnum.tYES;
+                items.PurchaseItem   = BoYesNoEnum.tYES;
+                items.SalesVATGroup    = "TZ";
+                items.PurchaseVATGroup = "TZS";
+                // MOLAS_Live_2021 only has the built-in Manual UoM group.
+                items.UoMGroupEntry  = -1;
+                // Deliberately NOT set: Manufacturer/FirmCode (per spec).
+
+                var ctx = $"item {request.ItemCode}";
+                if (request.UMdlTest is not null)
+                    TrySetUserField(items.UserFields, "U_MdlTEST", request.UMdlTest, ctx);
+                if (request.UItemName is not null)
+                    TrySetUserField(items.UserFields, "U_Item_Name", request.UItemName, ctx);
+                if (request.UArticleNo is not null)
+                    TrySetUserField(items.UserFields, "U_Article_No", request.UArticleNo, ctx);
+                if (request.UOeNumbers is not null)
+                    TrySetUserField(items.UserFields, "U_OE_Numbers", request.UOeNumbers, ctx);
+
+                // Prices: PL01..PL05 map to PriceList collection indexes 0..4 (TZS).
+                if (request.Prices is not null)
+                {
+                    foreach (var (list, price) in request.Prices)
+                    {
+                        var index = PriceListIndexOf(list);
+                        if (index is null)
+                            throw new InvalidOperationException(
+                                $"Unknown price list '{list}' — use PL01..PL05.");
+                        items.PriceList.SetCurrentLine(index.Value);
+                        items.PriceList.Price    = (double)price;
+                        items.PriceList.Currency = "TZS";
+                    }
+                }
+
+                int result = items.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Add failed for {request.ItemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP item created via Item Master API: ItemCode={ItemCode}, Group={Group}, Prices={Prices}",
+                    request.ItemCode, request.ItemGroupCode,
+                    request.Prices is null ? "(none)" : string.Join(",", request.Prices.Select(p => $"{p.Key}={p.Value:0.##}")));
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task UpdateItemMasterFieldsAsync(
+        string itemCode, SapItemUpdateApiRequest request, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException($"SAP item '{itemCode}' not found.");
+
+                if (!string.IsNullOrWhiteSpace(request.ItemName))
+                    items.ItemName = Truncate(request.ItemName, 200);
+
+                var ctx = $"item {itemCode}";
+                if (request.UMdlTest is not null)
+                    TrySetUserField(items.UserFields, "U_MdlTEST", request.UMdlTest, ctx);
+                if (request.UItemName is not null)
+                    TrySetUserField(items.UserFields, "U_Item_Name", request.UItemName, ctx);
+                if (request.UArticleNo is not null)
+                    TrySetUserField(items.UserFields, "U_Article_No", request.UArticleNo, ctx);
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed for {itemCode} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP item updated via Item Master API: ItemCode={ItemCode}", itemCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>"PL01".."PL05" (case-insensitive) → PriceList collection index 0..4, else null.</summary>
+    private static int? PriceListIndexOf(string listName) =>
+        listName.Trim().ToUpperInvariant() switch
+        {
+            "PL01" => 0, "PL02" => 1, "PL03" => 2, "PL04" => 3, "PL05" => 4,
+            _ => null,
+        };
 }
+
 
 /// <summary>
 /// SAP B1 DI-API service bound to the <b>Autohub</b> company (<c>Companies:Autohub:SapB1</c>) — a
