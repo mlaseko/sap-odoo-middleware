@@ -116,6 +116,9 @@ public interface IAutohubInventorySqlService
     /// <summary>Counting session headers with counted-line progress, newest first.</summary>
     Task<List<CountingSessionSummary>> GetCountingSessionsAsync(bool openOnly, CancellationToken ct);
 
+    /// <summary>One counting header's DocNum + Status ('O'/'C'), or null when absent.</summary>
+    Task<(int DocNum, string Status)?> GetCountingHeaderAsync(int docEntry, CancellationToken ct);
+
     /// <summary>All lines of one counting session for the count-capture screen.</summary>
     Task<List<CountingLineDetail>> GetCountingLinesAsync(int docEntry, CancellationToken ct);
 
@@ -947,6 +950,19 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             });
         }
         return list;
+    }
+
+    public async Task<(int DocNum, string Status)?> GetCountingHeaderAsync(
+        int docEntry, CancellationToken ct)
+    {
+        const string sql = """SELECT "DocNum", "Status" FROM OINC WHERE "DocEntry" = @doc;""";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@doc", docEntry);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        if (!await r.ReadAsync(ct))
+            return null;
+        return (r.GetInt32(0), r.IsDBNull(1) ? "" : r.GetString(1));
     }
 
     public async Task<List<CountingSessionSummary>> GetCountingSessionsAsync(

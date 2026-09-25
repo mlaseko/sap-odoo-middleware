@@ -685,6 +685,64 @@ public class AutohubInventoryController : ControllerBase
     }
 
     /// <summary>
+    /// POST /api/autohub/inv/countings/{docEntry}/close
+    /// Closes a counting session WITHOUT posting — for sessions where every line
+    /// matched the system quantity (nothing to adjust) or where the reviewer decides
+    /// not to post. Open lines are closed with no stock/GL impact. Idempotent:
+    /// an already-closed session returns 200 with <c>already_closed = true</c>.
+    /// By default every open line must be counted first; pass <c>force=true</c> to
+    /// close anyway (uncounted lines are simply abandoned).
+    /// </summary>
+    [HttpPost("countings/{docEntry:int}/close")]
+    [ProducesResponseType(typeof(ApiResponse<CountingCloseResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<CountingCloseResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<CountingCloseResult>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<CountingCloseResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CloseCounting(
+        int docEntry,
+        [FromQuery(Name = "force")] bool force = false,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var header = await _sql.GetCountingHeaderAsync(docEntry, ct);
+            if (header is null)
+                return NotFound(ApiResponse<CountingCloseResult>.Fail(
+                    $"Counting document {docEntry} not found."));
+
+            if (header.Value.Status == "C")
+                return Ok(ApiResponse<CountingCloseResult>.Ok(new CountingCloseResult
+                {
+                    DocEntry = docEntry,
+                    DocNum = header.Value.DocNum,
+                    AlreadyClosed = true,
+                }));
+
+            var lines = await _sql.GetCountingLinesAsync(docEntry, ct);
+            int uncounted = lines.Count(l => l.LineStatus == "O" && !l.Counted);
+            if (uncounted > 0 && !force)
+                return BadRequest(ApiResponse<CountingCloseResult>.Fail(
+                    $"{uncounted} open line(s) have not been counted yet — count them first, " +
+                    "or pass force=true to close and abandon them."));
+
+            await _sap.CloseInventoryCountingAsync(docEntry, ct);
+
+            return Ok(ApiResponse<CountingCloseResult>.Ok(new CountingCloseResult
+            {
+                DocEntry = docEntry,
+                DocNum = header.Value.DocNum,
+                AlreadyClosed = false,
+                UncountedLines = uncounted,
+            }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Counting close failed (doc_entry={DocEntry})", docEntry);
+            return StatusCode(500, ApiResponse<CountingCloseResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/autohub/inv/postings
     /// Creates the Inventory Posting (OIQR) from reviewer-approved counting lines.
     /// Base refs make SAP post the stock/GL adjustments and close those counting lines;
