@@ -16,9 +16,6 @@ namespace SapOdooMiddleware.Controllers;
 [Route("api/sap")]
 public class SapItemsController : ControllerBase
 {
-    private static readonly HashSet<string> ValidPriceLists =
-        new(StringComparer.OrdinalIgnoreCase) { "PL01", "PL02", "PL03", "PL04", "PL05" };
-
     private readonly IAutohubSapB1Service _sap;
     private readonly IMemoryCache _cache;
     private readonly ILogger<SapItemsController> _logger;
@@ -70,13 +67,9 @@ public class SapItemsController : ControllerBase
             errors.Add("itemGroupCode is required (pick it from GET /api/sap/item-groups).");
         if (request.Prices is not null)
         {
-            foreach (var (list, price) in request.Prices)
-            {
-                if (!ValidPriceLists.Contains(list.Trim()))
-                    errors.Add($"prices: unknown price list '{list}' — valid keys are PL01..PL05.");
+            foreach (var (listNum, price) in request.Prices.ToListNumMap())
                 if (price < 0m)
-                    errors.Add($"prices: {list} cannot be negative.");
-            }
+                    errors.Add($"prices: PL{listNum:00} cannot be negative.");
         }
         if (errors.Count > 0)
             return BadRequest(ApiResponse<object>.Fail(errors));
@@ -98,7 +91,7 @@ public class SapItemsController : ControllerBase
             {
                 item_code = request.ItemCode,
                 item_group_code = request.ItemGroupCode,
-                prices_set = request.Prices?.Count ?? 0,
+                prices_set = request.Prices?.ToListNumMap().Count ?? 0,
             }));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("already exists"))

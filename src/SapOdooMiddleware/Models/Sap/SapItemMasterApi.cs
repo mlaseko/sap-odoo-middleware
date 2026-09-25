@@ -23,8 +23,34 @@ public class SapItemCreateApiRequest
     [JsonPropertyName("U_Article_No")] public string? UArticleNo { get; set; }
     [JsonPropertyName("U_OE_Numbers")] public string? UOeNumbers { get; set; }
 
-    /// <summary>Prices keyed by SAP price list name: PL01 … PL05 (TZS).</summary>
-    [JsonPropertyName("prices")] public Dictionary<string, decimal>? Prices { get; set; }
+    /// <summary>Prices for SAP price lists 1-5 (TZS). Omitted lists are left at 0.</summary>
+    [JsonPropertyName("prices")] public SapItemPricesDto? Prices { get; set; }
+}
+
+/// <summary>
+/// TZS prices per SAP price list (ITM1 rows, written via the DI API's PriceList
+/// collection selected by ListNum). Explicit properties so Swagger shows the real
+/// keys instead of dictionary placeholders.
+/// </summary>
+public class SapItemPricesDto
+{
+    [JsonPropertyName("PL01")] public decimal? PL01 { get; set; }
+    [JsonPropertyName("PL02")] public decimal? PL02 { get; set; }
+    [JsonPropertyName("PL03")] public decimal? PL03 { get; set; }
+    [JsonPropertyName("PL04")] public decimal? PL04 { get; set; }
+    [JsonPropertyName("PL05")] public decimal? PL05 { get; set; }
+
+    /// <summary>ListNum (1-5) → price, for the provided values only.</summary>
+    public Dictionary<int, decimal> ToListNumMap()
+    {
+        var map = new Dictionary<int, decimal>();
+        if (PL01 is { } p1) map[1] = p1;
+        if (PL02 is { } p2) map[2] = p2;
+        if (PL03 is { } p3) map[3] = p3;
+        if (PL04 is { } p4) map[4] = p4;
+        if (PL05 is { } p5) map[5] = p5;
+        return map;
+    }
 }
 
 /// <summary>PATCH /api/sap/items/{itemCode} body — only these fields are editable.</summary>
