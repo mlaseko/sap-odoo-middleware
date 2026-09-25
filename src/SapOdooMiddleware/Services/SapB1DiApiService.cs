@@ -7315,19 +7315,28 @@ ORDER BY PostingDate, DocumentNumber";
                 if (request.UOeNumbers is not null)
                     TrySetUserField(items.UserFields, "U_OE_Numbers", request.UOeNumbers, ctx);
 
-                // Prices: PL01..PL05 map to PriceList collection indexes 0..4 (TZS).
-                if (request.Prices is not null)
+                // Prices land in ITM1 via the DI API PriceList collection, selected
+                // by the line's actual ListNum (OPLN 1..5) — never by position, so
+                // reordered/renamed price lists can't misroute a value.
+                var priceMap = request.Prices?.ToListNumMap();
+                if (priceMap is { Count: > 0 })
                 {
-                    foreach (var (list, price) in request.Prices)
+                    var remaining = new HashSet<int>(priceMap.Keys);
+                    for (int i = 0; i < items.PriceList.Count; i++)
                     {
-                        var index = PriceListIndexOf(list);
-                        if (index is null)
-                            throw new InvalidOperationException(
-                                $"Unknown price list '{list}' — use PL01..PL05.");
-                        items.PriceList.SetCurrentLine(index.Value);
-                        items.PriceList.Price    = (double)price;
-                        items.PriceList.Currency = "TZS";
+                        items.PriceList.SetCurrentLine(i);
+                        int listNum = items.PriceList.PriceList;
+                        if (priceMap.TryGetValue(listNum, out var price))
+                        {
+                            items.PriceList.Price    = (double)price;
+                            items.PriceList.Currency = "TZS";
+                            remaining.Remove(listNum);
+                        }
                     }
+                    if (remaining.Count > 0)
+                        throw new InvalidOperationException(
+                            $"Price list(s) {string.Join(",", remaining.Select(n => $"PL{n:00}"))} " +
+                            "not found on the item's price-list collection — check OPLN.");
                 }
 
                 int result = items.Add();
@@ -7341,7 +7350,9 @@ ORDER BY PostingDate, DocumentNumber";
                 _logger.LogInformation(
                     "SAP item created via Item Master API: ItemCode={ItemCode}, Group={Group}, Prices={Prices}",
                     request.ItemCode, request.ItemGroupCode,
-                    request.Prices is null ? "(none)" : string.Join(",", request.Prices.Select(p => $"{p.Key}={p.Value:0.##}")));
+                    priceMap is { Count: > 0 }
+                        ? string.Join(",", priceMap.Select(p => $"PL{p.Key:00}={p.Value:0.##}"))
+                        : "(none)");
             }
             finally
             {
@@ -7401,14 +7412,6 @@ ORDER BY PostingDate, DocumentNumber";
             _lock.Release();
         }
     }
-
-    /// <summary>"PL01".."PL05" (case-insensitive) → PriceList collection index 0..4, else null.</summary>
-    private static int? PriceListIndexOf(string listName) =>
-        listName.Trim().ToUpperInvariant() switch
-        {
-            "PL01" => 0, "PL02" => 1, "PL03" => 2, "PL04" => 3, "PL05" => 4,
-            _ => null,
-        };
 }
 
 
