@@ -80,6 +80,16 @@ public class CountingLineDetail
     public string LineStatus { get; set; } = "";
 }
 
+/// <summary>Result of closing a counting session (idempotent on already-closed).</summary>
+public class CountingCloseResult
+{
+    public int DocEntry { get; set; }
+    public int DocNum { get; set; }
+    public bool AlreadyClosed { get; set; }
+    /// <summary>Open lines that were still uncounted at close time (0 unless forced).</summary>
+    public int UncountedLines { get; set; }
+}
+
 // ── Count capture (PATCH) ────────────────────────────────────────────
 
 /// <summary>PATCH /api/autohub/inv/countings/{docEntry}/lines body.</summary>

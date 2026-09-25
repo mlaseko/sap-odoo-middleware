@@ -6104,6 +6104,45 @@ ORDER BY PostingDate, DocumentNumber";
     }
 
     /// <inheritdoc/>
+    public async Task CloseInventoryCountingAsync(int docEntry, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var cs = _company!.GetCompanyService();
+            InventoryCountingsService? svc = null;
+            try
+            {
+                svc = (InventoryCountingsService)cs.GetBusinessService(
+                    ServiceTypes.InventoryCountingsService);
+                var prms = (InventoryCountingParams)svc.GetDataInterface(
+                    InventoryCountingsServiceDataInterfaces.icsInventoryCountingParams);
+                prms.DocumentEntry = docEntry;
+
+                svc.Close(prms);
+
+                _logger.LogInformation(
+                    "SAP Inventory Counting closed: DocEntry={DocEntry}", docEntry);
+            }
+            catch (COMException ex)
+            {
+                throw WrapServiceError("InventoryCountingsService.Close", ex);
+            }
+            finally
+            {
+                if (svc is not null) try { Marshal.ReleaseComObject(svc); } catch { /* ignored */ }
+                try { Marshal.ReleaseComObject(cs); } catch { /* ignored */ }
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
     public async Task<InventoryDocResult> CreateInventoryPostingAsync(
         int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
         int? bplId, CancellationToken ct)

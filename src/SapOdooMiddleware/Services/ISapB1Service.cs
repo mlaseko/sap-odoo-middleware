@@ -345,6 +345,14 @@ public interface ISapB1Service
         string additionsWhsCode, CancellationToken ct);
 
     /// <summary>
+    /// Closes an Inventory Counting session (OINC) via
+    /// <c>InventoryCountingsService.Close</c> — for sessions where nothing (or
+    /// nothing further) will be posted. Open lines are closed without any stock
+    /// or GL impact.
+    /// </summary>
+    Task CloseInventoryCountingAsync(int docEntry, CancellationToken ct);
+
+    /// <summary>
     /// Creates an Inventory Posting (OIQR, object 10000071) from reviewer-approved
     /// counting lines via <c>InventoryPostingsService</c>, with base refs
     /// (BaseEntry = counting DocEntry, BaseLine = counting LineNum) so SAP posts the
