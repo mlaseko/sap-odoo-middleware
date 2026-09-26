@@ -510,8 +510,9 @@ public interface ISapB1Service
     /// <summary>
     /// Creates an OITM item for the Autohub Item Master API (/api/sap/items):
     /// Inventory/Sales/Purchase = Y, VAT groups TZ / TZS, UoM group Manual (-1),
-    /// no Manufacturer/FirmCode, the U_MdlTEST / U_Item_Name / U_Article_No /
-    /// U_OE_Numbers UDFs, and TZS prices on PL01-PL05 (indexes 0-4).
+    /// no standard Manufacturer/FirmCode, the U_MdlTEST / U_Item_Name / U_Article_No /
+    /// U_OE_Numbers UDFs (U_ItemManufacturer mirrors U_MdlTEST, the brand truth field),
+    /// and TZS prices on PL01-PL05 (indexes 0-4).
     /// Throws when the ItemCode already exists.
     /// </summary>
     Task CreateItemMasterAsync(SapItemCreateApiRequest request, CancellationToken ct);
@@ -522,4 +523,12 @@ public interface ISapB1Service
     /// </summary>
     Task UpdateItemMasterFieldsAsync(
         string itemCode, SapItemUpdateApiRequest request, CancellationToken ct);
+
+    /// <summary>
+    /// One-time alignment helper: sets U_ItemManufacturer to <paramref name="value"/> on
+    /// one OITM item via the DI API (GetByKey → set UDF → Update), so SAP's own logging
+    /// and validation apply. U_MdlTEST is the brand truth field; this only repairs its
+    /// U_ItemManufacturer mirror. Throws when the item is missing or the write fails.
+    /// </summary>
+    Task SetItemManufacturerAsync(string itemCode, string value, CancellationToken ct);
 }
