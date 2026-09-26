@@ -53,6 +53,16 @@ public interface IAutohubInventorySqlService
     /// </summary>
     Task<SapItemMasterDto?> GetItemMasterAsync(string itemCode, CancellationToken ct);
 
+    /// <summary>
+    /// Item search for the Item Master API: case-insensitive, space/dash-insensitive
+    /// match on ItemCode, ItemName, U_Article_No and U_OE_Numbers ("/"-joined list).
+    /// Ranked: ItemCode prefix, then exact article/OE-segment match, then contains.
+    /// Prices are NOT populated (speed). <paramref name="normalizedQuery"/> must
+    /// already have spaces/dashes stripped.
+    /// </summary>
+    Task<List<SapItemMasterDto>> SearchItemMasterAsync(
+        string normalizedQuery, int limit, CancellationToken ct);
+
     /// <summary>Open transfer request lines with item details (spec §8.1), oldest first.</summary>
     Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
         string? fromWhs, string? toWhs, CancellationToken ct);
@@ -303,6 +313,65 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             }
         }
         return item;
+    }
+
+    public async Task<List<SapItemMasterDto>> SearchItemMasterAsync(
+        string normalizedQuery, int limit, CancellationToken ct)
+    {
+        // N.* are space/dash-stripped copies of the searchable columns; SQL Server's
+        // default CI collation makes every comparison case-insensitive. OITM here is
+        // ~10k rows, so the non-sargable REPLACEs are fine.
+        const string sql = """
+            SELECT TOP (@limit)
+                   I.ItemCode, I.ItemName, I.ItmsGrpCod, G.ItmsGrpNam,
+                   I.U_MdlTEST, I.U_Item_Name, I.U_Article_No, I.U_OE_Numbers,
+                   ISNULL(I.validFor, 'N'), ISNULL(I.frozenFor, 'N'), ISNULL(I.OnHand, 0),
+                   I.CreateDate, I.UpdateDate
+            FROM OITM I
+            LEFT JOIN OITB G ON G.ItmsGrpCod = I.ItmsGrpCod
+            CROSS APPLY (SELECT
+                REPLACE(REPLACE(I.ItemCode, ' ', ''), '-', '')              AS NCode,
+                REPLACE(REPLACE(ISNULL(I.ItemName, ''), ' ', ''), '-', '')  AS NName,
+                REPLACE(REPLACE(ISNULL(I.U_Article_No, ''), ' ', ''), '-', '') AS NArt,
+                REPLACE(REPLACE(ISNULL(I.U_OE_Numbers, ''), ' ', ''), '-', '') AS NOe) N
+            WHERE N.NCode LIKE @contains OR N.NName LIKE @contains
+               OR N.NArt LIKE @contains OR N.NOe LIKE @contains
+            ORDER BY CASE
+                WHEN N.NCode LIKE @prefix THEN 0
+                WHEN N.NArt = @norm OR '/' + N.NOe + '/' LIKE @segment THEN 1
+                ELSE 2 END, I.ItemCode;
+            """;
+
+        var list = new List<SapItemMasterDto>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@limit", limit);
+        cmd.Parameters.AddWithValue("@norm", normalizedQuery);
+        cmd.Parameters.AddWithValue("@prefix", normalizedQuery + "%");
+        cmd.Parameters.AddWithValue("@contains", "%" + normalizedQuery + "%");
+        cmd.Parameters.AddWithValue("@segment", "%/" + normalizedQuery + "/%");
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new SapItemMasterDto
+            {
+                ItemCode = reader.GetString(0),
+                ItemName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+                ItemGroupCode = reader.IsDBNull(2) ? null : Convert.ToInt32(reader.GetValue(2)),
+                ItemGroupName = reader.IsDBNull(3) ? null : reader.GetString(3),
+                UMdlTest = reader.IsDBNull(4) ? null : reader.GetString(4),
+                UItemName = reader.IsDBNull(5) ? null : reader.GetString(5),
+                UArticleNo = reader.IsDBNull(6) ? null : reader.GetString(6),
+                UOeNumbers = reader.IsDBNull(7) ? null : reader.GetString(7),
+                Active = string.Equals(reader.GetString(8), "Y", StringComparison.OrdinalIgnoreCase),
+                Frozen = string.Equals(reader.GetString(9), "Y", StringComparison.OrdinalIgnoreCase),
+                OnHand = Convert.ToDecimal(reader.GetValue(10)),
+                CreatedAt = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                UpdatedAt = reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+                // Prices deliberately not loaded — search results skip ITM1 for speed.
+            });
+        }
+        return list;
     }
 
     // ── Stock ────────────────────────────────────────────────────────
