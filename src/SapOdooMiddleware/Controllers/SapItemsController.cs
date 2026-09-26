@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Caching.Memory;
 using SapOdooMiddleware.Models.Api;
 using SapOdooMiddleware.Models.Sap;
+using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Services;
 using SapOdooMiddleware.Services.Autohub;
 
@@ -19,15 +20,18 @@ public class SapItemsController : ControllerBase
 {
     private readonly IAutohubSapB1Service _sap;
     private readonly IAutohubInventorySqlService _sql;
+    private readonly IOitmRefreshQueueRepository _refreshQueue;
     private readonly IMemoryCache _cache;
     private readonly ILogger<SapItemsController> _logger;
 
     public SapItemsController(
-        IAutohubSapB1Service sap, IAutohubInventorySqlService sql, IMemoryCache cache,
+        IAutohubSapB1Service sap, IAutohubInventorySqlService sql,
+        IOitmRefreshQueueRepository refreshQueue, IMemoryCache cache,
         ILogger<SapItemsController> logger)
     {
         _sap = sap;
         _sql = sql;
+        _refreshQueue = refreshQueue;
         _cache = cache;
         _logger = logger;
     }
@@ -184,6 +188,9 @@ public class SapItemsController : ControllerBase
     /// PATCH /api/sap/items/{itemCode}
     /// Updates ONLY ItemName, U_MdlTEST, U_Item_Name, U_Article_No. Omitted (null)
     /// fields are left untouched; no other Item Master fields are editable here.
+    /// After the SAP write commits, an identity change (name / article number / brand /
+    /// OEM numbers) is published to the Neon <c>oitm_refresh_queue</c> for the DGX
+    /// worker; a Neon failure never fails this call (nightly reconciliation catches it).
     /// </summary>
     [HttpPatch("items/{itemCode}")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
@@ -200,10 +207,24 @@ public class SapItemsController : ControllerBase
             return BadRequest(ApiResponse<object>.Fail(
                 "Provide at least one of: itemName, U_MdlTEST, U_Item_Name, U_Article_No."));
 
+        var code = itemCode.Trim();
+
+        // Pre-edit snapshot for the queue row's before_value / change detection. Best
+        // effort: a failed read must not block the user's SAP update.
+        OitmIdentitySnapshot? before = null;
         try
         {
-            await _sap.UpdateItemMasterFieldsAsync(itemCode.Trim(), request, ct);
-            return Ok(ApiResponse<object>.Ok(new { item_code = itemCode.Trim() }));
+            before = await _sql.GetItemIdentitySnapshotAsync(code, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Pre-update OITM snapshot failed for {ItemCode}; queue row will carry no before_value.", code);
+        }
+
+        try
+        {
+            await _sap.UpdateItemMasterFieldsAsync(code, request, ct);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("not found"))
         {
@@ -214,7 +235,105 @@ public class SapItemsController : ControllerBase
             _logger.LogError(ex, "Item Master update failed for {ItemCode}", itemCode);
             return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
         }
+
+        // SAP has committed — only now may the Neon refresh-queue row exist. Runs on
+        // CancellationToken.None so a client disconnect can't drop the queue write.
+        var (queued, changedFields) = await TryEnqueueNeonRefreshAsync(code, request, before);
+
+        return Ok(ApiResponse<object>.Ok(new
+        {
+            item_code = code,
+            neon_refresh_queued = queued,
+            changed_fields = changedFields,
+        }));
     }
+
+    // ── Neon refresh queue (oitm_refresh_queue) ──────────────────────────
+
+    /// <summary>
+    /// Publishes the just-committed SAP identity change to the Neon refresh queue.
+    /// Never throws: SAP is the system of record, so a Neon failure is logged and the
+    /// call still succeeds (the DGX nightly reconciliation catches the missed item).
+    /// Only identity fields queue a row — a U_MdlTEST/brand, U_Item_Name/name,
+    /// U_Article_No/article or ItemName/OEM-chain change; a no-op edit queues nothing.
+    /// </summary>
+    private async Task<(bool Queued, List<string> ChangedFields)> TryEnqueueNeonRefreshAsync(
+        string itemCode, SapItemUpdateApiRequest request, OitmIdentitySnapshot? before)
+    {
+        var changed = new List<string>();
+        try
+        {
+            // Post-commit snapshot: the actual stored values (incl. SAP-side truncation)
+            // and the row's UpdateDate/UpdateTS.
+            OitmIdentitySnapshot? after = null;
+            try
+            {
+                after = await _sql.GetItemIdentitySnapshotAsync(itemCode, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Post-update OITM snapshot failed for {ItemCode}; building after_value from the request.", itemCode);
+            }
+            after ??= new OitmIdentitySnapshot
+            {
+                ItemCode = itemCode,
+                OemChain = !string.IsNullOrWhiteSpace(request.ItemName) ? request.ItemName : before?.OemChain,
+                UItemName = request.UItemName ?? before?.UItemName,
+                UArticleNo = request.UArticleNo ?? before?.UArticleNo,
+                UMdlTest = request.UMdlTest ?? before?.UMdlTest,
+                Manufacturer = before?.Manufacturer,
+            };
+
+            // Which of the worker's four tracked fields actually changed. Without a
+            // before snapshot, every field the request supplied counts as changed.
+            if (request.UItemName is not null
+                && (before is null || Differs(before.UItemName, after.UItemName)))
+                changed.Add("name");
+            if (request.UArticleNo is not null
+                && (before is null || Differs(before.UArticleNo, after.UArticleNo)))
+                changed.Add("article_number");
+            if (request.UMdlTest is not null
+                && (before is null || Differs(before.UMdlTest, after.UMdlTest)))
+                changed.Add("brand");
+            if (!string.IsNullOrWhiteSpace(request.ItemName)
+                && (before is null || Differs(before.OemChain, after.OemChain)))
+                changed.Add("oem_numbers");
+
+            if (changed.Count == 0) return (false, changed);
+
+            await _refreshQueue.EnqueueAsync(
+                itemCode, changed,
+                before is null ? null : ToRefreshValues(before),
+                ToRefreshValues(after),
+                after.SapUpdateTs, request.RequestedBy, CancellationToken.None);
+
+            _logger.LogInformation(
+                "Neon refresh queued for {ItemCode} (fields: {Fields}).", itemCode, string.Join(",", changed));
+            return (true, changed);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Neon oitm_refresh_queue insert failed for {ItemCode} — SAP is already updated; " +
+                "the nightly DGX reconciliation will pick the item up.", itemCode);
+            return (false, changed);
+        }
+    }
+
+    /// <summary>Maps the OITM snapshot onto the worker's JSON contract. Brand prefers
+    /// U_ItemManufacturer (the SAP truth field); API-created items only carry the brand
+    /// in U_MdlTEST, so that is the fallback.</summary>
+    private static OitmRefreshValues ToRefreshValues(OitmIdentitySnapshot s) => new()
+    {
+        ItemName = s.UItemName,
+        ArticleNumber = s.UArticleNo,
+        Brand = !string.IsNullOrWhiteSpace(s.Manufacturer) ? s.Manufacturer : s.UMdlTest,
+        OemChain = s.OemChain,
+    };
+
+    private static bool Differs(string? a, string? b) =>
+        !string.Equals(a?.Trim() ?? "", b?.Trim() ?? "", StringComparison.Ordinal);
 
     private async Task<List<(int Code, string Name)>> GetCachedGroupsAsync(CancellationToken ct)
         => (await _cache.GetOrCreateAsync("autohub-sap-item-groups", async e =>

@@ -63,6 +63,14 @@ public interface IAutohubInventorySqlService
     Task<List<SapItemMasterDto>> SearchItemMasterAsync(
         string normalizedQuery, int limit, CancellationToken ct);
 
+    /// <summary>
+    /// The live OITM identity fields (ItemName/OEM chain, U_Item_Name, U_Article_No,
+    /// U_MdlTEST, U_ItemManufacturer) plus UpdateDate+UpdateTS, read before and after a
+    /// PATCH to build the Neon <c>oitm_refresh_queue</c> payload. Null when the item
+    /// does not exist.
+    /// </summary>
+    Task<OitmIdentitySnapshot?> GetItemIdentitySnapshotAsync(string itemCode, CancellationToken ct);
+
     /// <summary>Open transfer request lines with item details (spec §8.1), oldest first.</summary>
     Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
         string? fromWhs, string? toWhs, CancellationToken ct);
@@ -372,6 +380,53 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             });
         }
         return list;
+    }
+
+    public async Task<OitmIdentitySnapshot?> GetItemIdentitySnapshotAsync(
+        string itemCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT ItemName, U_Item_Name, U_Article_No, U_MdlTEST, U_ItemManufacturer,
+                   UpdateDate, UpdateTS
+            FROM OITM
+            WHERE ItemCode = @item;
+            """;
+
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@item", itemCode);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+
+        var updateDate = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
+        var updateTs = reader.IsDBNull(6) ? (int?)null : Convert.ToInt32(reader.GetValue(6));
+        return new OitmIdentitySnapshot
+        {
+            ItemCode = itemCode,
+            OemChain = reader.IsDBNull(0) ? null : reader.GetString(0),
+            UItemName = reader.IsDBNull(1) ? null : reader.GetString(1),
+            UArticleNo = reader.IsDBNull(2) ? null : reader.GetString(2),
+            UMdlTest = reader.IsDBNull(3) ? null : reader.GetString(3),
+            Manufacturer = reader.IsDBNull(4) ? null : reader.GetString(4),
+            SapUpdateTs = CombineUpdateTimestamp(updateDate, updateTs),
+        };
+    }
+
+    /// <summary>
+    /// OITM.UpdateDate carries the date; UpdateTS the time as an integer (HHMMSS, older
+    /// rows HHMM). An undecodable time degrades to the bare date rather than failing —
+    /// the value is audit metadata on the refresh-queue row, never a correctness input.
+    /// </summary>
+    private static DateTime? CombineUpdateTimestamp(DateTime? updateDate, int? updateTs)
+    {
+        if (updateDate is not { } date) return null;
+        if (updateTs is not { } ts || ts < 0) return date;
+
+        int hh, mm, ss;
+        if (ts > 9999) { hh = ts / 10000; mm = ts / 100 % 100; ss = ts % 100; }
+        else { hh = ts / 100; mm = ts % 100; ss = 0; }
+        if (hh > 23 || mm > 59 || ss > 59) return date;
+        return date.Date.AddHours(hh).AddMinutes(mm).AddSeconds(ss);
     }
 
     // ── Stock ────────────────────────────────────────────────────────
