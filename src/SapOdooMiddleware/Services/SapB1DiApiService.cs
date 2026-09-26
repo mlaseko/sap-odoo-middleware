@@ -7294,7 +7294,13 @@ ORDER BY PostingDate, DocumentNumber";
 
                 var ctx = $"item {request.ItemCode}";
                 if (request.UMdlTest is not null)
+                {
+                    // U_MdlTEST is the brand truth field; U_ItemManufacturer mirrors it
+                    // (decision 26 Sep 2026) — same as the older Autohub create path, so
+                    // API-created items no longer leave the manufacturer empty.
                     TrySetUserField(items.UserFields, "U_MdlTEST", request.UMdlTest, ctx);
+                    TrySetUserField(items.UserFields, "U_ItemManufacturer", request.UMdlTest, ctx);
+                }
                 if (request.UItemName is not null)
                     TrySetUserField(items.UserFields, "U_Item_Name", request.UItemName, ctx);
                 if (request.UArticleNo is not null)
@@ -7372,7 +7378,12 @@ ORDER BY PostingDate, DocumentNumber";
 
                 var ctx = $"item {itemCode}";
                 if (request.UMdlTest is not null)
+                {
+                    // U_MdlTEST is the brand truth field; keep U_ItemManufacturer as its
+                    // mirror (decision 26 Sep 2026), so the two never drift again.
                     TrySetUserField(items.UserFields, "U_MdlTEST", request.UMdlTest, ctx);
+                    TrySetUserField(items.UserFields, "U_ItemManufacturer", request.UMdlTest, ctx);
+                }
                 if (request.UItemName is not null)
                     TrySetUserField(items.UserFields, "U_Item_Name", request.UItemName, ctx);
                 if (request.UArticleNo is not null)
@@ -7388,6 +7399,45 @@ ORDER BY PostingDate, DocumentNumber";
 
                 _logger.LogInformation(
                     "SAP item updated via Item Master API: ItemCode={ItemCode}", itemCode);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task SetItemManufacturerAsync(string itemCode, string value, CancellationToken ct)
+    {
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            var items = (Items)_company!.GetBusinessObject(BoObjectTypes.oItems);
+            try
+            {
+                if (!items.GetByKey(itemCode))
+                    throw new InvalidOperationException($"SAP item '{itemCode}' not found.");
+
+                // Fail loudly (unlike the create paths' best-effort writes): the whole
+                // point of the alignment run is that this exact field gets the value.
+                if (!TrySetUserField(items.UserFields, "U_ItemManufacturer", value, $"item {itemCode}"))
+                    throw new InvalidOperationException(
+                        $"Could not assign U_ItemManufacturer on {itemCode} — check the UDF definition (CUFD).");
+
+                int result = items.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Items.Update failed for {itemCode} [{errCode}]: {errMsg}");
+                }
             }
             finally
             {

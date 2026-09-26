@@ -71,6 +71,12 @@ public interface IAutohubInventorySqlService
     /// </summary>
     Task<OitmIdentitySnapshot?> GetItemIdentitySnapshotAsync(string itemCode, CancellationToken ct);
 
+    /// <summary>
+    /// OITM rows whose U_ItemManufacturer is empty or differs (case/whitespace-
+    /// insensitive) from the U_MdlTEST brand truth field — the one-time alignment list.
+    /// </summary>
+    Task<List<ManufacturerMismatchRow>> GetManufacturerMismatchesAsync(CancellationToken ct);
+
     /// <summary>Open transfer request lines with item details (spec §8.1), oldest first.</summary>
     Task<List<OpenTransferRequestLine>> GetOpenTransferRequestsAsync(
         string? fromWhs, string? toWhs, CancellationToken ct);
@@ -410,6 +416,33 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             Manufacturer = reader.IsDBNull(4) ? null : reader.GetString(4),
             SapUpdateTs = CombineUpdateTimestamp(updateDate, updateTs),
         };
+    }
+
+    public async Task<List<ManufacturerMismatchRow>> GetManufacturerMismatchesAsync(CancellationToken ct)
+    {
+        const string sql = """
+            SELECT ItemCode, U_MdlTEST, U_ItemManufacturer, UpdateDate
+            FROM OITM
+            WHERE ISNULL(LTRIM(RTRIM(U_ItemManufacturer)), '') = ''
+               OR UPPER(LTRIM(RTRIM(U_MdlTEST))) <> UPPER(LTRIM(RTRIM(U_ItemManufacturer)))
+            ORDER BY ItemCode;
+            """;
+
+        var rows = new List<ManufacturerMismatchRow>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new ManufacturerMismatchRow
+            {
+                ItemCode = reader.GetString(0),
+                UMdlTest = reader.IsDBNull(1) ? null : reader.GetString(1),
+                Manufacturer = reader.IsDBNull(2) ? null : reader.GetString(2),
+                UpdateDate = reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+            });
+        }
+        return rows;
     }
 
     /// <summary>

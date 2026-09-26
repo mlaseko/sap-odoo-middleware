@@ -124,8 +124,11 @@ public class SapItemsController : ControllerBase
     /// <summary>
     /// POST /api/sap/items
     /// Creates an Autohub item. Fixed by the backend: PurchaseItem/SalesItem/
-    /// InventoryItem = Yes, VatGroupSales = TZ, VatGroupPurchases = TZS, no
-    /// Manufacturer. Optional prices for PL01-PL05 (TZS).
+    /// InventoryItem = Yes, VatGroupSales = TZ, VatGroupPurchases = TZS, no standard
+    /// Manufacturer/FirmCode (U_ItemManufacturer mirrors U_MdlTEST, the brand truth
+    /// field). Optional prices for PL01-PL05 (TZS). After the SAP commit the item is
+    /// published to the Neon <c>oitm_refresh_queue</c> (all four tracked fields) so the
+    /// DGX worker creates + enriches it without waiting for nightly reconciliation.
     /// </summary>
     [HttpPost("items")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
@@ -166,11 +169,16 @@ public class SapItemsController : ControllerBase
 
             await _sap.CreateItemMasterAsync(request, ct);
 
+            // SAP has committed — publish the new item to the Neon refresh queue so the
+            // DGX worker creates + enriches it without waiting for nightly reconciliation.
+            var queued = await TryEnqueueNeonRefreshForCreateAsync(request);
+
             return Ok(ApiResponse<object>.Ok(new
             {
                 item_code = request.ItemCode,
                 item_group_code = request.ItemGroupCode,
                 prices_set = request.Prices?.ToListNumMap().Count ?? 0,
+                neon_refresh_queued = queued,
             }));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("already exists"))
@@ -248,6 +256,95 @@ public class SapItemsController : ControllerBase
         }));
     }
 
+    /// <summary>
+    /// POST /api/sap/items/align-manufacturer?dry_run=true
+    /// One-time repair (decision 26 Sep 2026): U_MdlTEST is the brand truth field, so
+    /// set U_ItemManufacturer = U_MdlTEST wherever the mirror is empty or differs
+    /// (case/whitespace-insensitive). dry_run=true (the default) only lists the rows;
+    /// dry_run=false applies each fix through the DI API (GetByKey → set UDF → Update)
+    /// so SAP's own validation and logging apply. Writes NO refresh-queue rows: the
+    /// brand the catalogue carries (U_MdlTEST) is unchanged by this repair.
+    /// </summary>
+    [HttpPost("items/align-manufacturer")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> AlignManufacturer(
+        [FromQuery(Name = "dry_run")] bool dryRun = true, CancellationToken ct = default)
+    {
+        try
+        {
+            var mismatches = await _sql.GetManufacturerMismatchesAsync(ct);
+            var rows = new List<object>();
+            int aligned = 0, failed = 0, skipped = 0;
+
+            foreach (var row in mismatches)
+            {
+                var brand = row.UMdlTest?.Trim();
+                if (string.IsNullOrEmpty(brand))
+                {
+                    skipped++;
+                    rows.Add(new
+                    {
+                        item_code = row.ItemCode,
+                        manufacturer_before = row.Manufacturer,
+                        status = "skipped: U_MdlTEST is empty — nothing to copy",
+                    });
+                    continue;
+                }
+                if (dryRun)
+                {
+                    rows.Add(new
+                    {
+                        item_code = row.ItemCode,
+                        brand,
+                        manufacturer_before = row.Manufacturer,
+                        status = "would set U_ItemManufacturer = U_MdlTEST",
+                    });
+                    continue;
+                }
+                try
+                {
+                    await _sap.SetItemManufacturerAsync(row.ItemCode, brand, ct);
+                    aligned++;
+                    rows.Add(new
+                    {
+                        item_code = row.ItemCode,
+                        brand,
+                        manufacturer_before = row.Manufacturer,
+                        status = "aligned",
+                    });
+                }
+                catch (Exception ex)
+                {
+                    failed++;
+                    _logger.LogError(ex, "Manufacturer alignment failed for {ItemCode}", row.ItemCode);
+                    rows.Add(new
+                    {
+                        item_code = row.ItemCode,
+                        brand,
+                        manufacturer_before = row.Manufacturer,
+                        status = $"failed: {ex.Message}",
+                    });
+                }
+            }
+
+            return Ok(ApiResponse<object>.Ok(new
+            {
+                dry_run = dryRun,
+                total = mismatches.Count,
+                aligned,
+                failed,
+                skipped,
+                rows,
+            }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Manufacturer alignment run failed.");
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
+    }
+
     // ── Neon refresh queue (oitm_refresh_queue) ──────────────────────────
 
     /// <summary>
@@ -321,14 +418,62 @@ public class SapItemsController : ControllerBase
         }
     }
 
-    /// <summary>Maps the OITM snapshot onto the worker's JSON contract. Brand prefers
-    /// U_ItemManufacturer (the SAP truth field); API-created items only carry the brand
-    /// in U_MdlTEST, so that is the fallback.</summary>
+    /// <summary>
+    /// Queue payload for a freshly created item: no before_value, all four tracked
+    /// fields marked changed, so the DGX worker creates the Neon row from after_value
+    /// and fully enriches it instead of waiting for the nightly reconciliation.
+    /// Never throws — SAP is the system of record.
+    /// </summary>
+    private async Task<bool> TryEnqueueNeonRefreshForCreateAsync(SapItemCreateApiRequest request)
+    {
+        try
+        {
+            OitmIdentitySnapshot? after = null;
+            try
+            {
+                after = await _sql.GetItemIdentitySnapshotAsync(request.ItemCode, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Post-create OITM snapshot failed for {ItemCode}; building after_value from the request.",
+                    request.ItemCode);
+            }
+            after ??= new OitmIdentitySnapshot
+            {
+                ItemCode = request.ItemCode,
+                OemChain = request.ItemName,
+                UItemName = request.UItemName,
+                UArticleNo = request.UArticleNo,
+                UMdlTest = request.UMdlTest,
+            };
+
+            var changed = new List<string> { "name", "article_number", "brand", "oem_numbers" };
+            await _refreshQueue.EnqueueAsync(
+                request.ItemCode, changed, before: null, ToRefreshValues(after),
+                after.SapUpdateTs, request.RequestedBy, CancellationToken.None);
+
+            _logger.LogInformation("Neon refresh queued for created item {ItemCode}.", request.ItemCode);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Neon oitm_refresh_queue insert failed for created item {ItemCode} — the SAP item exists; " +
+                "the nightly DGX reconciliation will pick it up.", request.ItemCode);
+            return false;
+        }
+    }
+
+    /// <summary>Maps the OITM snapshot onto the worker's JSON contract. Brand comes from
+    /// U_MdlTEST — the brand truth field (decision 26 Sep 2026); U_ItemManufacturer is
+    /// only a mirror of it and on ~62 legacy rows holds a stale value, so preferring it
+    /// would queue the OLD brand after a brand edit.</summary>
     private static OitmRefreshValues ToRefreshValues(OitmIdentitySnapshot s) => new()
     {
         ItemName = s.UItemName,
         ArticleNumber = s.UArticleNo,
-        Brand = !string.IsNullOrWhiteSpace(s.Manufacturer) ? s.Manufacturer : s.UMdlTest,
+        Brand = s.UMdlTest,
         OemChain = s.OemChain,
     };
 

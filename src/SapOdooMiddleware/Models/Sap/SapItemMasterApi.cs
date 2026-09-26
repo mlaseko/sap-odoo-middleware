@@ -25,6 +25,12 @@ public class SapItemCreateApiRequest
 
     /// <summary>Prices for SAP price lists 1-5 (TZS). Omitted lists are left at 0.</summary>
     [JsonPropertyName("prices")] public SapItemPricesDto? Prices { get; set; }
+
+    /// <summary>
+    /// Optional: the app username creating the item. Stored on the Neon refresh-queue
+    /// row (<c>requested_by</c>) for the DGX worker's audit trail; never written to SAP.
+    /// </summary>
+    [JsonPropertyName("requestedBy")] public string? RequestedBy { get; set; }
 }
 
 /// <summary>
@@ -67,6 +73,18 @@ public class SapItemUpdateApiRequest
     /// toward the "at least one editable field" rule and is never written to SAP.
     /// </summary>
     [JsonPropertyName("requestedBy")] public string? RequestedBy { get; set; }
+}
+
+/// <summary>
+/// One OITM row whose U_ItemManufacturer mirror is empty or out of step with the
+/// U_MdlTEST brand truth field — input to the one-time alignment run.
+/// </summary>
+public sealed class ManufacturerMismatchRow
+{
+    public string ItemCode { get; set; } = "";
+    public string? UMdlTest { get; set; }
+    public string? Manufacturer { get; set; }
+    public DateTime? UpdateDate { get; set; }
 }
 
 /// <summary>
