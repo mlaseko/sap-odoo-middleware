@@ -33,6 +33,47 @@ public class SapItemsController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/sap/items?q={text}&amp;limit={n}
+    /// Live SAP item search for warehouse staff holding an OEM number, article
+    /// number, part of the name, or part of the code. Case-insensitive and
+    /// space/dash-insensitive across ItemCode, ItemName, U_Article_No and
+    /// U_OE_Numbers ("/"-joined). Ranked: ItemCode prefix → exact article/OE
+    /// match → contains. Same element shape as GET /items/{itemCode}, except
+    /// prices are not populated (speed). No match → 200 with an empty array.
+    /// </summary>
+    [HttpGet("items")]
+    [ProducesResponseType(typeof(ApiResponse<List<SapItemMasterDto>>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> SearchItems(
+        [FromQuery(Name = "q")] string? q,
+        [FromQuery(Name = "limit")] int limit = 20,
+        CancellationToken ct = default)
+    {
+        var raw = q?.Trim() ?? "";
+        if (raw.Length is < 2 or > 50)
+            return BadRequest(ApiResponse<object>.Fail("q is required (2 to 50 characters)."));
+
+        // Match ignoring spaces and dashes, per the agreed contract.
+        var normalized = raw.Replace(" ", "").Replace("-", "");
+        if (normalized.Length < 2)
+            return BadRequest(ApiResponse<object>.Fail("q must contain at least 2 searchable characters."));
+
+        limit = Math.Clamp(limit, 1, 50);
+
+        try
+        {
+            var items = await _sql.SearchItemMasterAsync(normalized, limit, ct);
+            return Ok(ApiResponse<List<SapItemMasterDto>>.Ok(items));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Item Master search failed for q={Query}", raw);
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// GET /api/sap/items/{itemCode}
     /// The live item master row: item name, group, the four editable UDFs plus
     /// U_OE_Numbers, active/frozen flags, total on-hand and PL01-PL05 prices.
