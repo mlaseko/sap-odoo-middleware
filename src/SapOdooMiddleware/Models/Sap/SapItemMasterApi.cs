@@ -60,6 +60,34 @@ public class SapItemUpdateApiRequest
     [JsonPropertyName("U_MdlTEST")] public string? UMdlTest { get; set; }
     [JsonPropertyName("U_Item_Name")] public string? UItemName { get; set; }
     [JsonPropertyName("U_Article_No")] public string? UArticleNo { get; set; }
+
+    /// <summary>
+    /// Optional: the app username making the change. Stored on the Neon refresh-queue
+    /// row (<c>requested_by</c>) for the DGX worker's audit trail; it does not count
+    /// toward the "at least one editable field" rule and is never written to SAP.
+    /// </summary>
+    [JsonPropertyName("requestedBy")] public string? RequestedBy { get; set; }
+}
+
+/// <summary>
+/// Live OITM identity fields read directly by SQL around a PATCH — the before/after
+/// snapshots for the Neon <c>oitm_refresh_queue</c> payload. Not a wire DTO.
+/// </summary>
+public sealed class OitmIdentitySnapshot
+{
+    public string ItemCode { get; set; } = "";
+    /// <summary>OITM.ItemName — in Autohub this column holds the "/"-joined OEM chain.</summary>
+    public string? OemChain { get; set; }
+    /// <summary>U_Item_Name — the descriptive part name.</summary>
+    public string? UItemName { get; set; }
+    /// <summary>U_Article_No — the supplier/manufacturer article number.</summary>
+    public string? UArticleNo { get; set; }
+    /// <summary>U_MdlTEST — the app's brand field (mirrors U_ItemManufacturer).</summary>
+    public string? UMdlTest { get; set; }
+    /// <summary>U_ItemManufacturer — the brand as held in SAP.</summary>
+    public string? Manufacturer { get; set; }
+    /// <summary>OITM.UpdateDate + UpdateTS combined; null when the row has never been updated.</summary>
+    public DateTime? SapUpdateTs { get; set; }
 }
 
 /// <summary>Prices per list (PL01-PL05) as read from ITM1; a missing list is null.</summary>

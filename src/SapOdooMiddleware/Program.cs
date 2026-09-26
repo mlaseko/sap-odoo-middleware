@@ -277,6 +277,9 @@ builder.Services.AddScoped<ILubesInventoryForecastService, LubesInventoryForecas
 // and caches the OWHS warehouse list in-process.
 builder.Services.AddSingleton<IAutohubInventorySqlService, AutohubInventorySqlService>();
 builder.Services.AddSingleton<IBinResolver, BinResolver>();
+// Neon oitm_refresh_queue publisher (Item Master PATCH → DGX re-enrichment). Singleton,
+// resolves Companies:Autohub:Neon directly — /api/sap is outside the /autohub URL-tenant scope.
+builder.Services.AddSingleton<IOitmRefreshQueueRepository, OitmRefreshQueueRepository>();
 // Numbering series per inventory doc type (spec §6.4) — defaults in code, overridable in config.
 builder.Services.Configure<AutohubInventorySettings>(builder.Configuration.GetSection(AutohubInventorySettings.SectionName));
 // Fire-and-forget mirror refresh nudge to the zone-fulfillment sync service after
