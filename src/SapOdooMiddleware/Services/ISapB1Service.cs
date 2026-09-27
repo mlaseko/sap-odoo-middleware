@@ -518,8 +518,9 @@ public interface ISapB1Service
     Task CreateItemMasterAsync(SapItemCreateApiRequest request, CancellationToken ct);
 
     /// <summary>
-    /// Updates ONLY ItemName + the U_MdlTEST / U_Item_Name / U_Article_No UDFs on an
-    /// existing OITM item (null fields are left untouched) in one Items.Update.
+    /// Updates ONLY ItemName + the U_MdlTEST / U_Item_Name / U_Article_No / U_OE_Numbers
+    /// UDFs on an existing OITM item (null fields are left untouched) in one Items.Update.
+    /// A U_MdlTEST value is mirrored onto U_ItemManufacturer.
     /// </summary>
     Task UpdateItemMasterFieldsAsync(
         string itemCode, SapItemUpdateApiRequest request, CancellationToken ct);

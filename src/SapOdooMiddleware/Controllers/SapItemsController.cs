@@ -194,8 +194,9 @@ public class SapItemsController : ControllerBase
 
     /// <summary>
     /// PATCH /api/sap/items/{itemCode}
-    /// Updates ONLY ItemName, U_MdlTEST, U_Item_Name, U_Article_No. Omitted (null)
-    /// fields are left untouched; no other Item Master fields are editable here.
+    /// Updates ONLY ItemName, U_MdlTEST, U_Item_Name, U_Article_No, U_OE_Numbers.
+    /// Omitted (null) fields are left untouched; no other Item Master fields are
+    /// editable here. A U_MdlTEST value is mirrored onto U_ItemManufacturer.
     /// After the SAP write commits, an identity change (name / article number / brand /
     /// OEM numbers) is published to the Neon <c>oitm_refresh_queue</c> for the DGX
     /// worker; a Neon failure never fails this call (nightly reconciliation catches it).
@@ -211,9 +212,10 @@ public class SapItemsController : ControllerBase
         if (string.IsNullOrWhiteSpace(itemCode))
             return BadRequest(ApiResponse<object>.Fail("itemCode is required in the URL."));
         if (request.ItemName is null && request.UMdlTest is null
-            && request.UItemName is null && request.UArticleNo is null)
+            && request.UItemName is null && request.UArticleNo is null
+            && request.UOeNumbers is null)
             return BadRequest(ApiResponse<object>.Fail(
-                "Provide at least one of: itemName, U_MdlTEST, U_Item_Name, U_Article_No."));
+                "Provide at least one of: itemName, U_MdlTEST, U_Item_Name, U_Article_No, U_OE_Numbers."));
 
         var code = itemCode.Trim();
 
@@ -352,7 +354,8 @@ public class SapItemsController : ControllerBase
     /// Never throws: SAP is the system of record, so a Neon failure is logged and the
     /// call still succeeds (the DGX nightly reconciliation catches the missed item).
     /// Only identity fields queue a row — a U_MdlTEST/brand, U_Item_Name/name,
-    /// U_Article_No/article or ItemName/OEM-chain change; a no-op edit queues nothing.
+    /// U_Article_No/article, ItemName/OEM-chain or U_OE_Numbers change; a no-op edit
+    /// queues nothing.
     /// </summary>
     private async Task<(bool Queued, List<string> ChangedFields)> TryEnqueueNeonRefreshAsync(
         string itemCode, SapItemUpdateApiRequest request, OitmIdentitySnapshot? before)
@@ -380,6 +383,7 @@ public class SapItemsController : ControllerBase
                 UArticleNo = request.UArticleNo ?? before?.UArticleNo,
                 UMdlTest = request.UMdlTest ?? before?.UMdlTest,
                 Manufacturer = before?.Manufacturer,
+                UOeNumbers = request.UOeNumbers ?? before?.UOeNumbers,
             };
 
             // Which of the worker's four tracked fields actually changed. Without a
@@ -393,8 +397,12 @@ public class SapItemsController : ControllerBase
             if (request.UMdlTest is not null
                 && (before is null || Differs(before.UMdlTest, after.UMdlTest)))
                 changed.Add("brand");
-            if (!string.IsNullOrWhiteSpace(request.ItemName)
-                && (before is null || Differs(before.OemChain, after.OemChain)))
+            // OEM data lives in two places: OITM.ItemName (the oem_chain the worker
+            // reads) and the U_OE_Numbers UDF. A change to either counts as oem_numbers.
+            if ((!string.IsNullOrWhiteSpace(request.ItemName)
+                    && (before is null || Differs(before.OemChain, after.OemChain)))
+                || (request.UOeNumbers is not null
+                    && (before is null || Differs(before.UOeNumbers, after.UOeNumbers))))
                 changed.Add("oem_numbers");
 
             if (changed.Count == 0) return (false, changed);
