@@ -11,11 +11,32 @@ namespace SapOdooMiddleware.Services.Autohub;
 /// </summary>
 public sealed record PricingResult(decimal Cost, decimal Retail, decimal Wholesale, decimal RatioUsed);
 
+/// <summary>
+/// The full pricing trace for the operator review gate: the final prices PLUS every
+/// intermediate the reviewer needs to see WHY (which brand row matched, which cost band,
+/// whether the brand floor bound, and the rounding step applied to retail). Cost = CIF ×
+/// CostMarkupMultiplier — the band keys on this post-markup cost, not the raw CIF.
+/// </summary>
+public sealed record PricingQuote(
+    decimal Cif, decimal Cost, decimal Retail, decimal Wholesale,
+    decimal Ratio, string RatioBrand, decimal BandMin, decimal? BandMax,
+    bool FloorApplied, decimal? Floor, int RetailRoundingStep);
+
 public interface IPricingCalculationService
 {
     /// <param name="supplierPriceTzs">Supplier unit price already converted to TZS (pre-markup).</param>
     /// <param name="brand">Supplier brand from extraction; matched to BORSEHUNG/DPA/OE/VIKA, else DEFAULT.</param>
     Task<PricingResult> CalculateAsync(decimal supplierPriceTzs, string brand, CancellationToken ct);
+
+    /// <summary>Same calculation as <see cref="CalculateAsync"/>, returning the full trace.</summary>
+    Task<PricingQuote> CalculateDetailedAsync(decimal supplierPriceTzs, string brand, CancellationToken ct);
+
+    /// <summary>
+    /// The engine's wholesale rule for a given cost/retail pair — floor(retail − (retail −
+    /// cost)/2) to the rounding step, nudged above cost. Used when a reviewer overrides PL03
+    /// and PL05 must follow the same derivation Bulk Create uses.
+    /// </summary>
+    Task<decimal> DeriveWholesaleAsync(decimal cost, decimal retail, CancellationToken ct);
 }
 
 /// <summary>
@@ -46,6 +67,12 @@ public sealed class PricingCalculationService : IPricingCalculationService
 
     public async Task<PricingResult> CalculateAsync(decimal supplierPriceTzs, string brand, CancellationToken ct)
     {
+        var q = await CalculateDetailedAsync(supplierPriceTzs, brand, ct);
+        return new PricingResult(q.Cost, q.Retail, q.Wholesale, q.Ratio);
+    }
+
+    public async Task<PricingQuote> CalculateDetailedAsync(decimal supplierPriceTzs, string brand, CancellationToken ct)
+    {
         if (supplierPriceTzs <= 0m)
             throw new ArgumentOutOfRangeException(nameof(supplierPriceTzs), "Supplier price must be > 0.");
 
@@ -53,10 +80,16 @@ public sealed class PricingCalculationService : IPricingCalculationService
         var cost = Round2(supplierPriceTzs * _settings.CostMarkupMultiplier);
 
         var key = string.IsNullOrWhiteSpace(brand) ? "DEFAULT" : brand.Trim();
-        var ratio = await _ratios.GetCostToRetailRatioAsync(key, cost, ct)
-                    ?? await _ratios.GetCostToRetailRatioAsync("DEFAULT", cost, ct)
-                    ?? throw new InvalidOperationException(
-                        $"No pricing_brand_ratios band (incl. DEFAULT) covers cost {cost} TZS — check the seed.");
+        var ratioBrand = key;
+        var band = await _ratios.GetRatioBandAsync(key, cost, ct);
+        if (band is null && !string.Equals(key, "DEFAULT", StringComparison.OrdinalIgnoreCase))
+        {
+            ratioBrand = "DEFAULT";
+            band = await _ratios.GetRatioBandAsync("DEFAULT", cost, ct);
+        }
+        if (band is null)
+            throw new InvalidOperationException(
+                $"No pricing_brand_ratios band (incl. DEFAULT) covers cost {cost} TZS — check the seed.");
 
         var rules = await _rounding.GetRulesAsync(ct);
 
@@ -64,20 +97,30 @@ public sealed class PricingCalculationService : IPricingCalculationService
         // ratio and BEFORE rounding: cost-plus breaks down on cheap parts, where the
         // settled price is a floor, not a markup. Keyed by the actual brand (no
         // DEFAULT fallback), so it applies even when the ratio fell back to DEFAULT.
-        var retailRaw = cost / ratio;
+        var retailRaw = cost / band.Ratio;
         var floor = await _ratios.GetMinRetailFloorAsync(key, ct);
-        if (floor is { } minSell && retailRaw < minSell)
-            retailRaw = minSell;
+        var floorApplied = floor is { } minSell && retailRaw < minSell;
+        if (floorApplied)
+            retailRaw = floor!.Value;
 
+        var roundingStep = IncrementFor(retailRaw, rules);
         var retail = RoundCeiling(retailRaw, rules);
-        var wholesaleRaw = retail - (retail - cost) / 2m;
-        var wholesale = RoundFloor(wholesaleRaw, rules);
+        var wholesale = DeriveWholesale(cost, retail, rules);
 
+        return new PricingQuote(
+            Cif: supplierPriceTzs, Cost: cost, Retail: retail, Wholesale: wholesale,
+            Ratio: band.Ratio, RatioBrand: ratioBrand, BandMin: band.BandMin, BandMax: band.BandMax,
+            FloorApplied: floorApplied, Floor: floor, RetailRoundingStep: roundingStep);
+    }
+
+    public async Task<decimal> DeriveWholesaleAsync(decimal cost, decimal retail, CancellationToken ct)
+        => DeriveWholesale(cost, retail, await _rounding.GetRulesAsync(ct));
+
+    private decimal DeriveWholesale(decimal cost, decimal retail, IReadOnlyList<RoundingRule> rules)
+    {
+        var wholesale = RoundFloor(retail - (retail - cost) / 2m, rules);
         // Wholesale must clear cost; if rounding pulled it to/below cost, nudge it above.
-        if (wholesale <= cost)
-            wholesale = cost + _settings.WholesaleFloorOverCost;
-
-        return new PricingResult(cost, retail, wholesale, ratio);
+        return wholesale <= cost ? cost + _settings.WholesaleFloorOverCost : wholesale;
     }
 
     private static decimal Round2(decimal v) => Math.Round(v, 2, MidpointRounding.AwayFromZero);

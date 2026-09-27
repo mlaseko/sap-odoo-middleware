@@ -3,6 +3,9 @@ using SapOdooMiddleware.Configuration;
 
 namespace SapOdooMiddleware.Persistence;
 
+/// <summary>The matched pricing_brand_ratios row: the ratio plus the band that produced it.</summary>
+public sealed record RatioBand(decimal Ratio, decimal BandMin, decimal? BandMax);
+
 public interface IPricingBrandRatioRepository
 {
     /// <summary>
@@ -11,6 +14,12 @@ public interface IPricingBrandRatioRepository
     /// the brand has no active band covering that cost (caller retries with 'DEFAULT').
     /// </summary>
     Task<decimal?> GetCostToRetailRatioAsync(string brand, decimal costTzs, CancellationToken ct);
+
+    /// <summary>
+    /// Same match as <see cref="GetCostToRetailRatioAsync"/>, but returns the band bounds with the
+    /// ratio — for the price preview, which shows the reviewer WHICH band actually applied.
+    /// </summary>
+    Task<RatioBand?> GetRatioBandAsync(string brand, decimal costTzs, CancellationToken ct);
 
     /// <summary>
     /// The active minimum selling price (PL03 floor, TZS, pre-rounding) for the brand from
@@ -34,9 +43,12 @@ public sealed class PricingBrandRatioRepository : IPricingBrandRatioRepository
     private string ConnectionString => _company.Current.Neon.ConnectionString;
 
     public async Task<decimal?> GetCostToRetailRatioAsync(string brand, decimal costTzs, CancellationToken ct)
+        => (await GetRatioBandAsync(brand, costTzs, ct))?.Ratio;
+
+    public async Task<RatioBand?> GetRatioBandAsync(string brand, decimal costTzs, CancellationToken ct)
     {
         const string sql = """
-            SELECT "CostToRetailRatio"
+            SELECT "CostToRetailRatio", "BandMin", "BandMax"
             FROM pricing_brand_ratios
             WHERE UPPER("Brand") = UPPER(@brand)
               AND "BandMin" <= @cost
@@ -50,8 +62,12 @@ public sealed class PricingBrandRatioRepository : IPricingBrandRatioRepository
         await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("brand", brand);
         cmd.Parameters.AddWithValue("cost", costTzs);
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result is null or DBNull ? null : Convert.ToDecimal(result);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        return new RatioBand(
+            Ratio: reader.GetDecimal(0),
+            BandMin: reader.GetDecimal(1),
+            BandMax: await reader.IsDBNullAsync(2, ct) ? null : reader.GetDecimal(2));
     }
 
     public async Task<decimal?> GetMinRetailFloorAsync(string brand, CancellationToken ct)

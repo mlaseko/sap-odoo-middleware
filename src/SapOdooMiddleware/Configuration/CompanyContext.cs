@@ -59,7 +59,10 @@ public sealed class CompanyContext : ICompanyContext
     public static string ResolveCompanyKey(PathString path)
     {
         var p = path.Value ?? string.Empty;
-        if (HasSegment(p, "/autohub") || HasSegment(p, "/api/autohub"))
+        // /api/sap is the Autohub (MOLAS_Live_2021) Item Master API, so tenant-scoped
+        // services (pricing repos, Neon) must resolve to Autohub there too. Segment-aware:
+        // /api/sapb1 (the Lubes ping) does NOT match.
+        if (HasSegment(p, "/autohub") || HasSegment(p, "/api/autohub") || HasSegment(p, "/api/sap"))
             return AutohubKey;
         return LubesKey;
     }

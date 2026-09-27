@@ -46,6 +46,9 @@ public class CompanyContextTests
     [InlineData("/autohub/documents/upload", "Autohub")]
     [InlineData("/api/autohub/documents", "Autohub")]
     [InlineData("/autohubX", "Lubes")]   // segment-aware: not a real /autohub path
+    [InlineData("/api/sap/items", "Autohub")]            // Item Master API = Autohub company
+    [InlineData("/api/sap/item-groups", "Autohub")]
+    [InlineData("/api/sapb1/ping", "Lubes")]             // segment-aware: /api/sapb1 is NOT /api/sap
     public void ResolveCompanyKey_MapsUrlPrefixToTenant(string path, string expected)
     {
         Assert.Equal(expected, CompanyContext.ResolveCompanyKey(new PathString(path)));
