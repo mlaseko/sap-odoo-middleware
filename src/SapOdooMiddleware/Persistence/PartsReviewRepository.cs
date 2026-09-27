@@ -25,7 +25,8 @@ public sealed record PartsReviewLineRow(
 public sealed record PartsProvisioningLine(
     Guid Id, string? SupplierArticleNumber, List<string> OemNumbers, string? Brand,
     string? Description, decimal? UnitPriceForeign, bool EnrichmentConfirmed,
-    long? NeonOitmId, string? EnrichmentPayloadJson, string? MatchStrategy);
+    long? NeonOitmId, string? EnrichmentPayloadJson, string? MatchStrategy,
+    decimal? DiscountPct = null);
 
 /// <summary>A line awaiting background enrichment.</summary>
 public sealed record EnrichmentCandidate(
@@ -629,7 +630,7 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         const string sql = """
             SELECT "Id","SupplierArticleNumber","OemNumbers","Brand","Description","UnitPriceForeign",
                    ("EnrichmentConfirmedAt" IS NOT NULL) AS confirmed,
-                   "NeonOitmId", "EnrichmentPayloadJson", "MatchStrategy"
+                   "NeonOitmId", "EnrichmentPayloadJson", "MatchStrategy", "DiscountPct"
             FROM public."staging_document_line"
             WHERE "DocumentId" = @doc AND "ReviewStatus" IN ('create_new', 'create_failed')
             ORDER BY "LineNumber";
@@ -651,7 +652,8 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
                 EnrichmentConfirmed:   !r.IsDBNull(6) && r.GetBoolean(6),
                 NeonOitmId:            r.IsDBNull(7) ? null : r.GetInt64(7),
                 EnrichmentPayloadJson: r.IsDBNull(8) ? null : r.GetString(8),
-                MatchStrategy:         r.IsDBNull(9) ? null : r.GetString(9)));
+                MatchStrategy:         r.IsDBNull(9) ? null : r.GetString(9),
+                DiscountPct:           r.IsDBNull(10) ? null : r.GetDecimal(10)));
         }
         return list;
     }

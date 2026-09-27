@@ -22,6 +22,9 @@ public sealed record PricingQuote(
     decimal Ratio, string RatioBrand, decimal BandMin, decimal? BandMax,
     bool FloorApplied, decimal? Floor, int RetailRoundingStep);
 
+/// <summary>One line's outcome in a batch calculation: a quote, or why it could not be priced.</summary>
+public sealed record PricingBatchResult(PricingQuote? Quote, string? Error);
+
 public interface IPricingCalculationService
 {
     /// <param name="supplierPriceTzs">Supplier unit price already converted to TZS (pre-markup).</param>
@@ -30,6 +33,15 @@ public interface IPricingCalculationService
 
     /// <summary>Same calculation as <see cref="CalculateAsync"/>, returning the full trace.</summary>
     Task<PricingQuote> CalculateDetailedAsync(decimal supplierPriceTzs, string brand, CancellationToken ct);
+
+    /// <summary>
+    /// Batch form: the ratio, floor and rounding tables are fetched ONCE (three small
+    /// queries) and every line is matched in memory — a 250-line invoice prices in one
+    /// round-trip set instead of 3 per line. One result per input line, same order; a
+    /// bad line yields an Error without failing the batch.
+    /// </summary>
+    Task<IReadOnlyList<PricingBatchResult>> CalculateBatchDetailedAsync(
+        IReadOnlyList<(decimal SupplierPriceTzs, string? Brand)> lines, CancellationToken ct);
 
     /// <summary>
     /// The engine's wholesale rule for a given cost/retail pair — floor(retail − (retail −
@@ -73,44 +85,82 @@ public sealed class PricingCalculationService : IPricingCalculationService
 
     public async Task<PricingQuote> CalculateDetailedAsync(decimal supplierPriceTzs, string brand, CancellationToken ct)
     {
-        if (supplierPriceTzs <= 0m)
-            throw new ArgumentOutOfRangeException(nameof(supplierPriceTzs), "Supplier price must be > 0.");
+        var result = (await CalculateBatchDetailedAsync(new[] { (supplierPriceTzs, (string?)brand) }, ct))[0];
+        if (result.Quote is null)
+            throw new InvalidOperationException(result.Error ?? "Pricing failed.");
+        return result.Quote;
+    }
 
-        // Markup is applied at cost ingestion; the band ratios then drive retail off this cost.
-        var cost = Round2(supplierPriceTzs * _settings.CostMarkupMultiplier);
-
-        var key = string.IsNullOrWhiteSpace(brand) ? "DEFAULT" : brand.Trim();
-        var ratioBrand = key;
-        var band = await _ratios.GetRatioBandAsync(key, cost, ct);
-        if (band is null && !string.Equals(key, "DEFAULT", StringComparison.OrdinalIgnoreCase))
-        {
-            ratioBrand = "DEFAULT";
-            band = await _ratios.GetRatioBandAsync("DEFAULT", cost, ct);
-        }
-        if (band is null)
-            throw new InvalidOperationException(
-                $"No pricing_brand_ratios band (incl. DEFAULT) covers cost {cost} TZS — check the seed.");
-
+    public async Task<IReadOnlyList<PricingBatchResult>> CalculateBatchDetailedAsync(
+        IReadOnlyList<(decimal SupplierPriceTzs, string? Brand)> lines, CancellationToken ct)
+    {
+        // The three config tables are tiny (dozens of rows) — fetch each once and match
+        // every line in memory. This is what makes a 250-line preview sub-second.
+        var bands = await _ratios.GetAllActiveBandsAsync(ct);
+        var floors = await _ratios.GetAllActiveFloorsAsync(ct);
         var rules = await _rounding.GetRulesAsync(ct);
 
-        // Minimum selling price per brand (pricing_brand_floors), applied AFTER the
-        // ratio and BEFORE rounding: cost-plus breaks down on cheap parts, where the
-        // settled price is a floor, not a markup. Keyed by the actual brand (no
-        // DEFAULT fallback), so it applies even when the ratio fell back to DEFAULT.
-        var retailRaw = cost / band.Ratio;
-        var floor = await _ratios.GetMinRetailFloorAsync(key, ct);
-        var floorApplied = floor is { } minSell && retailRaw < minSell;
-        if (floorApplied)
-            retailRaw = floor!.Value;
+        var results = new List<PricingBatchResult>(lines.Count);
+        foreach (var (cif, brand) in lines)
+        {
+            if (cif <= 0m)
+            {
+                results.Add(new PricingBatchResult(null, "Supplier price must be > 0."));
+                continue;
+            }
 
-        var roundingStep = IncrementFor(retailRaw, rules);
-        var retail = RoundCeiling(retailRaw, rules);
-        var wholesale = DeriveWholesale(cost, retail, rules);
+            // Markup is applied at cost ingestion; the band ratios then drive retail off this cost.
+            var cost = Round2(cif * _settings.CostMarkupMultiplier);
 
-        return new PricingQuote(
-            Cif: supplierPriceTzs, Cost: cost, Retail: retail, Wholesale: wholesale,
-            Ratio: band.Ratio, RatioBrand: ratioBrand, BandMin: band.BandMin, BandMax: band.BandMax,
-            FloorApplied: floorApplied, Floor: floor, RetailRoundingStep: roundingStep);
+            var key = string.IsNullOrWhiteSpace(brand) ? "DEFAULT" : brand.Trim();
+            var ratioBrand = key;
+            var band = MatchBand(bands, key, cost);
+            if (band is null && !string.Equals(key, "DEFAULT", StringComparison.OrdinalIgnoreCase))
+            {
+                ratioBrand = "DEFAULT";
+                band = MatchBand(bands, "DEFAULT", cost);
+            }
+            if (band is null)
+            {
+                results.Add(new PricingBatchResult(null,
+                    $"No pricing_brand_ratios band (incl. DEFAULT) covers cost {cost} TZS — check the seed."));
+                continue;
+            }
+
+            // Minimum selling price per brand (pricing_brand_floors), applied AFTER the
+            // ratio and BEFORE rounding: cost-plus breaks down on cheap parts, where the
+            // settled price is a floor, not a markup. Keyed by the actual brand (no
+            // DEFAULT fallback), so it applies even when the ratio fell back to DEFAULT.
+            var retailRaw = cost / band.Ratio;
+            decimal? floor = floors.TryGetValue(key, out var minSell) ? minSell : null;
+            var floorApplied = floor is { } f && retailRaw < f;
+            if (floorApplied)
+                retailRaw = floor!.Value;
+
+            var roundingStep = IncrementFor(retailRaw, rules);
+            var retail = RoundCeiling(retailRaw, rules);
+            var wholesale = DeriveWholesale(cost, retail, rules);
+
+            results.Add(new PricingBatchResult(new PricingQuote(
+                Cif: cif, Cost: cost, Retail: retail, Wholesale: wholesale,
+                Ratio: band.Ratio, RatioBrand: ratioBrand, BandMin: band.BandMin, BandMax: band.BandMax,
+                FloorApplied: floorApplied, Floor: floor, RetailRoundingStep: roundingStep), null));
+        }
+        return results;
+    }
+
+    /// <summary>The tightest active band for (brand, cost) — same rule as the SQL match:
+    /// BandMin ≤ cost &lt; BandMax (NULL = unbounded), highest BandMin wins.</summary>
+    private static BrandRatioRow? MatchBand(IReadOnlyList<BrandRatioRow> bands, string brand, decimal cost)
+    {
+        BrandRatioRow? best = null;
+        foreach (var b in bands)
+        {
+            if (!string.Equals(b.Brand, brand, StringComparison.OrdinalIgnoreCase)) continue;
+            if (b.BandMin > cost || (b.BandMax is { } max && max <= cost)) continue;
+            if (best is null || b.BandMin > best.BandMin) best = b;
+        }
+        return best;
     }
 
     public async Task<decimal> DeriveWholesaleAsync(decimal cost, decimal retail, CancellationToken ct)

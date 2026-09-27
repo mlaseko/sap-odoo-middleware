@@ -23,6 +23,7 @@ public class SapItemsController : ControllerBase
     private readonly IOitmRefreshQueueRepository _refreshQueue;
     private readonly IPricingCalculationService _pricing;
     private readonly IPricingOverrideRepository _overrides;
+    private readonly IForexRateRepository _forex;
     private readonly IMemoryCache _cache;
     private readonly ILogger<SapItemsController> _logger;
 
@@ -30,6 +31,7 @@ public class SapItemsController : ControllerBase
         IAutohubSapB1Service sap, IAutohubInventorySqlService sql,
         IOitmRefreshQueueRepository refreshQueue,
         IPricingCalculationService pricing, IPricingOverrideRepository overrides,
+        IForexRateRepository forex,
         IMemoryCache cache, ILogger<SapItemsController> logger)
     {
         _sap = sap;
@@ -37,6 +39,7 @@ public class SapItemsController : ControllerBase
         _refreshQueue = refreshQueue;
         _pricing = pricing;
         _overrides = overrides;
+        _forex = forex;
         _cache = cache;
         _logger = logger;
     }
@@ -127,6 +130,58 @@ public class SapItemsController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/sap/pricing/rates[?currency=USD]
+    /// The Autohub exchange rates — read from <c>forex_rate</c> in parts_catalog, the
+    /// SAME versioned per-currency table Bulk Create converts costs with, so the gate
+    /// and Bulk Create can never disagree. (GET /api/pricing/rate is the LUBES EUR-only
+    /// Liqui Moly repricing knob and has nothing to do with Autohub.) Without
+    /// <c>currency</c>, every active currency is returned; with it, that one (404 when
+    /// the table has no active row for it).
+    /// </summary>
+    [HttpGet("pricing/rates")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> GetForexRates(
+        [FromQuery(Name = "currency")] string? currency, CancellationToken ct)
+    {
+        try
+        {
+            var rates = await _forex.GetActiveRatesAsync(ct);
+            if (string.IsNullOrWhiteSpace(currency))
+            {
+                return Ok(ApiResponse<object>.Ok(new
+                {
+                    source = "forex_rate (parts_catalog) — the table Bulk Create prices with",
+                    rates = rates.Select(r => new
+                    {
+                        currency = r.Currency,
+                        rate_to_tzs = r.RateToTzs,
+                        effective_from = r.EffectiveFrom,
+                    }),
+                }));
+            }
+            var one = rates.FirstOrDefault(r =>
+                string.Equals(r.Currency, currency.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (one is null)
+                return NotFound(ApiResponse<object>.Fail(
+                    $"forex_rate has no active row for '{currency.Trim().ToUpperInvariant()}'."));
+            return Ok(ApiResponse<object>.Ok(new
+            {
+                currency = one.Currency,
+                rate_to_tzs = one.RateToTzs,
+                effective_from = one.EffectiveFrom,
+                source = "forex_rate (parts_catalog) — the table Bulk Create prices with",
+            }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Forex rates read failed.");
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/sap/items/price-preview
     /// The operator review gate's dry run: what Bulk Create WOULD produce for a
     /// (brand, cif) pair — final PL01/PL03/PL05 plus every intermediate (the ratio
@@ -158,24 +213,29 @@ public class SapItemsController : ControllerBase
         }
         if (lines is null || lines.Count == 0)
             return BadRequest(ApiResponse<object>.Fail("Provide at least one {brand, cif} line."));
-        if (lines.Count > 200)
-            return BadRequest(ApiResponse<object>.Fail("At most 200 lines per preview call."));
+        if (lines.Count > 500)
+            return BadRequest(ApiResponse<object>.Fail("At most 500 lines per preview call."));
 
-        var results = new List<object>(lines.Count);
-        foreach (var line in lines)
+        try
         {
-            if (line is null || line.Cif <= 0m)
+            // One batch call: the ratio/floor/rounding tables are fetched once, every
+            // line matched in memory — a 250-line invoice prices in one round-trip set.
+            var batch = await _pricing.CalculateBatchDetailedAsync(
+                lines.Select(l => (l?.Cif ?? 0m, l?.Brand)).ToList(), ct);
+
+            var results = new List<object>(batch.Count);
+            for (int i = 0; i < batch.Count; i++)
             {
-                if (!isBatch) return BadRequest(ApiResponse<object>.Fail("cif must be > 0 (TZS)."));
-                results.Add(new { error = "cif must be > 0 (TZS)." });
-                continue;
-            }
-            try
-            {
-                var q = await _pricing.CalculateDetailedAsync(line.Cif, line.Brand ?? "", ct);
+                var (line, r) = (lines[i], batch[i]);
+                if (r.Quote is not { } q)
+                {
+                    if (!isBatch) return BadRequest(ApiResponse<object>.Fail(r.Error ?? "Pricing failed."));
+                    results.Add(new { error = r.Error ?? "Pricing failed." });
+                    continue;
+                }
                 results.Add(new
                 {
-                    brand_used = string.IsNullOrWhiteSpace(line.Brand) ? "DEFAULT" : line.Brand.Trim(),
+                    brand_used = string.IsNullOrWhiteSpace(line?.Brand) ? "DEFAULT" : line!.Brand!.Trim(),
                     ratio_brand = q.RatioBrand,
                     band = new { from = q.BandMin, to = q.BandMax },
                     ratio = q.Ratio,
@@ -188,14 +248,13 @@ public class SapItemsController : ControllerBase
                     rounding_step = q.RetailRoundingStep,
                 });
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Price preview failed for brand={Brand} cif={Cif}", line.Brand, line.Cif);
-                if (!isBatch) return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
-                results.Add(new { error = ex.Message });
-            }
+            return Ok(ApiResponse<object>.Ok(isBatch ? results : results[0]));
         }
-        return Ok(ApiResponse<object>.Ok(isBatch ? results : results[0]));
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Price preview failed ({Count} line(s)).", lines.Count);
+            return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+        }
     }
 
     /// <summary>

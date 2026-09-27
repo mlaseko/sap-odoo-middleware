@@ -13,9 +13,25 @@ namespace SapOdooMiddleware.Services.Autohub;
 /// </summary>
 public sealed record PartsProvisioningOutcome(string Status, string? ItemCode, string? Error);
 
+/// <summary>
+/// Reviewer price decision for one line (the price review gate). At most one of
+/// UnitPriceOverride (corrected invoice unit price, DOCUMENT currency, replaces the
+/// extracted price before forex) and CifOverride (corrected landed cost, TZS pre-markup,
+/// skips forex entirely). Pl03Override is applied to PL03 verbatim, PL05 re-derived.
+/// Every override is recorded in pricing_overrides.
+/// </summary>
+public sealed record PartsLineOverride(
+    decimal? UnitPriceOverride, decimal? CifOverride, decimal? Pl03Override,
+    string? OverrideReason, string? RequestedBy)
+{
+    public bool HasAny => UnitPriceOverride is not null || CifOverride is not null || Pl03Override is not null;
+}
+
 public interface IPartsItemProvisioningService
 {
-    Task<PartsProvisioningOutcome> ProvisionAsync(PartsProvisioningLine line, string? currency, CancellationToken ct);
+    Task<PartsProvisioningOutcome> ProvisionAsync(
+        PartsProvisioningLine line, string? currency, CancellationToken ct,
+        PartsLineOverride? priceOverride = null);
 }
 
 /// <summary>
@@ -38,12 +54,14 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
     private readonly IAutohubSapB1Service _sap;
     private readonly INeonBridgeService _bridge;
     private readonly IPartsReviewRepository _review;
+    private readonly IPricingOverrideRepository _overrides;
     private readonly ILogger<PartsItemProvisioningService> _logger;
 
     public PartsItemProvisioningService(
         IEnrichmentService enrichment, IForexConversionService forex, IPricingCalculationService pricing,
         ISkuGenerationService sku, IOemFilterService filter, IAutohubSapB1Service sap, INeonBridgeService bridge,
-        IPartsReviewRepository review, ILogger<PartsItemProvisioningService> logger)
+        IPartsReviewRepository review, IPricingOverrideRepository overrides,
+        ILogger<PartsItemProvisioningService> logger)
     {
         _enrichment = enrichment;
         _forex = forex;
@@ -53,6 +71,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         _sap = sap;
         _bridge = bridge;
         _review = review;
+        _overrides = overrides;
         _logger = logger;
     }
 
@@ -62,15 +81,25 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         NumberHandling = JsonNumberHandling.AllowReadingFromString,
     };
 
-    public async Task<PartsProvisioningOutcome> ProvisionAsync(PartsProvisioningLine line, string? currency, CancellationToken ct)
+    public async Task<PartsProvisioningOutcome> ProvisionAsync(
+        PartsProvisioningLine line, string? currency, CancellationToken ct,
+        PartsLineOverride? priceOverride = null)
     {
         var article = line.SupplierArticleNumber?.Trim();
         if (string.IsNullOrWhiteSpace(article))
             return await Fail(line.Id, "Line has no supplier article number.", ct);
-        if (line.UnitPriceForeign is not > 0m)
-            return await Fail(line.Id, "Line has no positive unit price.", ct);
-        if (string.IsNullOrWhiteSpace(currency))
-            return await Fail(line.Id, "Document currency is unknown; cannot convert cost.", ct);
+
+        // Cost inputs. A reviewer's corrected invoice price replaces the extracted one
+        // (used as-is — the reviewer sees the final number); a CIF override skips forex
+        // entirely, so neither the unit price nor the currency is required then.
+        var unitPrice = priceOverride?.UnitPriceOverride ?? line.UnitPriceForeign;
+        if (priceOverride?.CifOverride is null)
+        {
+            if (unitPrice is not > 0m)
+                return await Fail(line.Id, "Line has no positive unit price.", ct);
+            if (string.IsNullOrWhiteSpace(currency))
+                return await Fail(line.Id, "Document currency is unknown; cannot convert cost.", ct);
+        }
 
         // Idempotency guard: if a SAP item already exists for this (supplier, article), match it instead of
         // minting a duplicate. Protects against a re-upload / re-run of the same invoice, and against two
@@ -151,19 +180,55 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
                 "Manufacturer could not be resolved automatically — assign the marque so a SAP item code can be generated.", ct);
         var prefix = data.SuggestedSkuPrefix!.Trim();
 
-        // Forex → landed cost (TZS), and the rate we used (for audit).
+        // Forex → landed cost (TZS), and the rate we used (for audit). The extracted
+        // invoice price is gross: a line discount (DiscountPct) reduces the real cost, so
+        // apply it before forex. A reviewer's corrected price is taken as-is (the gate
+        // shows the reviewer the final figure), and a CIF override skips this path.
         decimal costTzs;
+        decimal rate = 0m;
+        if (priceOverride?.CifOverride is { } cifOverride)
+        {
+            costTzs = cifOverride;
+            if (unitPrice is > 0m)
+                rate = Math.Round(costTzs / unitPrice.Value, 6, MidpointRounding.AwayFromZero);
+        }
+        else
+        {
+            var effectiveUnit = unitPrice!.Value;
+            if (priceOverride?.UnitPriceOverride is null
+                && line.DiscountPct is > 0m and < 100m)
+            {
+                effectiveUnit = Math.Round(effectiveUnit * (1m - line.DiscountPct.Value / 100m), 6,
+                    MidpointRounding.AwayFromZero);
+            }
+            try
+            {
+                costTzs = await ConvertToTzsWithRetryAsync(effectiveUnit, currency!, ct);
+            }
+            catch (Exception ex)
+            {
+                return await Fail(line.Id, $"Forex conversion failed after retries: {ex.Message}", ct);
+            }
+            rate = Math.Round(costTzs / effectiveUnit, 6, MidpointRounding.AwayFromZero);
+        }
+
+        PricingQuote quote;
         try
         {
-            costTzs = await ConvertToTzsWithRetryAsync(line.UnitPriceForeign.Value, currency!, ct);
+            quote = await _pricing.CalculateDetailedAsync(costTzs, line.Brand ?? "", ct);
         }
         catch (Exception ex)
         {
-            return await Fail(line.Id, $"Forex conversion failed after retries: {ex.Message}", ct);
+            return await Fail(line.Id, $"Pricing failed: {ex.Message}", ct);
         }
-        var rate = Math.Round(costTzs / line.UnitPriceForeign.Value, 6, MidpointRounding.AwayFromZero);
 
-        var prices = await _pricing.CalculateAsync(costTzs, line.Brand ?? "", ct);
+        // Reviewer PL03 override: applied verbatim (no re-rounding); PL05 re-derived by
+        // the engine's wholesale rule from the applied cost/retail pair.
+        var retail = priceOverride?.Pl03Override ?? quote.Retail;
+        var wholesale = priceOverride?.Pl03Override is not null
+            ? await _pricing.DeriveWholesaleAsync(quote.Cost, retail, ct)
+            : quote.Wholesale;
+        var prices = new PricingResult(quote.Cost, retail, wholesale, quote.Ratio);
         if (prices.Cost <= 0m)
             return await Fail(line.Id, "Computed price-list 01 (cost) is zero — check the forex rate and pricing config before creating the SAP item.", ct);
 
@@ -208,6 +273,34 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         catch (Exception ex)
         {
             return await Fail(line.Id, $"SAP item write failed: {ex.Message}", ct);
+        }
+
+        // Audit every reviewer override next to the formula's answer (pricing_overrides)
+        // — recorded only after the SAP commit, best effort (never fails the line).
+        if (priceOverride is { HasAny: true })
+        {
+            var costCorrected = priceOverride.UnitPriceOverride is not null || priceOverride.CifOverride is not null;
+            var source = (costCorrected, priceOverride.Pl03Override is not null) switch
+            {
+                (true, true) => "cif+pl03_override",
+                (true, false) => "cif_override",
+                _ => "pl03_override",
+            };
+            try
+            {
+                await _overrides.RecordAsync(new PricingOverrideRecord(
+                    ItemCode: itemCode, Brand: line.Brand, Cif: costTzs,
+                    FormulaPl01: quote.Cost, FormulaPl03: quote.Retail, FormulaPl05: quote.Wholesale,
+                    AppliedPl01: prices.Cost, AppliedPl03: prices.Retail, AppliedPl05: prices.Wholesale,
+                    Source: source, Reason: priceOverride.OverrideReason,
+                    RequestedBy: priceOverride.RequestedBy), CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "pricing_overrides insert failed for {ItemCode} (line {LineId}) — item created; record manually.",
+                    itemCode, line.Id);
+            }
         }
 
         // Bridge: stamp the SAP ItemCode onto the pre-enriched parts_catalog row so auto-match finds

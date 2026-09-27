@@ -210,10 +210,28 @@ public class PricingTraceController : ControllerBase
 
     // ── EUR→TZS rate (runtime-editable) ──────────────────────────────
 
-    /// <summary>GET /api/pricing/rate — the effective EUR→TZS rate and its source.</summary>
+    /// <summary>
+    /// GET /api/pricing/rate — the effective EUR→TZS rate and its source. This is the
+    /// LUBES (Liqui Moly) repricing knob, UI-editable, EUR only — it is NOT the rate
+    /// Autohub Bulk Create converts invoice costs with (that is the per-currency
+    /// forex_rate table, served by GET /api/sap/pricing/rates). The response says so
+    /// explicitly, because an unlabelled number here was mistaken for a global rate.
+    /// </summary>
     [HttpGet("rate")]
     public async Task<IActionResult> GetRate(CancellationToken ct)
-        => Ok(ApiResponse<EffectiveRate>.Ok(await _pricingRepo.GetEffectiveRateAsync(ct)));
+    {
+        var r = await _pricingRepo.GetEffectiveRateAsync(ct);
+        return Ok(ApiResponse<object>.Ok(new
+        {
+            rate = r.Rate,
+            source = r.Source,
+            updated_at = r.UpdatedAt,
+            currency = "EUR",
+            scope = "lubes_liqui_moly_repricing",
+            note = "Lubes EUR-only repricing rate. Autohub Bulk Create uses the per-currency " +
+                   "forex_rate table — read it via GET /api/sap/pricing/rates.",
+        }));
+    }
 
     /// <summary>PUT /api/pricing/rate — sets the runtime rate (used by provisioning AND repricing).</summary>
     [HttpPut("rate")]

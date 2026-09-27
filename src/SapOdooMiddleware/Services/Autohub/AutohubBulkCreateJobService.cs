@@ -50,18 +50,22 @@ public sealed class AutohubBulkCreateJobService
     public AutohubBulkCreateJob? GetRunningForDocument(Guid documentId) =>
         _jobs.Values.FirstOrDefault(j => j.DocumentId == documentId && j.Status == "running");
 
-    /// <summary>Start (or return the already-running) Bulk Create job for a document.</summary>
-    public AutohubBulkCreateJob Start(Guid documentId)
+    /// <summary>
+    /// Start (or return the already-running) Bulk Create job for a document. When the
+    /// price review gate posts a reviewed-line list, it rides the job; a job already
+    /// running for the document is returned untouched (its original selection stands).
+    /// </summary>
+    public AutohubBulkCreateJob Start(Guid documentId, IReadOnlyList<BulkCreateLineSelection>? selections = null)
     {
         if (GetRunningForDocument(documentId) is { } running) return running;
 
         var job = new AutohubBulkCreateJob { JobId = Guid.NewGuid(), DocumentId = documentId, StartedAt = DateTime.UtcNow };
         _jobs[job.JobId] = job;
-        _ = Task.Run(() => RunAsync(job));
+        _ = Task.Run(() => RunAsync(job, selections));
         return job;
     }
 
-    private async Task RunAsync(AutohubBulkCreateJob job)
+    private async Task RunAsync(AutohubBulkCreateJob job, IReadOnlyList<BulkCreateLineSelection>? selections)
     {
         try
         {
@@ -70,7 +74,7 @@ public sealed class AutohubBulkCreateJobService
             var creator = scope.ServiceProvider.GetRequiredService<PartsItemCreationService>();
 
             // Application-stopping token (NOT a request token) — the run survives the proxy/client timeout.
-            var result = await creator.BulkCreateAsync(job.DocumentId, _lifetime.ApplicationStopping);
+            var result = await creator.BulkCreateAsync(job.DocumentId, _lifetime.ApplicationStopping, selections);
 
             job.Attempted = result.Attempted;
             job.Created = result.Created;
