@@ -17,10 +17,13 @@ public sealed class OitmRefreshValues
     [JsonPropertyName("item_name")] public string? ItemName { get; set; }
     /// <summary>SAP U_Article_No — the supplier/manufacturer article number.</summary>
     [JsonPropertyName("article_number")] public string? ArticleNumber { get; set; }
-    /// <summary>The real brand of the part as held in SAP (U_ItemManufacturer, falling back to U_MdlTEST).</summary>
+    /// <summary>The brand of the part — U_MdlTEST, the brand truth field.</summary>
     [JsonPropertyName("brand")] public string? Brand { get; set; }
-    /// <summary>SAP OITM.ItemName — the "/"-joined OEM chain.</summary>
+    /// <summary>SAP OITM.ItemName — the legacy "/"-joined OEM chain.</summary>
     [JsonPropertyName("oem_chain")] public string? OemChain { get; set; }
+    /// <summary>SAP U_OE_Numbers — the curated "/"-joined OE list. The worker treats it
+    /// as authoritative and falls back to <see cref="OemChain"/> only when it is empty.</summary>
+    [JsonPropertyName("oe_numbers")] public string? OeNumbers { get; set; }
 }
 
 /// <summary>

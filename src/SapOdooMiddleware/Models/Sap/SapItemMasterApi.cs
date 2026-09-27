@@ -74,6 +74,15 @@ public class SapItemUpdateApiRequest
     /// toward the "at least one editable field" rule and is never written to SAP.
     /// </summary>
     [JsonPropertyName("requestedBy")] public string? RequestedBy { get; set; }
+
+    /// <summary>
+    /// Backfill-only: true writes to SAP as usual but skips the Neon refresh-queue
+    /// publish. For controlled bulk runs where Neon is already the data source (e.g.
+    /// the U_OE_Numbers backfill), so thousands of self-inflicted queue rows don't
+    /// bury real events. Ordinary app edits must NOT set it. Does not count toward
+    /// the "at least one editable field" rule.
+    /// </summary>
+    [JsonPropertyName("skipNeonRefresh")] public bool SkipNeonRefresh { get; set; }
 }
 
 /// <summary>

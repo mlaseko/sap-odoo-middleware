@@ -200,6 +200,7 @@ public class SapItemsController : ControllerBase
     /// After the SAP write commits, an identity change (name / article number / brand /
     /// OEM numbers) is published to the Neon <c>oitm_refresh_queue</c> for the DGX
     /// worker; a Neon failure never fails this call (nightly reconciliation catches it).
+    /// <c>skipNeonRefresh=true</c> (backfill runs only) writes SAP but publishes nothing.
     /// </summary>
     [HttpPatch("items/{itemCode}")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
@@ -220,16 +221,20 @@ public class SapItemsController : ControllerBase
         var code = itemCode.Trim();
 
         // Pre-edit snapshot for the queue row's before_value / change detection. Best
-        // effort: a failed read must not block the user's SAP update.
+        // effort: a failed read must not block the user's SAP update. Skipped entirely
+        // on a backfill write (skipNeonRefresh), which never publishes to the queue.
         OitmIdentitySnapshot? before = null;
-        try
+        if (!request.SkipNeonRefresh)
         {
-            before = await _sql.GetItemIdentitySnapshotAsync(code, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Pre-update OITM snapshot failed for {ItemCode}; queue row will carry no before_value.", code);
+            try
+            {
+                before = await _sql.GetItemIdentitySnapshotAsync(code, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Pre-update OITM snapshot failed for {ItemCode}; queue row will carry no before_value.", code);
+            }
         }
 
         try
@@ -248,12 +253,16 @@ public class SapItemsController : ControllerBase
 
         // SAP has committed — only now may the Neon refresh-queue row exist. Runs on
         // CancellationToken.None so a client disconnect can't drop the queue write.
-        var (queued, changedFields) = await TryEnqueueNeonRefreshAsync(code, request, before);
+        // A backfill write (skipNeonRefresh) deliberately publishes nothing.
+        var (queued, changedFields) = request.SkipNeonRefresh
+            ? (false, new List<string>())
+            : await TryEnqueueNeonRefreshAsync(code, request, before);
 
         return Ok(ApiResponse<object>.Ok(new
         {
             item_code = code,
             neon_refresh_queued = queued,
+            neon_refresh_skipped = request.SkipNeonRefresh,
             changed_fields = changedFields,
         }));
     }
@@ -454,6 +463,7 @@ public class SapItemsController : ControllerBase
                 UItemName = request.UItemName,
                 UArticleNo = request.UArticleNo,
                 UMdlTest = request.UMdlTest,
+                UOeNumbers = request.UOeNumbers,
             };
 
             var changed = new List<string> { "name", "article_number", "brand", "oem_numbers" };
@@ -483,6 +493,7 @@ public class SapItemsController : ControllerBase
         ArticleNumber = s.UArticleNo,
         Brand = s.UMdlTest,
         OemChain = s.OemChain,
+        OeNumbers = s.UOeNumbers,
     };
 
     private static bool Differs(string? a, string? b) =>
