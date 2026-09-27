@@ -22,7 +22,7 @@ public interface IPricingCalculationService
 /// Autohub pricing chain (D8), faithfully matching the operator's working JS calculator and the
 /// existing Lubes band-ratio pattern (<see cref="Pricing.PricingCalculator"/>):
 ///   Cost      = supplierPrice × CostMarkupMultiplier (1.25)            → PL01
-///   Retail    = ceil( Cost ÷ ratio )                                    → PL03
+///   Retail    = ceil( MAX(Cost ÷ ratio, brand floor) )                  → PL03
 ///   Wholesale = floor( Retail − (Retail − Cost) / 2 ), &gt; Cost         → PL05
 /// The ratio is the brand×cost-band value from pricing_brand_ratios (case-insensitive brand,
 /// falling back to 'DEFAULT'). Ceiling/floor round to a magnitude-dependent increment from
@@ -60,7 +60,16 @@ public sealed class PricingCalculationService : IPricingCalculationService
 
         var rules = await _rounding.GetRulesAsync(ct);
 
-        var retail = RoundCeiling(cost / ratio, rules);
+        // Minimum selling price per brand (pricing_brand_floors), applied AFTER the
+        // ratio and BEFORE rounding: cost-plus breaks down on cheap parts, where the
+        // settled price is a floor, not a markup. Keyed by the actual brand (no
+        // DEFAULT fallback), so it applies even when the ratio fell back to DEFAULT.
+        var retailRaw = cost / ratio;
+        var floor = await _ratios.GetMinRetailFloorAsync(key, ct);
+        if (floor is { } minSell && retailRaw < minSell)
+            retailRaw = minSell;
+
+        var retail = RoundCeiling(retailRaw, rules);
         var wholesaleRaw = retail - (retail - cost) / 2m;
         var wholesale = RoundFloor(wholesaleRaw, rules);
 

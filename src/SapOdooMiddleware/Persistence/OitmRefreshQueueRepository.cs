@@ -45,13 +45,26 @@ public interface IOitmRefreshQueueRepository
         string itemCode, IReadOnlyCollection<string> changedFields,
         OitmRefreshValues? before, OitmRefreshValues after,
         DateTime? sapUpdateTs, string? requestedBy, CancellationToken ct);
+
+    /// <summary>
+    /// Record a brand change (U_MdlTEST via PATCH) on the pricing team's worklist
+    /// (pricing_recalc_flags): the item's prices were derived from the OLD brand's
+    /// ratio and nothing reprices automatically — the team keeps the final say.
+    /// One open flag per item; repeat edits merge (old_brand keeps the original
+    /// price-basis brand, new_brand follows the latest edit). Idempotent.
+    /// </summary>
+    Task FlagPriceRecalcAsync(
+        string itemCode, string? oldBrand, string? newBrand,
+        decimal? pl01, decimal? pl03, decimal? pl05,
+        string? requestedBy, CancellationToken ct);
 }
 
 /// <summary>
 /// Singleton — resolves the Autohub tenant's Neon connection directly from
 /// <c>Companies:Autohub:Neon</c> (the Item Master API lives under <c>/api/sap</c>, which the
 /// URL-based tenant middleware does NOT map to Autohub, so ICompanyContext cannot be used here).
-/// Only <c>oitm_refresh_queue</c> is written; status/attempts/result columns belong to the worker.
+/// Writes only <c>oitm_refresh_queue</c> (status/attempts/result columns belong to the worker)
+/// and the <c>pricing_recalc_flags</c> worklist.
 /// </summary>
 public sealed class OitmRefreshQueueRepository : IOitmRefreshQueueRepository
 {
@@ -125,6 +138,42 @@ public sealed class OitmRefreshQueueRepository : IOitmRefreshQueueRepository
         });
         cmd.Parameters.AddWithValue("user",
             (object?)Truncate(requestedBy, 100) ?? DBNull.Value);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task FlagPriceRecalcAsync(
+        string itemCode, string? oldBrand, string? newBrand,
+        decimal? pl01, decimal? pl03, decimal? pl05,
+        string? requestedBy, CancellationToken ct)
+    {
+        // One OPEN flag per item (partial unique index). On a repeat edit, keep the
+        // original old_brand (the brand the current price was actually built on) and
+        // move new_brand/prices/requested_by/flagged_at to the latest edit.
+        const string sql = """
+            INSERT INTO pricing_recalc_flags
+              (item_code, old_brand, new_brand, pl01, pl03, pl05, requested_by)
+            VALUES (@code, @oldBrand, @newBrand, @pl01, @pl03, @pl05, @user)
+            ON CONFLICT (item_code) WHERE resolved_at IS NULL DO UPDATE
+            SET new_brand    = EXCLUDED.new_brand,
+                pl01         = EXCLUDED.pl01,
+                pl03         = EXCLUDED.pl03,
+                pl05         = EXCLUDED.pl05,
+                requested_by = EXCLUDED.requested_by,
+                flagged_at   = NOW();
+            """;
+
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("code", Truncate(itemCode, 50)!);
+        cmd.Parameters.AddWithValue("oldBrand", (object?)Truncate(oldBrand, 100) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("newBrand", (object?)Truncate(newBrand, 100) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("pl01", (object?)pl01 ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("pl03", (object?)pl03 ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("pl05", (object?)pl05 ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("user", (object?)Truncate(requestedBy, 100) ?? DBNull.Value);
 
         await cmd.ExecuteNonQueryAsync(ct);
     }

@@ -11,6 +11,13 @@ public interface IPricingBrandRatioRepository
     /// the brand has no active band covering that cost (caller retries with 'DEFAULT').
     /// </summary>
     Task<decimal?> GetCostToRetailRatioAsync(string brand, decimal costTzs, CancellationToken ct);
+
+    /// <summary>
+    /// The active minimum selling price (PL03 floor, TZS, pre-rounding) for the brand from
+    /// pricing_brand_floors, matched case-insensitively — or null when the brand has no
+    /// floor. Deliberately NO 'DEFAULT' fallback: only brands with a measured floor get one.
+    /// </summary>
+    Task<decimal?> GetMinRetailFloorAsync(string brand, CancellationToken ct);
 }
 
 /// <summary>
@@ -45,5 +52,31 @@ public sealed class PricingBrandRatioRepository : IPricingBrandRatioRepository
         cmd.Parameters.AddWithValue("cost", costTzs);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is null or DBNull ? null : Convert.ToDecimal(result);
+    }
+
+    public async Task<decimal?> GetMinRetailFloorAsync(string brand, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT "MinSellPrice"
+            FROM pricing_brand_floors
+            WHERE UPPER("Brand") = UPPER(@brand)
+              AND "EffectiveTo" IS NULL
+            LIMIT 1;
+            """;
+        try
+        {
+            await using var conn = new NpgsqlConnection(ConnectionString);
+            await conn.OpenAsync(ct);
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("brand", brand);
+            var result = await cmd.ExecuteScalarAsync(ct);
+            return result is null or DBNull ? null : Convert.ToDecimal(result);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            // Migration not run yet (2026-09-27__pricing_floors_and_recalc_flags.sql):
+            // behave as "no floor" so item provisioning keeps working.
+            return null;
+        }
     }
 }
