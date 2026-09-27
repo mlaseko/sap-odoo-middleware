@@ -258,12 +258,20 @@ public class SapItemsController : ControllerBase
             ? (false, new List<string>())
             : await TryEnqueueNeonRefreshAsync(code, request, before);
 
+        // A brand change means the prices were built on the OLD brand's ratio. Nothing
+        // reprices automatically (the team hand-curates prices); instead the item goes
+        // on the pricing_recalc_flags worklist and the response says so.
+        var priceRecalcNeeded = changedFields.Contains("brand");
+        if (priceRecalcNeeded)
+            await TryFlagPriceRecalcAsync(code, before?.UMdlTest, request);
+
         return Ok(ApiResponse<object>.Ok(new
         {
             item_code = code,
             neon_refresh_queued = queued,
             neon_refresh_skipped = request.SkipNeonRefresh,
             changed_fields = changedFields,
+            price_recalc_needed = priceRecalcNeeded,
         }));
     }
 
@@ -432,6 +440,44 @@ public class SapItemsController : ControllerBase
                 "Neon oitm_refresh_queue insert failed for {ItemCode} — SAP is already updated; " +
                 "the nightly DGX reconciliation will pick the item up.", itemCode);
             return (false, changed);
+        }
+    }
+
+    /// <summary>
+    /// Puts a brand-changed item on the pricing team's worklist (pricing_recalc_flags),
+    /// with the current PL01/PL03/PL05 for the reviewer. Best effort — never fails the
+    /// PATCH; the response's <c>price_recalc_needed</c> is set regardless.
+    /// </summary>
+    private async Task TryFlagPriceRecalcAsync(
+        string itemCode, string? oldBrand, SapItemUpdateApiRequest request)
+    {
+        try
+        {
+            SapItemPricesReadDto? prices = null;
+            try
+            {
+                prices = (await _sql.GetItemMasterAsync(itemCode, CancellationToken.None))?.Prices;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Price read for the recalc flag failed for {ItemCode}; flagging without prices.", itemCode);
+            }
+
+            await _refreshQueue.FlagPriceRecalcAsync(
+                itemCode, oldBrand, request.UMdlTest,
+                prices?.PL01, prices?.PL03, prices?.PL05,
+                request.RequestedBy, CancellationToken.None);
+
+            _logger.LogInformation(
+                "Price recalc flagged for {ItemCode}: brand '{Old}' → '{New}'.",
+                itemCode, oldBrand, request.UMdlTest);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "pricing_recalc_flags insert failed for {ItemCode} — brand changed in SAP; " +
+                "the pricing team should be told out of band.", itemCode);
         }
     }
 
