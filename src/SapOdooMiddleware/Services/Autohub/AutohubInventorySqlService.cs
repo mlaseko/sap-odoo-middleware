@@ -393,7 +393,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     {
         const string sql = """
             SELECT ItemName, U_Item_Name, U_Article_No, U_MdlTEST, U_ItemManufacturer,
-                   UpdateDate, UpdateTS
+                   U_OE_Numbers, UpdateDate, UpdateTS
             FROM OITM
             WHERE ItemCode = @item;
             """;
@@ -404,8 +404,8 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct)) return null;
 
-        var updateDate = reader.IsDBNull(5) ? (DateTime?)null : reader.GetDateTime(5);
-        var updateTs = reader.IsDBNull(6) ? (int?)null : Convert.ToInt32(reader.GetValue(6));
+        var updateDate = reader.IsDBNull(6) ? (DateTime?)null : reader.GetDateTime(6);
+        var updateTs = reader.IsDBNull(7) ? (int?)null : Convert.ToInt32(reader.GetValue(7));
         return new OitmIdentitySnapshot
         {
             ItemCode = itemCode,
@@ -414,6 +414,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             UArticleNo = reader.IsDBNull(2) ? null : reader.GetString(2),
             UMdlTest = reader.IsDBNull(3) ? null : reader.GetString(3),
             Manufacturer = reader.IsDBNull(4) ? null : reader.GetString(4),
+            UOeNumbers = reader.IsDBNull(5) ? null : reader.GetString(5),
             SapUpdateTs = CombineUpdateTimestamp(updateDate, updateTs),
         };
     }

@@ -7388,6 +7388,8 @@ ORDER BY PostingDate, DocumentNumber";
                     TrySetUserField(items.UserFields, "U_Item_Name", request.UItemName, ctx);
                 if (request.UArticleNo is not null)
                     TrySetUserField(items.UserFields, "U_Article_No", request.UArticleNo, ctx);
+                if (request.UOeNumbers is not null)
+                    TrySetUserField(items.UserFields, "U_OE_Numbers", request.UOeNumbers, ctx);
 
                 int result = items.Update();
                 if (result != 0)

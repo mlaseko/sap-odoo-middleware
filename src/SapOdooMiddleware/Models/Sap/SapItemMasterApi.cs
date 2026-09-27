@@ -66,6 +66,7 @@ public class SapItemUpdateApiRequest
     [JsonPropertyName("U_MdlTEST")] public string? UMdlTest { get; set; }
     [JsonPropertyName("U_Item_Name")] public string? UItemName { get; set; }
     [JsonPropertyName("U_Article_No")] public string? UArticleNo { get; set; }
+    [JsonPropertyName("U_OE_Numbers")] public string? UOeNumbers { get; set; }
 
     /// <summary>
     /// Optional: the app username making the change. Stored on the Neon refresh-queue
@@ -73,6 +74,15 @@ public class SapItemUpdateApiRequest
     /// toward the "at least one editable field" rule and is never written to SAP.
     /// </summary>
     [JsonPropertyName("requestedBy")] public string? RequestedBy { get; set; }
+
+    /// <summary>
+    /// Backfill-only: true writes to SAP as usual but skips the Neon refresh-queue
+    /// publish. For controlled bulk runs where Neon is already the data source (e.g.
+    /// the U_OE_Numbers backfill), so thousands of self-inflicted queue rows don't
+    /// bury real events. Ordinary app edits must NOT set it. Does not count toward
+    /// the "at least one editable field" rule.
+    /// </summary>
+    [JsonPropertyName("skipNeonRefresh")] public bool SkipNeonRefresh { get; set; }
 }
 
 /// <summary>
@@ -102,8 +112,10 @@ public sealed class OitmIdentitySnapshot
     public string? UArticleNo { get; set; }
     /// <summary>U_MdlTEST — the app's brand field (mirrors U_ItemManufacturer).</summary>
     public string? UMdlTest { get; set; }
-    /// <summary>U_ItemManufacturer — the brand as held in SAP.</summary>
+    /// <summary>U_ItemManufacturer — the brand mirror of U_MdlTEST.</summary>
     public string? Manufacturer { get; set; }
+    /// <summary>U_OE_Numbers — the "/"-joined OE numbers UDF.</summary>
+    public string? UOeNumbers { get; set; }
     /// <summary>OITM.UpdateDate + UpdateTS combined; null when the row has never been updated.</summary>
     public DateTime? SapUpdateTs { get; set; }
 }
