@@ -216,6 +216,7 @@ builder.Services.AddScoped<IForexRateRepository, ForexRateRepository>();
 builder.Services.AddScoped<ISkuCounterRepository, SkuCounterRepository>();
 builder.Services.AddScoped<IPricingBrandRatioRepository, PricingBrandRatioRepository>();
 builder.Services.AddScoped<IPricingRoundingRuleRepository, PricingRoundingRuleRepository>();
+builder.Services.AddScoped<IPricingOverrideRepository, PricingOverrideRepository>();   // review-gate audit trail
 builder.Services.AddSingleton<IOemFilterService, OemFilterService>();          // pure logic, no DB
 builder.Services.AddScoped<IForexConversionService, ForexConversionService>();
 builder.Services.AddScoped<IPricingCalculationService, PricingCalculationService>();

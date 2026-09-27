@@ -31,6 +31,28 @@ public class SapItemCreateApiRequest
     /// row (<c>requested_by</c>) for the DGX worker's audit trail; never written to SAP.
     /// </summary>
     [JsonPropertyName("requestedBy")] public string? RequestedBy { get; set; }
+
+    // ── Price review gate (reviewer overrides) ─────────────────────────
+    // When either override is present, the middleware prices the item itself (engine
+    // formula ± the override) and the explicit PL01/PL03/PL05 in `prices` are ignored
+    // for those lists; every override lands in pricing_overrides for the audit trail.
+
+    /// <summary>Reviewer-corrected landed cost in TZS: the engine prices from this CIF.</summary>
+    [JsonPropertyName("cif_override")] public decimal? CifOverride { get; set; }
+
+    /// <summary>Reviewer-set PL03, used verbatim (no re-rounding); PL05 derives from it.</summary>
+    [JsonPropertyName("pl03_override")] public decimal? Pl03Override { get; set; }
+
+    /// <summary>Free-text reason recorded with the override.</summary>
+    [JsonPropertyName("override_reason")] public string? OverrideReason { get; set; }
+}
+
+/// <summary>POST /api/sap/items/price-preview — one line to preview (no writes anywhere).</summary>
+public class SapPricePreviewRequest
+{
+    [JsonPropertyName("brand")] public string? Brand { get; set; }
+    /// <summary>Landed cost in TZS (pre-markup; the band keys on cif × CostMarkupMultiplier).</summary>
+    [JsonPropertyName("cif")] public decimal Cif { get; set; }
 }
 
 /// <summary>

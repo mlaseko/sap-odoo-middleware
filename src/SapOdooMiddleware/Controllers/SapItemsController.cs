@@ -21,17 +21,22 @@ public class SapItemsController : ControllerBase
     private readonly IAutohubSapB1Service _sap;
     private readonly IAutohubInventorySqlService _sql;
     private readonly IOitmRefreshQueueRepository _refreshQueue;
+    private readonly IPricingCalculationService _pricing;
+    private readonly IPricingOverrideRepository _overrides;
     private readonly IMemoryCache _cache;
     private readonly ILogger<SapItemsController> _logger;
 
     public SapItemsController(
         IAutohubSapB1Service sap, IAutohubInventorySqlService sql,
-        IOitmRefreshQueueRepository refreshQueue, IMemoryCache cache,
-        ILogger<SapItemsController> logger)
+        IOitmRefreshQueueRepository refreshQueue,
+        IPricingCalculationService pricing, IPricingOverrideRepository overrides,
+        IMemoryCache cache, ILogger<SapItemsController> logger)
     {
         _sap = sap;
         _sql = sql;
         _refreshQueue = refreshQueue;
+        _pricing = pricing;
+        _overrides = overrides;
         _cache = cache;
         _logger = logger;
     }
@@ -122,13 +127,89 @@ public class SapItemsController : ControllerBase
     }
 
     /// <summary>
+    /// POST /api/sap/items/price-preview
+    /// The operator review gate's dry run: what Bulk Create WOULD produce for a
+    /// (brand, cif) pair — final PL01/PL03/PL05 plus every intermediate (the ratio
+    /// brand actually matched, the cost band used, the ratio, whether the brand floor
+    /// bound, the rounding step). NO side effects: no SAP write, no queue row, no SKU
+    /// counter increment. The body is one object or an array (batch: one call per
+    /// invoice); the response mirrors the input shape. cif is TZS pre-markup — the
+    /// band keys on cif × CostMarkupMultiplier, and pl01 is that post-markup cost.
+    /// </summary>
+    [HttpPost("items/price-preview")]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> PricePreview(
+        [FromBody] System.Text.Json.JsonElement body, CancellationToken ct)
+    {
+        var isBatch = body.ValueKind == System.Text.Json.JsonValueKind.Array;
+        List<SapPricePreviewRequest>? lines;
+        try
+        {
+            lines = isBatch
+                ? System.Text.Json.JsonSerializer.Deserialize<List<SapPricePreviewRequest>>(body.GetRawText())
+                : new List<SapPricePreviewRequest>
+                  { System.Text.Json.JsonSerializer.Deserialize<SapPricePreviewRequest>(body.GetRawText())! };
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            return BadRequest(ApiResponse<object>.Fail($"Body must be {{brand, cif}} or an array of them: {ex.Message}"));
+        }
+        if (lines is null || lines.Count == 0)
+            return BadRequest(ApiResponse<object>.Fail("Provide at least one {brand, cif} line."));
+        if (lines.Count > 200)
+            return BadRequest(ApiResponse<object>.Fail("At most 200 lines per preview call."));
+
+        var results = new List<object>(lines.Count);
+        foreach (var line in lines)
+        {
+            if (line is null || line.Cif <= 0m)
+            {
+                if (!isBatch) return BadRequest(ApiResponse<object>.Fail("cif must be > 0 (TZS)."));
+                results.Add(new { error = "cif must be > 0 (TZS)." });
+                continue;
+            }
+            try
+            {
+                var q = await _pricing.CalculateDetailedAsync(line.Cif, line.Brand ?? "", ct);
+                results.Add(new
+                {
+                    brand_used = string.IsNullOrWhiteSpace(line.Brand) ? "DEFAULT" : line.Brand.Trim(),
+                    ratio_brand = q.RatioBrand,
+                    band = new { from = q.BandMin, to = q.BandMax },
+                    ratio = q.Ratio,
+                    floor_applied = q.FloorApplied,
+                    floor = q.Floor,
+                    cif = q.Cif,
+                    pl01 = q.Cost,
+                    pl03 = q.Retail,
+                    pl05 = q.Wholesale,
+                    rounding_step = q.RetailRoundingStep,
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Price preview failed for brand={Brand} cif={Cif}", line.Brand, line.Cif);
+                if (!isBatch) return StatusCode(500, ApiResponse<object>.Fail(ex.Message));
+                results.Add(new { error = ex.Message });
+            }
+        }
+        return Ok(ApiResponse<object>.Ok(isBatch ? results : results[0]));
+    }
+
+    /// <summary>
     /// POST /api/sap/items
     /// Creates an Autohub item. Fixed by the backend: PurchaseItem/SalesItem/
     /// InventoryItem = Yes, VatGroupSales = TZ, VatGroupPurchases = TZS, no standard
     /// Manufacturer/FirmCode (U_ItemManufacturer mirrors U_MdlTEST, the brand truth
-    /// field). Optional prices for PL01-PL05 (TZS). After the SAP commit the item is
-    /// published to the Neon <c>oitm_refresh_queue</c> (all four tracked fields) so the
-    /// DGX worker creates + enriches it without waiting for nightly reconciliation.
+    /// field). Optional prices for PL01-PL05 (TZS). Reviewer overrides: cif_override
+    /// prices from the corrected cost via the engine; pl03_override sets PL03 verbatim
+    /// (PL05 re-derived); both may combine — every override is recorded in
+    /// pricing_overrides with the formula's answer beside it. After the SAP commit the
+    /// item is published to the Neon <c>oitm_refresh_queue</c> (all four tracked
+    /// fields) so the DGX worker creates + enriches it without waiting for nightly
+    /// reconciliation.
     /// </summary>
     [HttpPost("items")]
     [ProducesResponseType(typeof(ApiResponse<object>), StatusCodes.Status200OK)]
@@ -153,6 +234,13 @@ public class SapItemsController : ControllerBase
                 if (price < 0m)
                     errors.Add($"prices: PL{listNum:00} cannot be negative.");
         }
+        if (request.CifOverride is <= 0m)
+            errors.Add("cif_override must be > 0 (TZS).");
+        if (request.Pl03Override is <= 0m)
+            errors.Add("pl03_override must be > 0 (TZS).");
+        if (request.Pl03Override is not null && request.CifOverride is null
+            && request.Prices?.PL01 is not > 0m)
+            errors.Add("pl03_override without cif_override needs the cost: send cif_override or prices.PL01.");
         if (errors.Count > 0)
             return BadRequest(ApiResponse<object>.Fail(errors));
 
@@ -167,7 +255,66 @@ public class SapItemsController : ControllerBase
                 return BadRequest(ApiResponse<object>.Fail(
                     $"itemGroupCode {request.ItemGroupCode} does not exist in SAP — refresh the dropdown."));
 
+            // Price review gate: an override means the middleware prices the item itself
+            // (engine formula ± the reviewer's correction) instead of trusting the body's
+            // explicit PL01/PL03/PL05. The price was set deliberately, so nothing here
+            // flags a recalc. Runs BEFORE the SAP write — an engine error stops the create.
+            string pricingSource = "explicit_prices";
+            PricingQuote? quote = null;
+            decimal? appliedPl01 = null, appliedPl03 = null, appliedPl05 = null;
+            var hasOverride = request.CifOverride is not null || request.Pl03Override is not null;
+            if (hasOverride)
+            {
+                if (request.CifOverride is { } cif)
+                    quote = await _pricing.CalculateDetailedAsync(cif, request.UMdlTest ?? "", ct);
+
+                // Cost: from the corrected CIF via the normal markup, else the body's PL01.
+                var pl01 = quote?.Cost ?? request.Prices!.PL01!.Value;
+                // Retail: the reviewer's PL03 verbatim (no re-rounding), else the formula's.
+                var pl03 = request.Pl03Override ?? quote!.Retail;
+                // Wholesale: always the engine's derivation from the applied cost/retail pair.
+                var pl05 = request.Pl03Override is not null
+                    ? await _pricing.DeriveWholesaleAsync(pl01, pl03, ct)
+                    : quote!.Wholesale;
+
+                request.Prices ??= new SapItemPricesDto();
+                request.Prices.PL01 = pl01;
+                request.Prices.PL03 = pl03;
+                request.Prices.PL05 = pl05;
+                appliedPl01 = pl01;
+                appliedPl03 = pl03;
+                appliedPl05 = pl05;
+                pricingSource = (request.CifOverride, request.Pl03Override) switch
+                {
+                    (not null, not null) => "cif+pl03_override",
+                    (not null, null) => "cif_override",
+                    _ => "pl03_override",
+                };
+            }
+
             await _sap.CreateItemMasterAsync(request, ct);
+
+            // Record the override AFTER the SAP commit (audit rows must describe real
+            // items). Best effort — a Neon failure never fails the create.
+            if (hasOverride)
+            {
+                try
+                {
+                    await _overrides.RecordAsync(new PricingOverrideRecord(
+                        ItemCode: request.ItemCode, Brand: request.UMdlTest,
+                        Cif: request.CifOverride,
+                        FormulaPl01: quote?.Cost, FormulaPl03: quote?.Retail, FormulaPl05: quote?.Wholesale,
+                        AppliedPl01: appliedPl01, AppliedPl03: appliedPl03, AppliedPl05: appliedPl05,
+                        Source: pricingSource, Reason: request.OverrideReason,
+                        RequestedBy: request.RequestedBy), CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex,
+                        "pricing_overrides insert failed for {ItemCode} — item created; record the override manually.",
+                        request.ItemCode);
+                }
+            }
 
             // SAP has committed — publish the new item to the Neon refresh queue so the
             // DGX worker creates + enriches it without waiting for nightly reconciliation.
@@ -179,6 +326,14 @@ public class SapItemsController : ControllerBase
                 item_group_code = request.ItemGroupCode,
                 prices_set = request.Prices?.ToListNumMap().Count ?? 0,
                 neon_refresh_queued = queued,
+                pricing = new
+                {
+                    source = pricingSource,
+                    formula_pl03 = quote?.Retail,
+                    applied_pl01 = appliedPl01,
+                    applied_pl03 = appliedPl03,
+                    applied_pl05 = appliedPl05,
+                },
             }));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("already exists"))
