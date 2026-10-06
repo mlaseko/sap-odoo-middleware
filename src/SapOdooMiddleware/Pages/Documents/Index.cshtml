@@ -83,17 +83,20 @@ else
     document.querySelectorAll('a.del-doc').forEach(a => {
         a.addEventListener('click', async (e) => {
             e.preventDefault();
+            if (a.dataset.busy) return;   // ignore repeat clicks while a delete is in flight
             const id = a.dataset.docId;
             if (!confirm('Delete "' + (a.dataset.name || id) + '" and all its extracted lines? This cannot be undone.\n\n'
                        + 'SAP items already created and any Purchase Order are NOT affected.')) return;
+            a.dataset.busy = '1';
             try {
                 const r = await fetch('/api/documents/' + id, {
                     method: 'DELETE',
                     headers: apiKey ? { 'X-Api-Key': apiKey } : {}
                 });
-                if (!r.ok) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
+                // 404 = already gone (e.g. deleted from another tab) — same outcome for the operator.
+                if (!r.ok && r.status !== 404) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
                 a.closest('tr').remove();
-            } catch (err) { alert('Delete failed: ' + err.message); }
+            } catch (err) { delete a.dataset.busy; alert('Delete failed: ' + err.message); }
         });
     });
 })();

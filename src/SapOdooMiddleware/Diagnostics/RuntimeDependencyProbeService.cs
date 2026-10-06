@@ -31,9 +31,9 @@ public sealed class RuntimeDependencyProbeService : IHostedService
             {
                 _logger.LogCritical(
                     "[FTL] PDF invoice extraction WILL FAIL: System.Drawing.Primitives (part of the .NET 8 runtime) cannot be loaded ({Error}). " +
-                    "Runtime {Framework} {ProcessArch}, base {BaseDirectory}. The deployment is incomplete or mixes different publishes: " +
-                    "stop the service, empty the publish folder, publish once with a single profile, restart. " +
-                    "Details: GET /api/admin/runtime-diagnostics.",
+                    "Runtime {Framework} {ProcessArch}, base {BaseDirectory}. Framework-dependent install: repair the .NET 8 Hosting Bundle " +
+                    "for this architecture. Self-contained install: stop the service, empty the publish folder, publish once, restart. " +
+                    "Details (including which kind this is): GET /api/admin/runtime-diagnostics.",
                     probe.Error, RuntimeInformation.FrameworkDescription, RuntimeInformation.ProcessArchitecture,
                     AppContext.BaseDirectory);
             }

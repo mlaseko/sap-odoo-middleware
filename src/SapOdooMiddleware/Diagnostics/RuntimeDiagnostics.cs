@@ -18,10 +18,13 @@ public sealed record RuntimeDiagnosticsReport(
     string OsArchitecture,
     string OsDescription,
     string RuntimeIdentifier,
+    int ProcessId,
     string? ProcessPath,
+    bool IsWindowsService,
     string BaseDirectory,
     string? CoreLibDirectory,
     bool LooksSelfContained,
+    bool MixedLayoutSuspected,
     string? DepsRuntimeTarget,
     bool? DepsJsonListsSystemDrawingPrimitives,
     string? RuntimeConfigJson,
@@ -84,8 +87,9 @@ public static class RuntimeDiagnostics
         }
         catch (Exception ex)
         {
-            // The renderer wraps load failures in an InvalidOperationException; report the underlying fault.
-            var root = ex is InvalidOperationException { InnerException: { } inner } ? inner : ex;
+            // The renderer wraps load failures in an InvalidOperationException; report the underlying fault,
+            // including what a type initializer (e.g. SkiaSharp's native version check) actually threw.
+            var root = RenderDependencyFault.Root(ex is InvalidOperationException { InnerException: { } inner } ? inner : ex);
             return new PdfRenderProbe(false, null, null, $"{root.GetType().Name}: {root.Message}");
         }
         finally
@@ -100,7 +104,14 @@ public static class RuntimeDiagnostics
         var entryName = Assembly.GetEntryAssembly()?.GetName().Name;
 
         var files = KeyFiles.ToDictionary(f => f, f => File.Exists(Path.Combine(baseDir, f)));
-        var looksSelfContained = files["hostfxr.dll"] || files["coreclr.dll"];
+
+        // Self-contained = the runtime (CoreLib) actually loaded from the app folder. Host files lying in a
+        // framework-dependent folder are leftovers from an earlier self-contained publish (a mixed folder).
+        var coreLibDir = Path.GetDirectoryName(typeof(object).Assembly.Location);
+        var looksSelfContained = coreLibDir is not null && string.Equals(
+            Path.TrimEndingDirectorySeparator(coreLibDir), Path.TrimEndingDirectorySeparator(baseDir),
+            StringComparison.OrdinalIgnoreCase);
+        var mixedLayout = !looksSelfContained && (files["hostfxr.dll"] || files["coreclr.dll"]);
 
         var tpa = (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") as string ?? "")
             .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
@@ -159,10 +170,13 @@ public static class RuntimeDiagnostics
             OsArchitecture: RuntimeInformation.OSArchitecture.ToString(),
             OsDescription: RuntimeInformation.OSDescription,
             RuntimeIdentifier: RuntimeInformation.RuntimeIdentifier,
+            ProcessId: Environment.ProcessId,
             ProcessPath: Environment.ProcessPath,
+            IsWindowsService: Microsoft.Extensions.Hosting.WindowsServices.WindowsServiceHelpers.IsWindowsService(),
             BaseDirectory: baseDir,
-            CoreLibDirectory: Path.GetDirectoryName(typeof(object).Assembly.Location),
+            CoreLibDirectory: coreLibDir,
             LooksSelfContained: looksSelfContained,
+            MixedLayoutSuspected: mixedLayout,
             DepsRuntimeTarget: depsTarget,
             DepsJsonListsSystemDrawingPrimitives: depsListsSdp,
             RuntimeConfigJson: runtimeConfig,
@@ -172,13 +186,17 @@ public static class RuntimeDiagnostics
             SystemDrawingPrimitivesInTpa: sdpInTpa,
             SystemDrawingPrimitives: sdp,
             PdfRender: render,
-            Verdict: Verdict(sdp, render, looksSelfContained, baseDir));
+            Verdict: Verdict(sdp, render, looksSelfContained, mixedLayout, baseDir));
     }
 
-    private static string Verdict(AssemblyLoadProbe sdp, PdfRenderProbe? render, bool selfContained, string baseDir)
+    private static string Verdict(AssemblyLoadProbe sdp, PdfRenderProbe? render, bool selfContained, bool mixed, string baseDir)
     {
         if (render is { Ok: true })
             return "PDF rendering works in this process.";
+
+        var mixedNote = mixed
+            ? " Note: the folder also holds self-contained host files (hostfxr/coreclr) from an earlier publish — empty it before the next publish."
+            : "";
 
         if (!sdp.Ok)
             return selfContained
@@ -186,12 +204,13 @@ public static class RuntimeDiagnostics
                   + $"deployment, so the file must be in {baseDir} and listed in the .deps.json: the folder is "
                   + "incomplete or mixes different publishes. Stop the service, empty the folder, publish once, restart."
                 : "System.Drawing.Primitives (part of the .NET 8 runtime) cannot be loaded. This is a framework-dependent "
-                  + "deployment, so it comes from the shared .NET runtime (see core_lib_directory): repair or reinstall "
-                  + "the .NET 8 Hosting Bundle / ASP.NET Core Runtime matching process_architecture, or publish self-contained.";
+                  + "deployment, so it comes from the shared .NET runtime (see core_lib_directory). First restart the service: "
+                  + "a .NET or Visual Studio update can replace that runtime folder under a running process. If it still fails "
+                  + "after a restart, repair or reinstall the .NET 8 Hosting Bundle matching process_architecture." + mixedNote;
 
         if (render is { Ok: false })
             return "Managed assemblies load, but the PDF render test failed — check that pdfium.dll and libSkiaSharp.dll "
-                 + "match process_architecture (see native_libraries) and that the folder holds a single publish.";
+                 + "match process_architecture (see native_libraries) and that the folder holds a single publish." + mixedNote;
 
         return "System.Drawing.Primitives loads (PDF render test not run).";
     }

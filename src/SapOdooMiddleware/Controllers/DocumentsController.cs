@@ -124,20 +124,23 @@ public class DocumentsController : ControllerBase
         {
             if (string.IsNullOrWhiteSpace(doc.FilePath)) return;
 
-            if (System.IO.File.Exists(doc.FilePath))
-                System.IO.File.Delete(doc.FilePath);
-
-            // Uploads are stored at {StorageRoot}/yyyy/MM/{documentId}/{file}. Only that exact leaf folder may
-            // be removed, and only when empty: the Autohub storage root is nested inside the Lubes one, so
-            // anything broader could destroy other documents.
-            var dir = Path.GetDirectoryName(doc.FilePath);
-            if (dir is not null
-                && string.Equals(Path.GetFileName(dir), doc.Id.ToString(), StringComparison.OrdinalIgnoreCase)
-                && Directory.Exists(dir)
-                && !Directory.EnumerateFileSystemEntries(dir).Any())
+            // Uploads are stored at {StorageRoot}/yyyy/MM/{documentId}/{file}. Only touch a file that really sits
+            // in this document's own leaf folder, and remove that folder only when empty: the Autohub storage root
+            // is nested inside the Lubes one, so anything broader could destroy other documents.
+            var full = Path.GetFullPath(doc.FilePath);
+            var dir = Path.GetDirectoryName(full);
+            if (dir is null || !string.Equals(Path.GetFileName(dir), doc.Id.ToString(), StringComparison.OrdinalIgnoreCase))
             {
-                Directory.Delete(dir, recursive: false);
+                _logger.LogWarning("Document {DocumentId} deleted; stored file left in place because it is not in the document's own folder: {Path}",
+                    doc.Id, doc.FilePath);
+                return;
             }
+
+            if (System.IO.File.Exists(full))
+                System.IO.File.Delete(full);
+
+            if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
+                Directory.Delete(dir, recursive: false);
         }
         catch (Exception ex)
         {

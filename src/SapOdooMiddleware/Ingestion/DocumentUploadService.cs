@@ -59,7 +59,9 @@ public class DocumentUploadService
         var now = DateTime.UtcNow;
         var subdir = Path.Combine(_settings.StorageRoot, now.ToString("yyyy"), now.ToString("MM"), documentId.ToString());
         Directory.CreateDirectory(subdir);
-        var filePath = Path.Combine(subdir, file.FileName);
+        // Bare file name only: the client-supplied name must not be able to climb out of (or replace) the
+        // per-document folder via "..\" segments or an absolute path.
+        var filePath = Path.Combine(subdir, Path.GetFileName(file.FileName));
         await using (var dst = File.Create(filePath))
             await file.CopyToAsync(dst, ct);
 

@@ -62,6 +62,10 @@ internal static class RenderDependencyFault
 {
     public static bool IsLoadFailure(Exception ex) => ex switch
     {
+        // SkiaSharp's static initializer throws InvalidOperationException when libSkiaSharp is present but a
+        // different version from SkiaSharp.dll — the typical mixed-publish native fault.
+        TypeInitializationException { TypeName: { } t, InnerException: InvalidOperationException }
+            when t.StartsWith("SkiaSharp.", StringComparison.Ordinal) => true,
         TypeInitializationException { InnerException: { } inner } => IsLoadFailure(inner),
         FileNotFoundException or FileLoadException => true,   // assembly could not be found / loaded
         DllNotFoundException or EntryPointNotFoundException => true,   // native library missing / wrong version
@@ -70,15 +74,21 @@ internal static class RenderDependencyFault
         _ => false,
     };
 
+    /// <summary>The underlying fault, with any type-initializer wrappers removed.</summary>
+    public static Exception Root(Exception ex)
+    {
+        while (ex is TypeInitializationException { InnerException: { } inner })
+            ex = inner;
+        return ex;
+    }
+
     public static string Describe(Exception ex)
     {
-        var root = ex;
-        while (root is TypeInitializationException { InnerException: { } inner })
-            root = inner;
-
+        var root = Root(ex);
         return "PDF rendering is unavailable on this server: a runtime component could not be loaded "
-             + $"({root.GetType().Name}: {root.Message}). This is a deployment problem, not a problem with the invoice. "
-             + "Stop the service, publish the middleware into an EMPTY folder (one publish profile, one x86/x64 "
-             + "target), and start it again. GET /api/admin/runtime-diagnostics shows what the running process can load.";
+             + $"({root.GetType().Name}: {root.Message}). This is a server problem, not a problem with the invoice. "
+             + "First restart the SapOdooMiddleware service (a .NET or Visual Studio update can remove runtime files "
+             + "from under a running service), then delete this document and upload it again. If it still fails, "
+             + "GET /api/admin/runtime-diagnostics shows what the running process can load.";
     }
 }

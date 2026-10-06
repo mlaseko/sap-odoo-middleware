@@ -98,7 +98,7 @@ public class LubesDocumentDeleteTests
     }
 
     [Fact]
-    public async Task Delete_FolderNotNamedForDocument_KeepsFolder()
+    public async Task Delete_FileOutsideDocumentFolder_LeftUntouched()
     {
         var id = Guid.NewGuid();
         var dir = Path.Combine(Path.GetTempPath(), "lubes-del-" + Guid.NewGuid());
@@ -109,9 +109,9 @@ public class LubesDocumentDeleteTests
         {
             var result = await Build(Repo(Doc(id, pdf), deleted: true)).Delete(id, CancellationToken.None);
 
-            Assert.IsType<OkObjectResult>(result);
-            Assert.False(File.Exists(pdf));
-            Assert.True(Directory.Exists(dir));   // not the {documentId} leaf, so never removed
+            Assert.IsType<OkObjectResult>(result);   // the database delete still succeeds
+            Assert.True(File.Exists(pdf));            // not in the {documentId} leaf folder, so never touched
+            Assert.True(Directory.Exists(dir));
         }
         finally
         {
