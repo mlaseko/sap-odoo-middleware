@@ -6,6 +6,9 @@ namespace SapOdooMiddleware.Persistence;
 /// <summary>The matched pricing_brand_ratios row: the ratio plus the band that produced it.</summary>
 public sealed record RatioBand(decimal Ratio, decimal BandMin, decimal? BandMax);
 
+/// <summary>One active pricing_brand_ratios row, for in-memory band matching in batch pricing.</summary>
+public sealed record BrandRatioRow(string Brand, decimal BandMin, decimal? BandMax, decimal Ratio);
+
 public interface IPricingBrandRatioRepository
 {
     /// <summary>
@@ -20,6 +23,15 @@ public interface IPricingBrandRatioRepository
     /// ratio — for the price preview, which shows the reviewer WHICH band actually applied.
     /// </summary>
     Task<RatioBand?> GetRatioBandAsync(string brand, decimal costTzs, CancellationToken ct);
+
+    /// <summary>
+    /// EVERY active ratio row (all brands, all bands — a few dozen rows). Batch pricing fetches
+    /// the whole table once and matches in memory instead of one round-trip per line.
+    /// </summary>
+    Task<IReadOnlyList<BrandRatioRow>> GetAllActiveBandsAsync(CancellationToken ct);
+
+    /// <summary>All active brand floors as UPPER(brand) → MinSellPrice (tiny table; one fetch per batch).</summary>
+    Task<IReadOnlyDictionary<string, decimal>> GetAllActiveFloorsAsync(CancellationToken ct);
 
     /// <summary>
     /// The active minimum selling price (PL03 floor, TZS, pre-rounding) for the brand from
@@ -68,6 +80,53 @@ public sealed class PricingBrandRatioRepository : IPricingBrandRatioRepository
             Ratio: reader.GetDecimal(0),
             BandMin: reader.GetDecimal(1),
             BandMax: await reader.IsDBNullAsync(2, ct) ? null : reader.GetDecimal(2));
+    }
+
+    public async Task<IReadOnlyList<BrandRatioRow>> GetAllActiveBandsAsync(CancellationToken ct)
+    {
+        const string sql = """
+            SELECT "Brand", "BandMin", "BandMax", "CostToRetailRatio"
+            FROM pricing_brand_ratios
+            WHERE "EffectiveTo" IS NULL;
+            """;
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        var rows = new List<BrandRatioRow>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new BrandRatioRow(
+                Brand: reader.GetString(0),
+                BandMin: reader.GetDecimal(1),
+                BandMax: await reader.IsDBNullAsync(2, ct) ? null : reader.GetDecimal(2),
+                Ratio: reader.GetDecimal(3)));
+        }
+        return rows;
+    }
+
+    public async Task<IReadOnlyDictionary<string, decimal>> GetAllActiveFloorsAsync(CancellationToken ct)
+    {
+        const string sql = """
+            SELECT "Brand", "MinSellPrice"
+            FROM pricing_brand_floors
+            WHERE "EffectiveTo" IS NULL;
+            """;
+        var floors = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            await using var conn = new NpgsqlConnection(ConnectionString);
+            await conn.OpenAsync(ct);
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                floors[reader.GetString(0).Trim()] = reader.GetDecimal(1);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+        {
+            // Migration not run yet — behave as "no floors".
+        }
+        return floors;
     }
 
     public async Task<decimal?> GetMinRetailFloorAsync(string brand, CancellationToken ct)
