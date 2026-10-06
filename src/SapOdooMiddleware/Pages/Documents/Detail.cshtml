@@ -13,7 +13,10 @@
         <h2>@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
         <div class="sub">@Model.Doc.Supplier</div>
     </div>
-    <a class="btn" href="/documents">← Back to list</a>
+    <div style="display:flex; gap:12px; align-items:center;">
+        <button id="btn-delete-doc" class="btn btn-sm btn-danger" type="button" data-doc-id="@Model.Doc.Id">Delete invoice</button>
+        <a class="btn btn-sm" href="/documents">← Back to list</a>
+    </div>
 </div>
 
 @{
@@ -629,5 +632,26 @@
     }
 
     refreshSummary();
+})();
+
+// ---- delete invoice (works in any document state, so it lives outside the review IIFE) ----
+(function () {
+    const btn = document.getElementById('btn-delete-doc');
+    if (!btn) return;
+    const docId = btn.dataset.docId;
+    const apiKey = document.querySelector('meta[name="api-key"]')?.content || '';
+    btn.addEventListener('click', async () => {
+        if (!confirm('Delete this invoice and all its extracted lines? This cannot be undone.\n\n'
+                   + 'SAP items already created and any Purchase Order are NOT affected.')) return;
+        btn.disabled = true;
+        try {
+            const r = await fetch('/api/documents/' + docId, {
+                method: 'DELETE',
+                headers: apiKey ? { 'X-Api-Key': apiKey } : {}
+            });
+            if (!r.ok) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
+            window.location.href = '/documents';
+        } catch (e) { alert('Delete failed: ' + e.message); btn.disabled = false; }
+    });
 })();
 </script>
