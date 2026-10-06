@@ -67,9 +67,37 @@ else
                         <span class="pill @ValPill(d.ValidationStatus)">@d.ValidationStatus</span>
                     }
                 </td>
-                <td class="num"><a class="btn btn-sm" href="/documents/@d.Id">View →</a></td>
+                <td class="num" style="white-space:nowrap;">
+                    <a class="btn btn-sm" href="/documents/@d.Id">View →</a>
+                    <a href="#" class="btn btn-sm btn-danger del-doc" data-doc-id="@d.Id" data-name="@(d.InvoiceNumber ?? d.OriginalFilename)">Delete</a>
+                </td>
             </tr>
         }
         </tbody>
     </table>
 }
+
+<script>
+(function () {
+    const apiKey = document.querySelector('meta[name="api-key"]')?.content || '';
+    document.querySelectorAll('a.del-doc').forEach(a => {
+        a.addEventListener('click', async (e) => {
+            e.preventDefault();
+            if (a.dataset.busy) return;   // ignore repeat clicks while a delete is in flight
+            const id = a.dataset.docId;
+            if (!confirm('Delete "' + (a.dataset.name || id) + '" and all its extracted lines? This cannot be undone.\n\n'
+                       + 'SAP items already created and any Purchase Order are NOT affected.')) return;
+            a.dataset.busy = '1';
+            try {
+                const r = await fetch('/api/documents/' + id, {
+                    method: 'DELETE',
+                    headers: apiKey ? { 'X-Api-Key': apiKey } : {}
+                });
+                // 404 = already gone (e.g. deleted from another tab) — same outcome for the operator.
+                if (!r.ok && r.status !== 404) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
+                a.closest('tr').remove();
+            } catch (err) { delete a.dataset.busy; alert('Delete failed: ' + err.message); }
+        });
+    });
+})();
+</script>

@@ -161,6 +161,8 @@ builder.Services.AddScoped<IStagingDocumentLineRepository, StagingDocumentLineRe
 builder.Services.AddScoped<IStagingPartsDocumentRepository, StagingPartsDocumentRepository>();
 builder.Services.AddScoped<IStagingPartsLineRepository, StagingPartsLineRepository>();
 builder.Services.AddSingleton<IPdfPageRenderer, PdfPageRenderer>();
+// Logs at startup whether the PDF stack's .NET framework dependency (System.Drawing.Primitives) can load.
+builder.Services.AddHostedService<RuntimeDependencyProbeService>();
 builder.Services.AddSingleton<InvoiceTotalsValidator>();
 builder.Services.AddScoped<InvoiceExtractionJob>();
 builder.Services.AddScoped<DocumentUploadService>();

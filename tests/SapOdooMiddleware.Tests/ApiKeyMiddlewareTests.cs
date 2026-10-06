@@ -116,6 +116,25 @@ public class ApiKeyMiddlewareTests : IClassFixture<ApiKeyMiddlewareTests.TestApp
     }
 
     [Fact]
+    public async Task DocumentDelete_NoApiKey_Returns401()
+    {
+        // The destructive DELETE must never share the /status exemption.
+        var response = await _client.DeleteAsync($"/api/documents/{Guid.NewGuid()}");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DocumentDelete_WithApiKey_UnknownDocument_Returns404()
+    {
+        // Passes the gate and reaches the controller; the mocked repo has no such document.
+        var request = new HttpRequestMessage(HttpMethod.Delete, $"/api/documents/{Guid.NewGuid()}");
+        request.Headers.Add("X-Api-Key", "test-api-key");
+
+        var response = await _client.SendAsync(request);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
     public async Task ServerKeyEmpty_AnyRequest_Returns401_WithConfigMessage()
     {
         // Create a factory with an empty server key

@@ -11,10 +11,11 @@ namespace SapOdooMiddleware.Controllers;
 /// Invoice document ingestion API (Phase A — read-only into staging). Protected by
 /// ApiKeyMiddleware for curl/automation; the browser UI calls the services in-process.
 ///
-/// POST /api/documents/upload      — upload one Liqui Moly PDF; triggers async extraction
-/// GET  /api/documents             — list recent documents
-/// GET  /api/documents/{id}        — one document (header/footer/validation)
-/// GET  /api/documents/{id}/lines  — extracted line items for a document
+/// POST   /api/documents/upload      — upload one Liqui Moly PDF; triggers async extraction
+/// GET    /api/documents             — list recent documents
+/// GET    /api/documents/{id}        — one document (header/footer/validation)
+/// GET    /api/documents/{id}/lines  — extracted line items for a document
+/// DELETE /api/documents/{id}        — delete a document, its lines and the stored PDF
 /// </summary>
 [ApiController]
 [Route("api/documents")]
@@ -26,6 +27,7 @@ public class DocumentsController : ControllerBase
     private readonly InvoiceAutoMatchJob _autoMatch;
     private readonly InvoiceItemCreationService _itemCreation;
     private readonly ISapB1Service _sap;
+    private readonly ILogger<DocumentsController> _logger;
 
     public DocumentsController(
         IStagingDocumentRepository docs,
@@ -33,7 +35,8 @@ public class DocumentsController : ControllerBase
         DocumentUploadService uploads,
         InvoiceAutoMatchJob autoMatch,
         InvoiceItemCreationService itemCreation,
-        ISapB1Service sap)
+        ISapB1Service sap,
+        ILogger<DocumentsController> logger)
     {
         _docs    = docs;
         _lines   = lines;
@@ -41,6 +44,7 @@ public class DocumentsController : ControllerBase
         _autoMatch = autoMatch;
         _itemCreation = itemCreation;
         _sap = sap;
+        _logger = logger;
     }
 
     // Audit identity: Windows auth is disabled in Development today (returns null), so fall back
@@ -86,6 +90,63 @@ public class DocumentsController : ControllerBase
         if (doc is null) return NotFound();
         var lines = await _lines.ListByDocumentAsync(id, ct);
         return Ok(lines);
+    }
+
+    /// <summary>
+    /// Delete an uploaded invoice, its staging lines and the stored PDF. Allowed in any status (a failed
+    /// extraction can only be retried by deleting and re-uploading, because uploads dedupe on file hash).
+    /// Does NOT affect SAP items, Odoo/Neon products or a Purchase Order already created from it.
+    /// </summary>
+    [HttpDelete("{id:guid}")]
+    public async Task<IActionResult> Delete(Guid id, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(id, ct);
+        if (doc is null) return NotFound();
+
+        // False when a concurrent request deleted it between the read and the delete.
+        if (!await _docs.DeleteAsync(id, ct)) return NotFound();
+
+        _logger.LogInformation(
+            "Document {DocumentId} ('{File}', invoice {Invoice}, status {Status}) deleted by {User}.",
+            doc.Id, doc.OriginalFilename, doc.InvoiceNumber, doc.Status, CurrentUser);
+
+        TryDeleteStoredFile(doc);
+        return Ok(new { deleted = true });
+    }
+
+    /// <summary>
+    /// Best-effort removal of the stored PDF and its now-empty per-document folder. Never fails the delete:
+    /// an orphaned file is harmless (and Windows refuses to delete a file that is still open).
+    /// </summary>
+    private void TryDeleteStoredFile(StagingDocumentRow doc)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(doc.FilePath)) return;
+
+            // Uploads are stored at {StorageRoot}/yyyy/MM/{documentId}/{file}. Only touch a file that really sits
+            // in this document's own leaf folder, and remove that folder only when empty: the Autohub storage root
+            // is nested inside the Lubes one, so anything broader could destroy other documents.
+            var full = Path.GetFullPath(doc.FilePath);
+            var dir = Path.GetDirectoryName(full);
+            if (dir is null || !string.Equals(Path.GetFileName(dir), doc.Id.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning("Document {DocumentId} deleted; stored file left in place because it is not in the document's own folder: {Path}",
+                    doc.Id, doc.FilePath);
+                return;
+            }
+
+            if (System.IO.File.Exists(full))
+                System.IO.File.Delete(full);
+
+            if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
+                Directory.Delete(dir, recursive: false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Document {DocumentId} deleted, but its stored file could not be removed: {Path}",
+                doc.Id, doc.FilePath);
+        }
     }
 
     /// <summary>

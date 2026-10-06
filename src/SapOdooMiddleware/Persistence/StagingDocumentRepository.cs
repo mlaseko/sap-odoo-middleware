@@ -87,6 +87,12 @@ public interface IStagingDocumentRepository
     /// <summary>Transition the document to 'reviewed' (only valid from 'extracted').</summary>
     Task MarkReviewedAsync(Guid id, string reviewedBy, CancellationToken ct);
 
+    /// <summary>
+    /// Delete a staging document and its lines in one transaction. Returns false when no such document
+    /// exists. Touches only the staging tables — never SAP items, Odoo/Neon products or Purchase Orders.
+    /// </summary>
+    Task<bool> DeleteAsync(Guid id, CancellationToken ct);
+
     // --- Live extraction progress ---
 
     /// <summary>Set total page count and reset processed count (called once after PDF render).</summary>
@@ -295,6 +301,34 @@ public class StagingDocumentRepository : IStagingDocumentRepository
         cmd.Parameters.AddWithValue("by", reviewedBy);
         cmd.Parameters.AddWithValue("id", id);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task<bool> DeleteAsync(Guid id, CancellationToken ct)
+    {
+        // Lines are deleted explicitly rather than relying on the staging_document_line ON DELETE CASCADE
+        // FK: both tables were created with CREATE TABLE IF NOT EXISTS, so a pre-existing production table
+        // may carry a different FK action. Lines-then-document in one transaction works either way.
+        const string deleteLines = """DELETE FROM public."staging_document_line" WHERE "DocumentId" = @id;""";
+        const string deleteDoc   = """DELETE FROM public."staging_document" WHERE "Id" = @id;""";
+
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        await using (var cmd = new NpgsqlCommand(deleteLines, conn, tx))
+        {
+            cmd.Parameters.AddWithValue("id", id);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        int deleted;
+        await using (var cmd = new NpgsqlCommand(deleteDoc, conn, tx))
+        {
+            cmd.Parameters.AddWithValue("id", id);
+            deleted = await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        return deleted > 0;
     }
 
     public async Task SetTotalPagesAsync(Guid documentId, int pageCount, CancellationToken ct)
