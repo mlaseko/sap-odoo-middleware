@@ -94,10 +94,20 @@ public interface IAutohubInventorySqlService
     /// <summary>
     /// A customer's AR invoice item lines for the return-request copy screen, newest
     /// invoice first. <paramref name="openOnly"/> limits to open invoices; pass false
-    /// to include closed (paid) ones, since returns often happen after payment.
+    /// to include closed ones (paid, or fully credited). Note SAP will not accept a
+    /// closed invoice as the base of a Return Request.
     /// </summary>
     Task<List<OpenInvoiceLine>> GetInvoiceLinesForReturnAsync(
         string cardCode, bool openOnly, CancellationToken ct);
+
+    /// <summary>
+    /// The customer's AR invoice item lines on the given invoices only (open or closed),
+    /// for validating a Return Request. Unlike <see cref="GetInvoiceLinesForReturnAsync"/>
+    /// it never loads the customer's whole invoice history, so it stays fast for accounts
+    /// with many invoices (e.g. the cash customer).
+    /// </summary>
+    Task<List<OpenInvoiceLine>> GetInvoiceLinesByDocEntriesAsync(
+        string cardCode, IReadOnlyCollection<int> invoiceDocEntries, CancellationToken ct);
 
     /// <summary>Open Return Request lines awaiting the physical goods return, oldest first.</summary>
     Task<List<OpenReturnRequestLine>> GetOpenReturnRequestLinesAsync(
@@ -818,12 +828,31 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
 
     // ── Returns (Return Request ← invoice; Goods Return ← request) ───
 
-    public async Task<List<OpenInvoiceLine>> GetInvoiceLinesForReturnAsync(
+    public Task<List<OpenInvoiceLine>> GetInvoiceLinesForReturnAsync(
         string cardCode, bool openOnly, CancellationToken ct)
+        => QueryInvoiceLinesForReturnAsync(cardCode, openOnly, invoiceDocEntries: null, ct);
+
+    // One parameter per invoice keeps the IN list parameterised; past this many distinct
+    // invoices (far beyond any real request) fall back to the unscoped query rather than
+    // approach SQL Server's 2,100-parameter limit.
+    private const int MaxScopedInvoices = 1000;
+
+    public Task<List<OpenInvoiceLine>> GetInvoiceLinesByDocEntriesAsync(
+        string cardCode, IReadOnlyCollection<int> invoiceDocEntries, CancellationToken ct)
     {
-        // Item-type lines only (T1.ItemCode set). An AR invoice CLOSES when paid, not
-        // when returned — hence the openOnly toggle.
-        const string sql = """
+        var distinct = invoiceDocEntries.Distinct().ToList();
+        if (distinct.Count == 0)
+            return Task.FromResult(new List<OpenInvoiceLine>());
+        return QueryInvoiceLinesForReturnAsync(
+            cardCode, openOnly: false, distinct.Count <= MaxScopedInvoices ? distinct : null, ct);
+    }
+
+    private async Task<List<OpenInvoiceLine>> QueryInvoiceLinesForReturnAsync(
+        string cardCode, bool openOnly, IReadOnlyList<int>? invoiceDocEntries, CancellationToken ct)
+    {
+        // Item-type lines only (T1.ItemCode set). An AR invoice closes when paid or fully
+        // credited, not when a Return Request is raised — hence the openOnly toggle.
+        var sql = """
             SELECT T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
                    T1.LineNum, T1.ItemCode,
                    I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
@@ -834,14 +863,29 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             WHERE T0.CardCode = @card
               AND T0.CANCELED = 'N'
               AND (@openOnly = 0 OR T0.DocStatus = 'O')
-            ORDER BY T0.DocDate DESC, T0.DocNum DESC, T1.LineNum;
             """;
 
         var list = new List<OpenInvoiceLine>();
         await using var conn = await OpenAsync(ct);
-        await using var cmd = new SqlCommand(sql, conn);
+        await using var cmd = new SqlCommand();
+        cmd.Connection = conn;
         cmd.Parameters.AddWithValue("@card", cardCode);
         cmd.Parameters.AddWithValue("@openOnly", openOnly ? 1 : 0);
+
+        if (invoiceDocEntries is { Count: > 0 })
+        {
+            var names = new List<string>(invoiceDocEntries.Count);
+            for (int i = 0; i < invoiceDocEntries.Count; i++)
+            {
+                names.Add($"@d{i}");
+                cmd.Parameters.AddWithValue($"@d{i}", invoiceDocEntries[i]);
+            }
+            sql += $"\n  AND T0.DocEntry IN ({string.Join(", ", names)})";
+        }
+
+        sql += "\nORDER BY T0.DocDate DESC, T0.DocNum DESC, T1.LineNum;";
+        cmd.CommandText = sql;
+
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
