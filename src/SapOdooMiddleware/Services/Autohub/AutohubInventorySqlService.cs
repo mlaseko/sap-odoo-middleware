@@ -104,8 +104,9 @@ public interface IAutohubInventorySqlService
     /// <summary>
     /// The customer's AR invoice item lines on the given invoices only (open or closed),
     /// for validating a Return Request. Unlike <see cref="GetInvoiceLinesForReturnAsync"/>
-    /// it never loads the customer's whole invoice history, so it stays fast for accounts
-    /// with many invoices (e.g. the cash customer).
+    /// it does not load the customer's whole invoice history, so it stays fast for accounts
+    /// with many invoices (e.g. the cash customer). Scoped to at most 1000 distinct invoices;
+    /// a larger set falls back to the full history.
     /// </summary>
     Task<List<OpenInvoiceLine>> GetInvoiceLinesByDocEntriesAsync(
         string cardCode, IReadOnlyCollection<int> invoiceDocEntries, CancellationToken ct);
@@ -836,20 +837,34 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     // One parameter per invoice keeps the IN list parameterised; past this many distinct
     // invoices (far beyond any real request) fall back to the unscoped query rather than
     // approach SQL Server's 2,100-parameter limit.
-    private const int MaxScopedInvoices = 1000;
+    internal const int MaxScopedInvoices = 1000;
 
     public Task<List<OpenInvoiceLine>> GetInvoiceLinesByDocEntriesAsync(
         string cardCode, IReadOnlyCollection<int> invoiceDocEntries, CancellationToken ct)
     {
-        var distinct = invoiceDocEntries.Distinct().ToList();
-        if (distinct.Count == 0)
+        if (invoiceDocEntries.Count == 0)
             return Task.FromResult(new List<OpenInvoiceLine>());
         return QueryInvoiceLinesForReturnAsync(
-            cardCode, openOnly: false, distinct.Count <= MaxScopedInvoices ? distinct : null, ct);
+            cardCode, openOnly: false, ScopeInvoiceDocEntries(invoiceDocEntries), ct);
     }
 
-    private async Task<List<OpenInvoiceLine>> QueryInvoiceLinesForReturnAsync(
-        string cardCode, bool openOnly, IReadOnlyList<int>? invoiceDocEntries, CancellationToken ct)
+    /// <summary>
+    /// The distinct invoice DocEntries to scope the query to, or null (unscoped, the customer's
+    /// full history) when there are more than <see cref="MaxScopedInvoices"/>.
+    /// </summary>
+    internal static IReadOnlyList<int>? ScopeInvoiceDocEntries(IReadOnlyCollection<int> invoiceDocEntries)
+    {
+        var distinct = invoiceDocEntries.Distinct().ToList();
+        return distinct.Count <= MaxScopedInvoices ? distinct : null;
+    }
+
+    /// <summary>
+    /// SQL for the customer's AR invoice item lines, plus one <c>@dN</c> parameter per invoice
+    /// when scoped to <paramref name="invoiceDocEntries"/>. The caller binds <c>@card</c> and
+    /// <c>@openOnly</c>. Pure, so the exact text and parameters are unit-tested.
+    /// </summary>
+    internal static (string Sql, IReadOnlyList<(string Name, int Value)> DocEntryParameters)
+        BuildInvoiceLinesForReturnSql(IReadOnlyList<int>? invoiceDocEntries)
     {
         // Item-type lines only (T1.ItemCode set). An AR invoice closes when paid or fully
         // credited, not when a Return Request is raised — hence the openOnly toggle.
@@ -866,26 +881,30 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
               AND (@openOnly = 0 OR T0.DocStatus = 'O')
             """;
 
-        var list = new List<OpenInvoiceLine>();
-        await using var conn = await OpenAsync(ct);
-        await using var cmd = new SqlCommand();
-        cmd.Connection = conn;
-        cmd.Parameters.AddWithValue("@card", cardCode);
-        cmd.Parameters.AddWithValue("@openOnly", openOnly ? 1 : 0);
-
+        var parameters = new List<(string Name, int Value)>();
         if (invoiceDocEntries is { Count: > 0 })
         {
-            var names = new List<string>(invoiceDocEntries.Count);
             for (int i = 0; i < invoiceDocEntries.Count; i++)
-            {
-                names.Add($"@d{i}");
-                cmd.Parameters.AddWithValue($"@d{i}", invoiceDocEntries[i]);
-            }
-            sql += $"\n  AND T0.DocEntry IN ({string.Join(", ", names)})";
+                parameters.Add(($"@d{i}", invoiceDocEntries[i]));
+            sql += $"\n  AND T0.DocEntry IN ({string.Join(", ", parameters.Select(p => p.Name))})";
         }
 
         sql += "\nORDER BY T0.DocDate DESC, T0.DocNum DESC, T1.LineNum;";
-        cmd.CommandText = sql;
+        return (sql, parameters);
+    }
+
+    private async Task<List<OpenInvoiceLine>> QueryInvoiceLinesForReturnAsync(
+        string cardCode, bool openOnly, IReadOnlyList<int>? invoiceDocEntries, CancellationToken ct)
+    {
+        var (sql, docEntryParameters) = BuildInvoiceLinesForReturnSql(invoiceDocEntries);
+
+        var list = new List<OpenInvoiceLine>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@card", cardCode);
+        cmd.Parameters.AddWithValue("@openOnly", openOnly ? 1 : 0);
+        foreach (var (name, value) in docEntryParameters)
+            cmd.Parameters.AddWithValue(name, value);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
