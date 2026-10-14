@@ -94,8 +94,9 @@ public interface IAutohubInventorySqlService
     /// <summary>
     /// A customer's AR invoice item lines for the return-request copy screen, newest
     /// invoice first. <paramref name="openOnly"/> limits to open invoices; pass false
-    /// to include closed ones (paid, or fully credited). Note SAP will not accept a
-    /// closed invoice as the base of a Return Request.
+    /// to include closed (paid) ones, since returns often happen after payment. SAP
+    /// accepts a paid invoice as a Return Request base only once accounts cancel its
+    /// incoming payment, which reopens it.
     /// </summary>
     Task<List<OpenInvoiceLine>> GetInvoiceLinesForReturnAsync(
         string cardCode, bool openOnly, CancellationToken ct);
