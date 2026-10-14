@@ -1245,8 +1245,11 @@ public class AutohubInventoryController : ControllerBase
     /// <summary>
     /// GET /api/autohub/inv/invoices?card_code=C00001&amp;status=open
     /// The customer's AR invoice item lines for the return-request copy screen,
-    /// newest first. <c>status</c>: <c>open</c> (default) or <c>all</c> — note an AR
-    /// invoice closes when PAID, so returns for already-paid sales need <c>all</c>.
+    /// newest first. <c>status</c>: <c>open</c> (default) or <c>all</c>. An AR invoice
+    /// closes when PAID, so returns for already-paid sales need <c>all</c>; SAP accepts
+    /// such an invoice as a Return Request base only once accounts cancel its incoming
+    /// payment, which reopens it. Unbounded: <c>all</c> returns the customer's entire
+    /// invoice history.
     /// </summary>
     [HttpGet("invoices")]
     [ProducesResponseType(typeof(ApiResponse<List<OpenInvoiceLine>>), StatusCodes.Status200OK)]
@@ -1315,8 +1318,14 @@ public class AutohubInventoryController : ControllerBase
                     AlreadyExisted = true,
                 }));
 
-            // Validate each line against the customer's invoice lines (open AND paid).
-            var invoiceLines = await _sql.GetInvoiceLinesForReturnAsync(request.CardCode, openOnly: false, ct);
+            // Validate each line against the customer's lines on just the invoices this request
+            // names. Loading the customer's whole invoice history here made create as slow as
+            // GET /invoices?status=all for accounts with many invoices (the cash customer).
+            // Paid (closed) invoices deliberately pass this check: accounts reopen one by
+            // cancelling its incoming payment, and SAP itself rejects the request while the
+            // invoice is still closed.
+            var invoiceDocEntries = request.Lines.Select(l => l.InvoiceDocEntry).Distinct().ToList();
+            var invoiceLines = await _sql.GetInvoiceLinesByDocEntriesAsync(request.CardCode, invoiceDocEntries, ct);
             var byRef = invoiceLines.ToDictionary(l => (l.DocEntry, l.LineNum));
 
             string? branchWhs = null;
