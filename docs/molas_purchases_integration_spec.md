@@ -534,6 +534,12 @@ No other write path.
 
 ## 7. Month-end (Phase 5)
 
+> **Built (Phase 5):** the middleware reads items 1, 2 and 5 from SAP (`GET /api/month-end/supplier-balances`, `grni`,
+> `inventory-valuation`, `landed-cost-credits`, §6.5); the control centre's month-end record (`molas_sap_purchase_icc`)
+> compares them with Odoo, posts the GRNI accrual and the inventory adjustment with their day-1 reversals, offers the
+> prepayment reclass (item 4) and lists the stuck allocations and jobs. Item 3 uses Odoo's own unrealised currency
+> gains/losses adjustment; the record shows the expected amount per supplier.
+
 1. **Inventory adjustment** (periodic): from the SAP closing valuation, which includes capitalised landed costs. Unallocated import costs already sit on the Odoo clearing accounts.
 2. **GRNI accrual:** value of GRPOs not yet invoiced. Dr Purchases / Cr GRNI, auto-reversing.
 3. **FX revaluation** of open foreign-currency supplier balances (Odoo unrealised FX adjustment).

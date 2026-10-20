@@ -290,6 +290,10 @@ Spec: `docs/molas_purchases_integration_spec.md` (v4). Runbook: `docs/purchases-
   `LandedCostAllocationByEnum` / `LandedCostBaseDocumentTypeEnum` members, so those are resolved at runtime from
   candidate names (`TrySetInteropProperty` / `TrySetInteropEnum`); an error or warning lists the members the installed
   interop actually has — add the real name to the candidate list when one shows up in the log.
+- **Month-end (Phase 5):** `MonthEndController` (`GET /api/month-end/*`) over `SapMonthEndSqlReader` (JDT1/OCRD balances,
+  OPDN/PDN1 with PCH1/RPD1 for GRNI as of a date, OINM cumulative value, OALC/JDT1 type-69 credits, OIPF documents).
+  Pure date and GRNI arithmetic in `Services/MonthEnd/MonthEndMath` (unit-tested). The Odoo side is the control centre's
+  month-end record in `molas_sap_purchase_icc` (Molas_Lubes).
 - **UDFs:** `RequiredUdfs` gained OPDN/OIPF/OVPM/ORCT/OJDT fields; `SapUdfSetupService` adds the exclusive-access check
   (`sys.dm_exec_sessions` on the company DB; needs VIEW SERVER STATE for the SQL login). Endpoint
   `POST /api/admin/setup-sap-udfs` (alias of `/api/sapb1/setup-udfs`).
