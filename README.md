@@ -11,6 +11,9 @@ ASP.NET Core Web API middleware that integrates **Odoo** and **SAP Business One*
 | Incoming Payment creation | Odoo → SAP B1 | `POST /api/incoming-payments` |
 | Delivery confirmation | SAP B1 → Odoo | `POST /api/deliveries` |
 | COGS Journal Entry | Middleware → Odoo | `POST /api/cogs-journals` |
+| Purchases sync: POs, GRPOs, A/P invoices, A/P credit memos → Odoo (`x.sap.po`, `x.sap.grpo`, vendor bills) | SAP B1 → Odoo | `ODOO_WEBHOOK_QUEUE` worker (`PurchaseSyncQueueProcessor`), see [docs/purchases-sync-runbook.md](docs/purchases-sync-runbook.md) |
+| Purchases backfill (dry-run CSV / enqueue) | Middleware | `GET` / `POST /api/purchases/backfill` |
+| SAP UDF setup with exclusive-access check | Middleware → SAP B1 | `POST /api/admin/setup-sap-udfs` |
 
 ## Prerequisites
 
@@ -532,3 +535,15 @@ dotnet test
 │   └── appsettings.json     # Configuration
 └── tests/SapOdooMiddleware.Tests/
 ```
+
+## Purchases sync (Molas Lubes, SAP B1 → Odoo)
+
+Phase 1 of [docs/molas_purchases_integration_spec.md](docs/molas_purchases_integration_spec.md): SAP purchase orders,
+goods receipt POs, A/P invoices and A/P credit memos are queued by `SBO_SP_TransactionNotification` into the existing
+`ODOO_WEBHOOK_QUEUE` table with an explicit `EventType` (`PO_UPSERT`, `GRPO_LINK`, `AP_INVOICE_CREATE`,
+`AP_INVOICE_CANCEL`, `AP_CREDIT_CREATE`, `AP_CREDIT_CANCEL`) and drained by `PurchaseSyncQueueProcessor`. Vendor bills
+and credit notes are created and posted in Odoo when their totals match SAP; mappings (VAT group → tax, item group →
+account, G/L → account, cut-over date, bill journal) come from the Integration Control Centre in Odoo. The delivery
+worker now reads only `ObjectType = '15'` rows. Deploy order, endpoints, error codes and configuration:
+[docs/purchases-sync-runbook.md](docs/purchases-sync-runbook.md). SQL migration:
+`migrations/sqlserver/2026-10-20__purchases_transaction_notification.sql`.

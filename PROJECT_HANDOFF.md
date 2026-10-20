@@ -258,3 +258,30 @@ FROM public."NeonProducts" WHERE "ItemCode" IN ('23139','6452');
 SELECT "ArticleNumber","Category","PackagingSize","Liter","ScrapedAt"
 FROM public."NeonLiquiMolyProducts" WHERE "ArticleNumber"='6452';
 ```
+
+---
+
+## 13. Purchases sync (Lubes, 2026-10) — SAP B1 → Odoo bills, Phase 1
+
+Spec: `docs/molas_purchases_integration_spec.md` (v4). Runbook: `docs/purchases-sync-runbook.md`. The Odoo side
+(fields, `x.sap.po` / `x.sap.grpo`, control-centre mapping models, Shipments app) lives in **`mlaseko/Molas_Lubes`**
+(`custom/addons/integration_control_center`, `custom/addons/molas_supplier_orders`) and is built by the Odoo agent.
+
+- **Queue:** the existing SQL Server `ODOO_WEBHOOK_QUEUE`, no schema change. `EventType` carries the six purchase
+  actions; the stored procedure migration is `migrations/sqlserver/2026-10-20__purchases_transaction_notification.sql`
+  (apply by hand in SSMS, **after** deploying the build with the `ObjectType = '15'` filter in `WebhookQueueProcessor`).
+- **Worker:** `Services/PurchaseSync/PurchaseSyncQueueProcessor` → `PurchaseSyncHandlers`. SAP reads by direct SQL
+  (`SapPurchaseSqlReader`, connection from `SapB1:*` DbUserName/DbPassword or `PurchaseSync:SapSqlConnectionString`);
+  Odoo writes through `OdooRpcClient` (`IOdooRpc`, same `Odoo:*` settings / Bearer API key); mappings via `IccMappingCache`
+  (5-min cache). Processes nothing while `icc.ap.sync.settings.cutover_date` is empty.
+- **Odoo → SAP** (payments, refunds, adjustments, landed costs) is **Phase 3a/4**: new idempotent endpoints
+  (`/api/outgoing-payments`, `/api/supplier-refunds`, `/api/supplier-adjustments`, `/api/landed-costs`) called by
+  control-centre jobs. Not built yet.
+- **UDFs:** `RequiredUdfs` gained OPDN/OIPF/OVPM/ORCT/OJDT fields; `SapUdfSetupService` adds the exclusive-access check
+  (`sys.dm_exec_sessions` on the company DB; needs VIEW SERVER STATE for the SQL login). Endpoint
+  `POST /api/admin/setup-sap-udfs` (alias of `/api/sapb1/setup-udfs`).
+- **New ISapB1Service member:** `UpdateGrpoOdooShipmentIdAsync` (stub updated too).
+- **Gotchas:** `x_sap_docentry` on `account.move` is the SAP *sales order* DocEntry — bills use `x_sap_invoice_docentry`,
+  credit notes `x_sap_credit_docentry`. `invoice_currency_rate` is written as 1/DocRate (`PurchaseSync:InvoiceRateIsInverseOfDocRate`).
+  Missing mappings fail the row at once (terminal, retry from the queue view); a total mismatch leaves the bill in draft
+  with `x_sap_sync_error = TOTAL_MISMATCH`.

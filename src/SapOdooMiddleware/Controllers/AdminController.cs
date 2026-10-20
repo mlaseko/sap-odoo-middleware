@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using SapOdooMiddleware.Integrations.Classifier;
+using SapOdooMiddleware.Models.Api;
+using SapOdooMiddleware.Services;
 
 namespace SapOdooMiddleware.Controllers;
 
@@ -27,6 +29,24 @@ public class AdminController : ControllerBase
             loadedAt = _taxonomy.LoadedAt,
             path     = _taxonomy.FilePath,
         });
+    }
+
+    /// <summary>
+    /// POST /api/admin/setup-sap-udfs?dry_run=false&amp;force=false
+    /// The purchases-spec UDF routine (§4.1): creates only the missing UDFs, refuses (409) while other
+    /// users are connected to the Lubes company database unless <c>force=true</c>. Run out of hours.
+    /// </summary>
+    [HttpPost("setup-sap-udfs")]
+    public async Task<IActionResult> SetupSapUdfs(
+        [FromServices] SapUdfSetupService udfSetup,
+        [FromQuery(Name = "dry_run")] bool dryRun = false,
+        [FromQuery] bool force = false,
+        CancellationToken ct = default)
+    {
+        var result = await udfSetup.RunAsync(dryRun, force, ct);
+        if (result.Refused)
+            return StatusCode(409, ApiResponse<SapUdfSetupResult>.Ok(result));
+        return Ok(ApiResponse<SapUdfSetupResult>.Ok(result));
     }
 
     /// <summary>

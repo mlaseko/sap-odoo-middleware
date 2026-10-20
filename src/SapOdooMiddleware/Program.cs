@@ -15,6 +15,7 @@ using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
 using SapOdooMiddleware.Services.Autohub;
 using SapOdooMiddleware.Services.Autohub.Excel;
+using SapOdooMiddleware.Services.PurchaseSync;
 using SapOdooMiddleware.Services.Reports;
 using SapOdooMiddleware.Services.Vision;
 using SapOdooMiddleware.Workers;
@@ -74,6 +75,20 @@ builder.Services.AddSingleton<IAutohubSapB1Service, AutohubSapB1DiApiServiceStub
 
 builder.Services.AddHttpClient<IOdooService, OdooJsonRpcService>();
 builder.Services.AddHostedService<WebhookQueueProcessor>();
+
+// --- Purchases sync: SAP → Odoo vendor bills, POs, GRPOs (docs/molas_purchases_integration_spec.md §6.1) ---
+// Shares ODOO_WEBHOOK_QUEUE with the delivery worker (purchase EventTypes only), reads SAP by direct SQL,
+// writes Odoo over JSON-RPC as the sap-integration user, and reads the control-centre mapping tables.
+builder.Services.Configure<PurchaseSyncSettings>(builder.Configuration.GetSection(PurchaseSyncSettings.SectionName));
+builder.Services.AddHttpClient<IOdooRpc, OdooRpcClient>();
+builder.Services.AddSingleton<SapSqlConnectionFactory>();
+builder.Services.AddScoped<ISapPurchaseReader, SapPurchaseSqlReader>();
+builder.Services.AddScoped<IIccMappingCache, IccMappingCache>();
+builder.Services.AddScoped<IOdooPurchaseGateway, OdooPurchaseGateway>();
+builder.Services.AddScoped<PurchaseQueueRepository>();
+builder.Services.AddScoped<PurchaseSyncHandlers>();
+builder.Services.AddScoped<SapUdfSetupService>();   // UDF routine with the exclusive-access check (§4.1)
+builder.Services.AddHostedService<PurchaseSyncQueueProcessor>();
 
 // --- Item Provisioning settings ---
 builder.Services.Configure<ClassifierSettings>(builder.Configuration.GetSection(ClassifierSettings.SectionName));

@@ -93,6 +93,12 @@ public class WebhookQueueProcessor : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Only Delivery Note rows (ObjectType 15) belong to this worker. The same table now also
+    /// carries the purchases flow (ObjectType 22/20/18/19, EventType PO_UPSERT, GRPO_LINK,
+    /// AP_INVOICE_*, AP_CREDIT_*), which <see cref="PurchaseSync.PurchaseSyncQueueProcessor"/>
+    /// drains. Without this filter a purchase row would be confirmed as a delivery.
+    /// </summary>
     private static async Task<List<QueueEntry>> FetchPendingEntriesAsync(
         SqlConnection connection,
         WebhookQueueSettings settings,
@@ -103,6 +109,7 @@ public class WebhookQueueProcessor : BackgroundService
                 [Id], [DocEntry], [OdooSoId], [DeliveryDate], [RetryCount]
             FROM [dbo].[ODOO_WEBHOOK_QUEUE]
             WHERE [Status] = 'pending'
+              AND [ObjectType] = '15'
               AND [RetryCount] < @MaxRetries
             ORDER BY [CreatedAt] ASC
             """;
