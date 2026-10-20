@@ -50,6 +50,7 @@ Reads from SAP are direct SQL on the company database (`SapB1:Server` / `Company
 | `POST` | `/api/supplier-refunds/{docEntry}/cancel` | As above for ORCT. |
 | `POST` | `/api/supplier-adjustments` | Phase 3a. Journal entry: business-partner line (`ShortName = card_code`) and the mirror G/L line, sides from `direction`, FC amount at `rate`. Idempotent on `U_OdooRef`. Returns `jdt_docentry` (OJDT.TransId). |
 | `POST` | `/api/supplier-adjustments/{jdtDocEntry}/reverse` | SAP storno (`JournalEntries.Cancel()`), reversal stamped `U_OdooRef = "<ref>:REV"`. Idempotent on `OJDT.StornoToTr`; refusal → 409. |
+| `POST` | `/api/landed-costs` | Phase 4. SAP Landed Costs document (OIPF) through `LandedCostsService`: item lines from the container's GRPO (first push) or from the previous landed cost document (delta), one cost line per `lc_code` in TZS, no vendor. Idempotent on `U_OdooShipmentId` (`ref` / `ref:n`); guards → 422. |
 
 All endpoints need `X-Api-Key`.
 
@@ -93,6 +94,26 @@ Called by the control-centre jobs of `molas_sap_purchase_icc` (bodies in spec v4
   `{"cancelled": true, "already_cancelled": false, ...}`, `{"jdt_docentry": 5001, "number": 9001, "already_existed": false}`,
   `{"original_docentry": 5001, "reversal_docentry": 5002, "reversal_number": 9002, "already_existed": false}`.
 
+## Odoo → SAP landed costs (Phase 4)
+
+Called by the control centre's `landed_cost_push` job (`molas_sap_purchase_icc`) when a container order reaches *Costs
+final* (body in spec v4 §6.3). Behaviour worth knowing:
+
+- **One SAP document per push.** The first push is based on the GRPO's lines (base type 20). A late cost bill puts the
+  order back to *Costs final*; the next push is a **delta** based on the previous landed cost document (base type 69,
+  `previous_lc_docentry`) with only the difference per code, keyed `"<ref>:<n>"`. The control centre computes the
+  difference from the clearing-account balances, so nothing is sent twice.
+- **Codes** must exist in SAP (Administration ▸ Setup ▸ Purchasing ▸ Landed Costs, `OALC`) with an allocation account;
+  `LC_CODE_UNKNOWN` names the missing one. The code is text (`x_sap_lc_code` on the Odoo expense category).
+- **Negative deltas** (a credit note on a cost bill after the push) need the order's *negative landed cost approved*
+  tick; otherwise `NEGATIVE_NOT_APPROVED`. A first push is never negative.
+- **Guards are 422** and are not retried automatically: fix the cause in Odoo or SAP and press *Costs Final* again
+  (the order is in `error` with `x_lc_error`). SAP's own refusals (period closed, no allocation account on the code) are
+  500 with SAP's message and retry per the job's rules.
+- **Idempotency** is `OIPF.U_OdooShipmentId`; the UDF must exist (`POST /api/admin/setup-sap-udfs`). A re-sent key
+  returns the existing document with `already_existed`.
+- Response: `{"success": true, "data": {"doc_entry": 77, "doc_num": 1007, "idempotency_key": "SO-2026-0012", "item_lines": 2, "cost_total": 1430000.0, "already_existed": false}}`.
+
 ## Configuration
 
 ```jsonc
@@ -119,6 +140,7 @@ The queue connection is `WebhookQueue:ConnectionString` (shared with the deliver
   `invoice_currency_rate`, `x_sap_invoice_docentry` or `x_sap_credit_docentry`, `x_sap_docnum`, `x_sap_objtype`, `x_sap_sync_error`,
   `reversed_entry_id`, `invoice_line_ids` with `name`, `quantity`, `price_unit`, `account_id`, `tax_ids`, `analytic_distribution`);
   `x.sap.grpo.odoo_shipment_written`.
+- SAP (Phase 4): `OIPF` documents with `U_OdooShipmentId` = `supplier.order.name` (or `name:n`), `U_ShipRef` = the container number.
 - Calls (model methods of `molas_sap_purchase`, keyword arguments): `x.sap.po.upsert(vals=)`, `x.sap.grpo.upsert(vals=, lines=)`,
   `account.move.sap_match(move_id=)`; and `account.move.action_post`, `account.move.button_cancel`, `account.move.message_post(body=)`,
   `account.move.reversal` (create + `reverse_moves`), `supplier.account.entry.sync_from_credit_note(move_ids=[id])` (Phase 3, Odoo side).

@@ -7320,6 +7320,201 @@ ORDER BY PostingDate, DocumentNumber";
         }
     }
 
+    // ------------------------------------------------------------------
+    // Landed costs (spec v4 §6.3, Phase 4): LandedCostsService, no fallback to another write path
+    // ------------------------------------------------------------------
+
+    /// <summary>Rows of a Recordset query mapped by <paramref name="map"/>. Caller holds <see cref="_lock"/>.</summary>
+    private List<T> QueryRows<T>(string sql, Func<Fields, T> map)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery(sql);
+            var rows = new List<T>();
+            while (!rs.EoF)
+            {
+                rows.Add(map(rs.Fields));
+                rs.MoveNext();
+            }
+            return rows;
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+    }
+
+    private static string FieldString(Fields fields, string name) =>
+        (fields.Item(name).Value?.ToString() ?? string.Empty).Trim();
+
+    /// <summary>
+    /// Landed cost document carrying this <c>U_OdooShipmentId</c>. Fails closed like the payment check: an error
+    /// here (typically the UDF missing) aborts the push, because a duplicate landed cost document doubles the item cost.
+    /// </summary>
+    private SapLandedCostHeader? FindLandedCostByOdooShipmentId(string key)
+    {
+        try
+        {
+            var escaped = key.Replace("'", "''");
+            return QueryRows(
+                $"SELECT TOP 1 \"DocEntry\", \"DocNum\", \"U_OdooShipmentId\" FROM OIPF WHERE \"U_OdooShipmentId\" = '{escaped}' ORDER BY \"DocEntry\" DESC",
+                f => new SapLandedCostHeader(
+                    Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value), FieldString(f, "U_OdooShipmentId")))
+                .FirstOrDefault();
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Idempotency check on OIPF.U_OdooShipmentId failed (is the UDF created? run POST /api/admin/setup-sap-udfs): {ex.Message}", ex);
+        }
+    }
+
+    private SapLandedCostHeader? ReadLandedCostHeader(int docEntry) =>
+        QueryRows(
+            $"SELECT \"DocEntry\", \"DocNum\", \"U_OdooShipmentId\" FROM OIPF WHERE \"DocEntry\" = {docEntry}",
+            f => new SapLandedCostHeader(
+                Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value), FieldString(f, "U_OdooShipmentId")))
+            .FirstOrDefault();
+
+    private SapGrpoHeader? ReadGrpoHeader(int docEntry) =>
+        QueryRows(
+            $"SELECT \"DocEntry\", \"DocNum\", \"CardCode\", \"CANCELED\" FROM OPDN WHERE \"DocEntry\" = {docEntry}",
+            f => new SapGrpoHeader(
+                Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value), FieldString(f, "CardCode"),
+                FieldString(f, "CANCELED") == "Y", null))
+            .FirstOrDefault();
+
+    /// <summary>Item lines of a GRPO (PDN1) or of a landed cost document (IPF1).</summary>
+    private List<SapBaseLine> ReadBaseLines(string lineTable, int docEntry) =>
+        QueryRows(
+            $"SELECT \"LineNum\", \"ItemCode\", \"Quantity\", \"WhsCode\" FROM {lineTable} WHERE \"DocEntry\" = {docEntry} ORDER BY \"LineNum\"",
+            f => new SapBaseLine(
+                Convert.ToInt32(f.Item("LineNum").Value), FieldString(f, "ItemCode"),
+                Convert.ToDouble(f.Item("Quantity").Value), FieldString(f, "WhsCode")));
+
+    private List<string> ReadLandedCostCodes() =>
+        QueryRows("SELECT \"AlcCode\" FROM OALC", f => FieldString(f, "AlcCode"));
+
+    private static LandedCostAllocationByEnum ToAllocationBy(string allocation) => allocation switch
+    {
+        "cash_value_after" => LandedCostAllocationByEnum.asCashValueAfter,
+        "quantity" => LandedCostAllocationByEnum.asQuantity,
+        "weight" => LandedCostAllocationByEnum.asWeight,
+        "volume" => LandedCostAllocationByEnum.asVolume,
+        "equally" => LandedCostAllocationByEnum.asEqually,
+        _ => LandedCostAllocationByEnum.asCashValueBefore,
+    };
+
+    public async Task<LandedCostPushResult> CreateLandedCostAsync(LandedCostPushRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            string reference = request.OdooShipmentId.Trim();
+            string key = LandedCostPlanning.IdempotencyKey(reference, request.PushSequence);
+
+            // ── Idempotency on OIPF.U_OdooShipmentId (fails closed) ──
+            var existing = FindLandedCostByOdooShipmentId(key);
+            if (existing is not null)
+            {
+                _logger.LogInformation(
+                    "Landed cost document for U_OdooShipmentId={Key} already exists (DocEntry={DocEntry}, DocNum={DocNum}) — returning it.",
+                    key, existing.DocEntry, existing.DocNum);
+                return new LandedCostPushResult
+                {
+                    DocEntry = existing.DocEntry, DocNum = existing.DocNum, IdempotencyKey = key, AlreadyExisted = true,
+                };
+            }
+
+            // ── Reads for the guards: GRPO, previous landed cost document, landed cost codes ──
+            var grpo = ReadGrpoHeader(request.GrpoDocentry);
+            var grpoLines = grpo is null ? new List<SapBaseLine>() : ReadBaseLines("PDN1", request.GrpoDocentry);
+            SapLandedCostHeader? previous = null;
+            var previousLines = new List<SapBaseLine>();
+            if (request.PreviousLcDocentry is { } previousEntry)
+            {
+                previous = ReadLandedCostHeader(previousEntry);
+                if (previous is not null) previousLines = ReadBaseLines("IPF1", previousEntry);
+            }
+            var plan = LandedCostPlanning.Build(request, grpo, grpoLines, previous, previousLines, ReadLandedCostCodes());
+
+            // ── The document ──
+            var cs = _company!.GetCompanyService();
+            LandedCostsService? svc = null;
+            LandedCost? lc = null;
+            try
+            {
+                svc = (LandedCostsService)cs.GetBusinessService(ServiceTypes.LandedCostsService);
+                lc = (LandedCost)svc.GetDataInterface(LandedCostsServiceDataInterfaces.lcsLandedCost);
+
+                var docDate = request.DocDate ?? DateTime.Today;
+                lc.PostingDate = docDate;
+                lc.DueDate = docDate;
+                lc.DocumentDate = docDate;
+                // No VendorCode / BrokerCode (spec §6.3): the costs were billed and paid in Odoo.
+                if (!string.IsNullOrWhiteSpace(request.ShipRef))
+                    lc.Reference = ClipForSap(request.ShipRef.Trim(), 100);
+                lc.Remarks = ClipForSap(
+                    string.IsNullOrWhiteSpace(request.Remarks) ? $"Odoo landed costs {key}" : request.Remarks.Trim(), 254);
+                lc.JournalRemarks = ClipForSap($"Landed costs {reference}" + (request.PushSequence > 1 ? $" (delta {request.PushSequence})" : string.Empty), 50);
+                lc.UserFields.Item("U_OdooShipmentId").Value = key;
+                if (!string.IsNullOrWhiteSpace(request.ShipRef))
+                    lc.UserFields.Item("U_ShipRef").Value = ClipForSap(request.ShipRef.Trim(), 50);
+
+                var baseType = plan.BaseType == LandedCostPlanning.BaseTypeLandedCost
+                    ? LandedCostBaseDocumentTypeEnum.asLandedCost
+                    : LandedCostBaseDocumentTypeEnum.asGoodsReceiptPO;
+                foreach (var baseLine in plan.ItemLines)
+                {
+                    var line = lc.LandedCost_ItemLines.Add();
+                    line.BaseDocumentType = baseType;
+                    line.BaseEntry = plan.BaseEntry;
+                    line.BaseLine = baseLine.LineNum;
+                }
+
+                foreach (var cost in plan.CostLines)
+                {
+                    var line = lc.LandedCost_CostLines.Add();
+                    line.LandedCostCode = cost.LcCode;
+                    line.Amount = cost.Amount;
+                    line.AllocationBy = ToAllocationBy(cost.AllocationBy);
+                }
+
+                var added = svc.AddLandedCost(lc);
+                int docEntry = added.LandedCostNumber;
+                int docNum = QueryDocNumByEntry("OIPF", docEntry);
+
+                _logger.LogInformation(
+                    "SAP Landed Costs document created: DocEntry={DocEntry}, DocNum={DocNum}, key={Key}, base {BaseType}/{BaseEntry}, " +
+                    "ItemLines={ItemLines}, CostLines={CostLines}, Total={Total}",
+                    docEntry, docNum, key, plan.BaseType, plan.BaseEntry, plan.ItemLines.Count, plan.CostLines.Count, plan.Total);
+
+                return new LandedCostPushResult
+                {
+                    DocEntry = docEntry, DocNum = docNum, IdempotencyKey = key, ItemLines = plan.ItemLines.Count,
+                    CostTotal = plan.Total, AlreadyExisted = false,
+                };
+            }
+            catch (COMException ex)
+            {
+                throw WrapServiceError("LandedCostsService.AddLandedCost", ex);
+            }
+            finally
+            {
+                if (lc is not null) try { Marshal.ReleaseComObject(lc); } catch { /* ignored */ }
+                if (svc is not null) try { Marshal.ReleaseComObject(svc); } catch { /* ignored */ }
+                try { Marshal.ReleaseComObject(cs); } catch { /* ignored */ }
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     /// <inheritdoc/>
     public async Task<DocCancelResult> CancelAutohubReturnRequestAsync(int docEntry, string? remarks, CancellationToken ct)
     {

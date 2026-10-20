@@ -478,21 +478,43 @@ Failures: the endpoint returns the SAP message; the control centre job records i
 
 ### 6.3 Odoo → SAP: landed costs (Phase 4)
 
-**`POST /api/landed-costs`** → SAP Landed Costs document via `LandedCostsService`.
+**`POST /api/landed-costs`** → SAP Landed Costs document (OIPF, object 69) via the DI API `LandedCostsService`
+(`LandedCost`, `LandedCost_ItemLines`, `LandedCost_CostLines`, `AddLandedCost` → `LandedCostParams.LandedCostNumber`).
+No other write path.
 
 ```json
 {
-  "odoo_shipment_id": "SO-2026-0012",       // supplier.order reference → U_OdooShipmentId (idempotency key)
-  "ship_ref": "MSKU1234567",                // container no. → U_ShipRef
-  "grpo_docentry": 345,
-  "previous_lc_docentry": null,             // set for a delta push
-  "cost_lines": [ { "lc_code": 2, "amount_tzs": 1250000.00 }, { "lc_code": 8, "amount_tzs": 180000.00 } ]
+  "odoo_order_id": 12,                      // supplier.order id, echoed for the write-back
+  "odoo_shipment_id": "SO-2026-0012",       // supplier.order.name → U_OdooShipmentId (idempotency key)
+  "ship_ref": "MSKU1234567",                // container no. → U_ShipRef and Reference
+  "grpo_docentry": 345,                     // the container's GRPO (OPDN.DocEntry)
+  "previous_lc_docentry": null,             // set for a delta push: the container's last SAP landed cost document
+  "push_sequence": 1,                       // 1 first push, 2 first delta, … (= number of SAP docs the order carries + 1)
+  "approve_negative": false,                // true only when the order's "negative landed cost approved" tick is set
+  "doc_date": "2026-11-20",                 // optional, today when absent
+  "cost_lines": [ { "lc_code": "C02", "amount_tzs": 1250000.00 }, { "lc_code": "C08", "amount_tzs": 180000.00 } ]
 }
 ```
-- Item lines are based on the container's GRPO lines; one cost line per `lc_code` in TZS; `U_OdooShipmentId`, `U_ShipRef`; **no Vendor/Broker**.
-- Idempotency on `OIPF.U_OdooShipmentId` plus the set of amounts (a delta push with new amounts is a new document whose `U_OdooShipmentId` is `"<ref>:<n>"`).
-- **Guards:** never push with no GRPO, never push a negative total for a code without manual approval, never push a code that is not capitalised. Confirm the entity and field names against the DI API `LandedCostsService` (`LandedCostParams`, `LandedCost_ItemLines`, `LandedCost_CostLines`).
-- Response: `{ "doc_entry": 77, "doc_num": 1007, "already_existed": false }`. The control centre write-back posts the Odoo clearing JE (5.7).
+- `lc_code` is the SAP landed cost code **as text** (`OALC.AlcCode`, `supplier.expense.category.x_sap_lc_code`), matched
+  case-insensitively; `amount_tzs` is in local currency. Lines with the same code are merged, zero lines dropped. An
+  optional `allocation_by` per line (`cash_value_before` default, `cash_value_after`, `quantity`, `weight`, `volume`,
+  `equally`) sets how SAP spreads the cost over the items.
+- **First push** (`push_sequence` 1): item lines are the GRPO's lines (base type 20). **Delta push** (`push_sequence` > 1,
+  `previous_lc_docentry` set): item lines are the previous landed cost document's lines (base type 69), so SAP adds the
+  delta to the same items; the amounts are only the difference (the control centre sends the clearing balances net of the
+  earlier clearing entries). `U_OdooShipmentId`, `U_ShipRef`; **no Vendor/Broker**.
+- **Idempotency** on `OIPF.U_OdooShipmentId` = `odoo_shipment_id` for the first push, `"<ref>:<push_sequence>"` for a
+  delta. A re-sent key returns the existing document with `already_existed`. The check fails closed when the UDF is missing.
+- **Guards (HTTP 422, nothing created, the job fails and is not retried automatically):** `GRPO_NOT_FOUND`,
+  `GRPO_CANCELLED`, `GRPO_NO_LINES`; `NEGATIVE_NOT_APPROVED` (a negative line without `approve_negative`),
+  `NEGATIVE_FIRST_PUSH`; `LC_CODE_UNKNOWN` (not in OALC — Odoo only sends capitalised categories, so a non-capitalised
+  code never reaches SAP); `NO_COST_LINES`; `PREVIOUS_LC_NOT_FOUND`, `PREVIOUS_LC_MISMATCH` (the previous document's
+  `U_OdooShipmentId` is another container's), `PREVIOUS_LC_NO_LINES`. Shape errors (missing reference, GRPO 0, no lines,
+  `push_sequence` > 1 without `previous_lc_docentry`) are HTTP 400.
+- Response: `{ "doc_entry": 77, "doc_num": 1007, "idempotency_key": "SO-2026-0012", "item_lines": 2, "cost_total": 1430000.0, "already_existed": false }`.
+  The control centre write-back appends `doc_entry` to `x_sap_lc_docentries`, sets `x_lc_state = pushed` and posts the
+  Odoo clearing JE (5.7): Dr the landed-cost offset account of `icc.ap.sync.settings`, Cr each capitalised category's
+  account by its clearing balance on the container, `x_sap_lc_docentry` = `doc_entry`, `x_shipment_id` = the order.
 
 ### 6.4 Configuration
 

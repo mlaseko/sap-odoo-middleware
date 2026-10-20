@@ -280,7 +280,12 @@ Spec: `docs/molas_purchases_integration_spec.md` (v4). Runbook: `docs/purchases-
   (`oJournalEntries`: BP line by `ShortName`, G/L line, sides from `direction`, FC + LC amounts; `U_OdooRef`) and
   `/{jdtDocEntry}/reverse` (`JournalEntries.Cancel()`, idempotent on `OJDT.StornoToTr`). Pure posting arithmetic in
   `Services/PurchaseSync/AdjustmentPosting`. Called by the control centre's `molas_sap_purchase_icc` jobs (Molas_Lubes).
-  Idempotency checks fail closed when the UDF is missing. Landed costs (`/api/landed-costs`) are Phase 4, not built.
+  Idempotency checks fail closed when the UDF is missing.
+- **Landed costs (Phase 4):** `POST /api/landed-costs` (`LandedCostsController`) → `ISapB1Service.CreateLandedCostAsync`
+  via the DI API `LandedCostsService` (`LandedCost`, `LandedCost_ItemLines` base 20 GRPO / 69 previous landed cost,
+  `LandedCost_CostLines`, `AddLandedCost`). Pure guards and planning in `Services/PurchaseSync/LandedCostPlanning`
+  (unit-tested); idempotent on `OIPF.U_OdooShipmentId` (`ref` / `ref:n`); §6.3 guards → 422 (`LandedCostGuardException`).
+  Reads (OPDN/PDN1, OIPF/IPF1, OALC) are Recordset queries inside the DI service.
 - **UDFs:** `RequiredUdfs` gained OPDN/OIPF/OVPM/ORCT/OJDT fields; `SapUdfSetupService` adds the exclusive-access check
   (`sys.dm_exec_sessions` on the company DB; needs VIEW SERVER STATE for the SQL login). Endpoint
   `POST /api/admin/setup-sap-udfs` (alias of `/api/sapb1/setup-udfs`).
