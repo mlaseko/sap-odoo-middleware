@@ -274,9 +274,13 @@ Spec: `docs/molas_purchases_integration_spec.md` (v4). Runbook: `docs/purchases-
   (`SapPurchaseSqlReader`, connection from `SapB1:*` DbUserName/DbPassword or `PurchaseSync:SapSqlConnectionString`);
   Odoo writes through `OdooRpcClient` (`IOdooRpc`, same `Odoo:*` settings / Bearer API key); mappings via `IccMappingCache`
   (5-min cache). Processes nothing while `icc.ap.sync.settings.cutover_date` is empty.
-- **Odoo → SAP** (payments, refunds, adjustments, landed costs) is **Phase 3a/4**: new idempotent endpoints
-  (`/api/outgoing-payments`, `/api/supplier-refunds`, `/api/supplier-adjustments`, `/api/landed-costs`) called by
-  control-centre jobs. Not built yet.
+- **Odoo → SAP (Phase 3a, built):** `SupplierPushController` — `POST /api/outgoing-payments` (`oVendorPayments`,
+  on account, `DocType rSupplier`, `TransferAccount` from the control centre's journal mapping, `DocRate`, `U_OdooPayRef`),
+  `POST /api/supplier-refunds` (`oIncomingPayments` from the vendor), their `/{docEntry}/cancel`, `POST /api/supplier-adjustments`
+  (`oJournalEntries`: BP line by `ShortName`, G/L line, sides from `direction`, FC + LC amounts; `U_OdooRef`) and
+  `/{jdtDocEntry}/reverse` (`JournalEntries.Cancel()`, idempotent on `OJDT.StornoToTr`). Pure posting arithmetic in
+  `Services/PurchaseSync/AdjustmentPosting`. Called by the control centre's `molas_sap_purchase_icc` jobs (Molas_Lubes).
+  Idempotency checks fail closed when the UDF is missing. Landed costs (`/api/landed-costs`) are Phase 4, not built.
 - **UDFs:** `RequiredUdfs` gained OPDN/OIPF/OVPM/ORCT/OJDT fields; `SapUdfSetupService` adds the exclusive-access check
   (`sys.dm_exec_sessions` on the company DB; needs VIEW SERVER STATE for the SQL login). Endpoint
   `POST /api/admin/setup-sap-udfs` (alias of `/api/sapb1/setup-udfs`).

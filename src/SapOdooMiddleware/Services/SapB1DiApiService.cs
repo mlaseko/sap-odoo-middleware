@@ -3,8 +3,10 @@ using Microsoft.Extensions.Options;
 using SAPbobsCOM;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Models.Inventory;
+using SapOdooMiddleware.Models.PurchaseSync;
 using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services.Autohub;
+using SapOdooMiddleware.Services.PurchaseSync;
 using System.Runtime.InteropServices;
 
 namespace SapOdooMiddleware.Services;
@@ -6906,6 +6908,411 @@ ORDER BY PostingDate, DocumentNumber";
             {
                 Marshal.ReleaseComObject(payment);
             }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // ================================
+    // PURCHASES SYNC — Odoo → SAP (spec v4 §6.2): payments on account, adjustment JEs
+    // ================================
+
+    private string? _localCurrencyCode;
+
+    /// <summary>Company local currency (OADM.MainCurncy), read once. Caller holds <see cref="_lock"/>.</summary>
+    private string GetLocalCurrencyCode()
+    {
+        if (!string.IsNullOrEmpty(_localCurrencyCode))
+            return _localCurrencyCode;
+
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery("SELECT TOP 1 \"MainCurncy\" FROM OADM");
+            _localCurrencyCode = rs.EoF ? "TZS" : (rs.Fields.Item("MainCurncy").Value?.ToString() ?? "TZS").Trim();
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+        return _localCurrencyCode;
+    }
+
+    private static string ClipForSap(string? value, int max) =>
+        string.IsNullOrEmpty(value) ? string.Empty : (value.Length <= max ? value : value[..max]);
+
+    /// <summary>
+    /// Payment (OVPM or ORCT) carrying this <c>U_OdooPayRef</c>, cancellation documents excluded. Never
+    /// fails open: an error here (typically the UDF missing) aborts the creation, because a duplicate
+    /// on-account payment is worse than a failed job. Caller holds <see cref="_lock"/>.
+    /// </summary>
+    private (int DocEntry, int DocNum, bool Cancelled)? FindPaymentByOdooPayRef(string table, string odooPayRef)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            var escaped = odooPayRef.Replace("'", "''");
+            rs.DoQuery(
+                $"SELECT TOP 1 T0.\"DocEntry\", T0.\"DocNum\", T0.\"Canceled\" FROM {table} T0 " +
+                $"WHERE T0.\"U_OdooPayRef\" = '{escaped}' AND T0.\"Canceled\" <> 'C' " +
+                "ORDER BY T0.\"DocEntry\" DESC");
+            if (rs.EoF) return null;
+            return (
+                Convert.ToInt32(rs.Fields.Item("DocEntry").Value),
+                Convert.ToInt32(rs.Fields.Item("DocNum").Value),
+                rs.Fields.Item("Canceled").Value?.ToString() == "Y");
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Idempotency check on {table}.U_OdooPayRef failed (is the UDF created? run POST /api/admin/setup-sap-udfs): {ex.Message}", ex);
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+    }
+
+    public async Task<SupplierPaymentResult> CreateSupplierPaymentOnAccountAsync(SupplierPaymentRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            string table = request.IsRefund ? "ORCT" : "OVPM";
+            string objType = request.IsRefund ? "24" : "46";
+            string label = request.IsRefund ? "Incoming Payment (supplier refund)" : "Outgoing Payment";
+            var boType = request.IsRefund ? BoObjectTypes.oIncomingPayments : BoObjectTypes.oVendorPayments;
+
+            // ── Idempotency on U_OdooPayRef ──
+            var existing = FindPaymentByOdooPayRef(table, request.OdooPayRef);
+            if (existing is { } dup)
+            {
+                if (!dup.Cancelled)
+                {
+                    _logger.LogInformation(
+                        "{Label} for U_OdooPayRef={Ref} already exists (DocEntry={DocEntry}, DocNum={DocNum}) — returning it.",
+                        label, request.OdooPayRef, dup.DocEntry, dup.DocNum);
+                    return new SupplierPaymentResult
+                    {
+                        DocEntry = dup.DocEntry, DocNum = dup.DocNum, ObjType = objType, AlreadyExisted = true
+                    };
+                }
+
+                throw new SapConflictException(
+                    $"A {label} with U_OdooPayRef '{request.OdooPayRef}' already exists in SAP as DocEntry={dup.DocEntry} " +
+                    $"(DocNum {dup.DocNum}) and was CANCELLED there. Not re-posting it: if the supplier was paid again, " +
+                    "Odoo must send a new payment with a new reference.");
+            }
+
+            var payment = (Payments)_company!.GetBusinessObject(boType);
+            try
+            {
+                payment.DocType = BoRcptTypes.rSupplier;      // a vendor BP on both the outgoing payment and the refund
+                payment.CardCode = request.CardCode;
+                payment.DocDate = request.DocDate.Date;
+                payment.DocCurrency = request.Currency;
+                if (request.Rate > 0)
+                    payment.DocRate = request.Rate;
+
+                // Bank transfer means, no Invoices rows: SAP books it on account.
+                payment.TransferAccount = request.SapAccountCode;
+                payment.TransferSum = request.Amount;
+                payment.TransferDate = request.DocDate.Date;
+                if (!string.IsNullOrWhiteSpace(request.TransferReference))
+                    payment.TransferReference = ClipForSap(request.TransferReference.Trim(), 27);
+
+                payment.CounterReference = ClipForSap(request.OdooPayRef, 27);
+                if (!string.IsNullOrWhiteSpace(request.Remarks))
+                    payment.Remarks = ClipForSap(request.Remarks.Trim(), 254);
+
+                if (!TrySetUserField(payment.UserFields, "U_OdooPayRef", request.OdooPayRef, $"{label} header"))
+                    throw new InvalidOperationException(
+                        $"{table} has no U_OdooPayRef UDF — run POST /api/admin/setup-sap-udfs first. Nothing was created.");
+
+                int result = payment.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int docEntry = int.Parse(_company.GetNewObjectKey());
+                int docNum = docEntry;
+                if (payment.GetByKey(docEntry))
+                    docNum = payment.DocNum;
+
+                _logger.LogInformation(
+                    "{Label} created ON ACCOUNT — DocEntry={DocEntry}, DocNum={DocNum}, Card={CardCode}, {Amount} {Currency} @ {Rate}, U_OdooPayRef={Ref}",
+                    label, docEntry, docNum, request.CardCode, request.Amount, request.Currency, request.Rate, request.OdooPayRef);
+
+                return new SupplierPaymentResult { DocEntry = docEntry, DocNum = docNum, ObjType = objType, AlreadyExisted = false };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(payment);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<SapPaymentCancelResponse> CancelSupplierPaymentAsync(int docEntry, bool isRefund)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            string table = isRefund ? "ORCT" : "OVPM";
+            string label = isRefund ? "Incoming Payment (supplier refund)" : "Outgoing Payment";
+            var boType = isRefund ? BoObjectTypes.oIncomingPayments : BoObjectTypes.oVendorPayments;
+
+            int docNum;
+            var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+            try
+            {
+                rs.DoQuery($"SELECT \"DocNum\", \"Canceled\" FROM {table} WHERE \"DocEntry\" = {docEntry}");
+                if (rs.EoF)
+                    throw new InvalidOperationException($"{label} DocEntry={docEntry} not found ({table}).");
+
+                docNum = Convert.ToInt32(rs.Fields.Item("DocNum").Value);
+                var canceled = rs.Fields.Item("Canceled").Value?.ToString();
+                if (canceled is "Y" or "C")
+                {
+                    _logger.LogInformation("{Label} already cancelled: DocEntry={DocEntry}, DocNum={DocNum} — idempotent OK.",
+                        label, docEntry, docNum);
+                    return new SapPaymentCancelResponse { DocEntry = docEntry, DocNum = docNum, AlreadyCancelled = true };
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rs);
+            }
+
+            var payment = (Payments)_company.GetBusinessObject(boType);
+            try
+            {
+                if (!payment.GetByKey(docEntry))
+                    throw new InvalidOperationException($"{label} DocEntry={docEntry} not found via DI API.");
+
+                int result = payment.Cancel();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                _logger.LogInformation("{Label} cancelled: DocEntry={DocEntry}, DocNum={DocNum}", label, docEntry, docNum);
+                return new SapPaymentCancelResponse { DocEntry = docEntry, DocNum = docNum, AlreadyCancelled = false };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(payment);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>OJDT row by a WHERE clause. Caller holds <see cref="_lock"/>.</summary>
+    private (int TransId, int Number)? FindJournalEntry(string whereClause)
+    {
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery($"SELECT TOP 1 \"TransId\", \"Number\" FROM OJDT WHERE {whereClause} ORDER BY \"TransId\" DESC");
+            if (rs.EoF) return null;
+            return (Convert.ToInt32(rs.Fields.Item("TransId").Value), Convert.ToInt32(rs.Fields.Item("Number").Value));
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+    }
+
+    private static void SetJournalLineAmounts(JournalEntries_Lines line, JournalLineAmounts amounts, bool foreign, string currency)
+    {
+        if (foreign)
+        {
+            line.FCCurrency = currency;
+            line.FCDebit = amounts.DebitFc;
+            line.FCCredit = amounts.CreditFc;
+        }
+        line.Debit = amounts.DebitLc;
+        line.Credit = amounts.CreditLc;
+    }
+
+    public async Task<SupplierAdjustmentResult> CreateSupplierAdjustmentJournalAsync(SupplierAdjustmentRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            string odooRef = request.OdooRef.Trim();
+            string escapedRef = odooRef.Replace("'", "''");
+
+            (int TransId, int Number)? existing;
+            try
+            {
+                existing = FindJournalEntry($"\"U_OdooRef\" = '{escapedRef}'");
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Idempotency check on OJDT.U_OdooRef failed (is the UDF created? run POST /api/admin/setup-sap-udfs): {ex.Message}", ex);
+            }
+            if (existing is { } dup)
+            {
+                _logger.LogInformation("Adjustment JE for U_OdooRef={Ref} already exists (TransId={TransId}) — returning it.", odooRef, dup.TransId);
+                return new SupplierAdjustmentResult { JdtDocentry = dup.TransId, Number = dup.Number, AlreadyExisted = true };
+            }
+
+            string localCurrency = GetLocalCurrencyCode();
+            var posting = AdjustmentPosting.Compute(request, localCurrency);
+            string currency = request.Currency.Trim().ToUpperInvariant();
+            string memo = ClipForSap(
+                string.IsNullOrWhiteSpace(request.Memo) ? $"{request.Reason} {odooRef}".Trim() : request.Memo.Trim(), 50);
+
+            var je = (JournalEntries)_company!.GetBusinessObject(BoObjectTypes.oJournalEntries);
+            try
+            {
+                je.ReferenceDate = request.DocDate.Date;
+                je.TaxDate = request.DocDate.Date;
+                je.DueDate = request.DocDate.Date;
+                je.Memo = memo;
+                je.Reference = ClipForSap(odooRef, 100);
+                je.Reference2 = ClipForSap(request.Reason ?? string.Empty, 100);
+
+                if (!TrySetUserField(je.UserFields, "U_OdooRef", odooRef, "JE header"))
+                    throw new InvalidOperationException(
+                        "OJDT has no U_OdooRef UDF — run POST /api/admin/setup-sap-udfs first. Nothing was created.");
+
+                // Line 0: the supplier (business partner). ShortName = CardCode; SAP picks the control account.
+                je.Lines.ShortName = request.CardCode.Trim();
+                SetJournalLineAmounts(je.Lines, posting.BusinessPartner, posting.IsForeign, currency);
+                je.Lines.LineMemo = memo;
+                je.Lines.Add();
+
+                // Line 1: the mirror G/L account (bank charges / small balance 6011520).
+                je.Lines.AccountCode = request.SapGlCode.Trim();
+                SetJournalLineAmounts(je.Lines, posting.GlAccount, posting.IsForeign, currency);
+                je.Lines.LineMemo = memo;
+
+                int result = je.Add();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+
+                int transId = int.Parse(_company.GetNewObjectKey());
+                int number = transId;
+                if (je.GetByKey(transId))
+                    number = je.Number;
+
+                _logger.LogInformation(
+                    "Adjustment JE posted — TransId={TransId}, Number={Number}, Card={CardCode}, {Direction} {Amount} {Currency} @ {Rate}, G/L {GlCode}, U_OdooRef={Ref}",
+                    transId, number, request.CardCode, request.Direction, request.Amount, currency, request.Rate, request.SapGlCode, odooRef);
+
+                return new SupplierAdjustmentResult { JdtDocentry = transId, Number = number, AlreadyExisted = false };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(je);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task<AdjustmentReverseResult> ReverseSupplierAdjustmentJournalAsync(int transId, string reversalRef)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            // Idempotency: a storno of this transaction already exists.
+            var storno = FindJournalEntry($"\"StornoToTr\" = {transId}");
+            if (storno is { } done)
+            {
+                _logger.LogInformation("Adjustment JE TransId={TransId} already reversed by TransId={Reversal} — idempotent OK.", transId, done.TransId);
+                return new AdjustmentReverseResult
+                {
+                    OriginalDocentry = transId, ReversalDocentry = done.TransId, ReversalNumber = done.Number, AlreadyExisted = true
+                };
+            }
+
+            if (FindJournalEntry($"\"TransId\" = {transId}") is null)
+                throw new InvalidOperationException($"Journal entry TransId={transId} not found (OJDT).");
+
+            var je = (JournalEntries)_company!.GetBusinessObject(BoObjectTypes.oJournalEntries);
+            try
+            {
+                if (!je.GetByKey(transId))
+                    throw new InvalidOperationException($"Journal entry TransId={transId} not found via DI API.");
+
+                int result = je.Cancel();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode}: {errMsg}");
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(je);
+            }
+
+            int reversalId;
+            int reversalNumber;
+            if (int.TryParse(_company.GetNewObjectKey(), out reversalId) && reversalId > 0)
+            {
+                reversalNumber = reversalId;
+            }
+            else
+            {
+                var found = FindJournalEntry($"\"StornoToTr\" = {transId}")
+                    ?? throw new InvalidOperationException($"SAP reported success but no storno of TransId={transId} was found.");
+                reversalId = found.TransId;
+                reversalNumber = found.Number;
+            }
+
+            // Best effort: stamp the reversal with its own U_OdooRef and read its Number.
+            var rev = (JournalEntries)_company.GetBusinessObject(BoObjectTypes.oJournalEntries);
+            try
+            {
+                if (rev.GetByKey(reversalId))
+                {
+                    reversalNumber = rev.Number;
+                    if (TrySetUserField(rev.UserFields, "U_OdooRef", reversalRef, "JE reversal") && rev.Update() != 0)
+                    {
+                        _company.GetLastError(out int errCode, out string errMsg);
+                        _logger.LogWarning("Could not stamp U_OdooRef on reversal TransId={TransId}: {Code} {Msg}", reversalId, errCode, errMsg);
+                    }
+                }
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(rev);
+            }
+
+            _logger.LogInformation("Adjustment JE TransId={TransId} reversed by TransId={Reversal} (Number {Number}).", transId, reversalId, reversalNumber);
+            return new AdjustmentReverseResult
+            {
+                OriginalDocentry = transId, ReversalDocentry = reversalId, ReversalNumber = reversalNumber, AlreadyExisted = false
+            };
         }
         finally
         {

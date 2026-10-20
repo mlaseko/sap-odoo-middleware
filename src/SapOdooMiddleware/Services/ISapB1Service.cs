@@ -1,4 +1,5 @@
 using SapOdooMiddleware.Models.Inventory;
+using SapOdooMiddleware.Models.PurchaseSync;
 using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services.Autohub;
 
@@ -446,6 +447,37 @@ public interface ISapB1Service
     /// ORCT row appearing after a cancel came from a separate creation call.</para>
     /// </summary>
     Task<SapPaymentCancelResponse> CancelIncomingPaymentAsync(int docEntry);
+
+    // ================================
+    // PURCHASES SYNC — Odoo → SAP (spec v4 §6.2)
+    // ================================
+
+    /// <summary>
+    /// Creates a supplier payment ON ACCOUNT: an Outgoing Payment (OVPM, object 46) or, when
+    /// <c>request.IsRefund</c>, an Incoming Payment from the vendor (ORCT, object 24). No invoice lines, no
+    /// internal reconciliation. Idempotent on <c>U_OdooPayRef</c>: an existing active payment is returned with
+    /// <c>AlreadyExisted</c>; a cancelled one raises <see cref="SapConflictException"/>.
+    /// </summary>
+    Task<SupplierPaymentResult> CreateSupplierPaymentOnAccountAsync(SupplierPaymentRequest request);
+
+    /// <summary>
+    /// Cancels an on-account supplier payment (OVPM) or refund (ORCT) via <c>Payments.Cancel()</c>.
+    /// Already-cancelled payments return success with <c>AlreadyCancelled</c>; SAP refusals are passed through.
+    /// </summary>
+    Task<SapPaymentCancelResponse> CancelSupplierPaymentAsync(int docEntry, bool isRefund);
+
+    /// <summary>
+    /// Posts the adjustment journal entry (OJDT): a business-partner line on the CardCode and the mirror G/L
+    /// line, on the sides <c>Direction</c> says, in the document currency at <c>Rate</c>. Idempotent on
+    /// <c>U_OdooRef</c>. Returns the TransId.
+    /// </summary>
+    Task<SupplierAdjustmentResult> CreateSupplierAdjustmentJournalAsync(SupplierAdjustmentRequest request);
+
+    /// <summary>
+    /// Reverses the adjustment journal entry with SAP's storno (<c>JournalEntries.Cancel()</c>), stamping
+    /// <paramref name="reversalRef"/> on the reversal's <c>U_OdooRef</c>. Idempotent on OJDT.StornoToTr.
+    /// </summary>
+    Task<AdjustmentReverseResult> ReverseSupplierAdjustmentJournalAsync(int transId, string reversalRef);
 
     /// <summary>
     /// Finds the Incoming Payments applied to an AR Invoice via the RCT2 allocation

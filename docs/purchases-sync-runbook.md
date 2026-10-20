@@ -44,6 +44,12 @@ Reads from SAP are direct SQL on the company database (`SapB1:Server` / `Company
 | `GET` | `/api/webhook-queue?status=&event_type=` | Queue rows; `event_type` filters to one of the six purchase values (or `webhook`, `resync`). |
 | `GET` | `/api/webhook-queue/summary?event_type=` | Counts by status. |
 | `POST` | `/api/webhook-queue/{id}/retry` | Sets a failed row back to pending (works for purchase rows too). |
+| `POST` | `/api/outgoing-payments` | Phase 3a. SAP Outgoing Payment to the supplier **on account** (OVPM, no invoice lines). Idempotent on `U_OdooPayRef`; a cancelled payment with the same reference → 409. |
+| `POST` | `/api/outgoing-payments/{docEntry}/cancel` | `Payments.Cancel()`; already cancelled → 200 with `already_cancelled`; SAP refusal → 409 (no automatic retry). |
+| `POST` | `/api/supplier-refunds` | Phase 3a. SAP Incoming Payment from the vendor on account (ORCT, `DocType` supplier). Same body and rules. |
+| `POST` | `/api/supplier-refunds/{docEntry}/cancel` | As above for ORCT. |
+| `POST` | `/api/supplier-adjustments` | Phase 3a. Journal entry: business-partner line (`ShortName = card_code`) and the mirror G/L line, sides from `direction`, FC amount at `rate`. Idempotent on `U_OdooRef`. Returns `jdt_docentry` (OJDT.TransId). |
+| `POST` | `/api/supplier-adjustments/{jdtDocEntry}/reverse` | SAP storno (`JournalEntries.Cancel()`), reversal stamped `U_OdooRef = "<ref>:REV"`. Idempotent on `OJDT.StornoToTr`; refusal → 409. |
 
 All endpoints need `X-Api-Key`.
 
@@ -67,6 +73,25 @@ All endpoints need `X-Api-Key`.
 | `CURRENCY_NOT_FOUND` / `CURRENCY_INACTIVE` | Document currency missing or archived in Odoo. | Activate the currency, retry. |
 
 Transient errors (Odoo or SQL unreachable) retry up to `PurchaseSync:MaxRetries` (5) and then stay `failed` until retried by hand.
+
+## Odoo → SAP endpoints (Phase 3a)
+
+Called by the control-centre jobs of `molas_sap_purchase_icc` (bodies in spec v4 §6.2). Behaviour worth knowing:
+
+- **On account means no `Invoices` rows.** SAP books the payment against the business partner with no invoice
+  applied and no internal reconciliation; the SAP supplier balance is right, SAP's invoice aging is not used.
+- **`rate` is `DocRate`** (TZS per EUR) and is written on the payment. For a journal entry in EUR the lines carry the
+  FC amount and the LC amount = amount × rate. SAP still requires an exchange rate for that currency and date in its
+  rate table (Administration ▸ Exchange Rates); without it SAP refuses the document and the job fails with SAP's message.
+- **Validation:** missing `card_code`, `odoo_pay_ref` / `odoo_ref` (max 50 characters), `sap_account_code` /
+  `sap_gl_code`, a non-positive `amount` or an unknown `direction` → 400 before SAP is touched.
+- **Idempotency:** the UDFs must exist (`POST /api/admin/setup-sap-udfs`). If the UDF is missing the check fails
+  closed: nothing is created and the job shows the message. A re-sent reference whose SAP payment was cancelled →
+  409 (Odoo must send a new payment with a new reference).
+- **Cancels and reversals** return 409 on any SAP refusal so the control centre does not retry them automatically.
+- Responses are the usual envelope: `{"success": true, "data": {"doc_entry": 101, "doc_num": 2001, "obj_type": "46", "already_existed": false}}`,
+  `{"cancelled": true, "already_cancelled": false, ...}`, `{"jdt_docentry": 5001, "number": 9001, "already_existed": false}`,
+  `{"original_docentry": 5001, "reversal_docentry": 5002, "reversal_number": 9002, "already_existed": false}`.
 
 ## Configuration
 
