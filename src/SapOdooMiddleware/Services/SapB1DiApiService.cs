@@ -7396,15 +7396,77 @@ ORDER BY PostingDate, DocumentNumber";
     private List<string> ReadLandedCostCodes() =>
         QueryRows("SELECT \"AlcCode\" FROM OALC", f => FieldString(f, "AlcCode"));
 
-    private static LandedCostAllocationByEnum ToAllocationBy(string allocation) => allocation switch
+    // The DI API's LandedCost names differ between releases (10.00.280 has no DocumentDate on LandedCost,
+    // no Amount on LandedCost_CostLine, and other spellings of the allocation and base-type enum members).
+    // The members below are therefore resolved against the interop types at runtime from candidate names,
+    // and an error names the members the installed interop actually has.
+
+    /// <summary>Candidate names of the enum member for each <c>allocation_by</c> value of the request.</summary>
+    private static readonly Dictionary<string, string[]> AllocationEnumCandidates = new(StringComparer.OrdinalIgnoreCase)
     {
-        "cash_value_after" => LandedCostAllocationByEnum.asCashValueAfter,
-        "quantity" => LandedCostAllocationByEnum.asQuantity,
-        "weight" => LandedCostAllocationByEnum.asWeight,
-        "volume" => LandedCostAllocationByEnum.asVolume,
-        "equally" => LandedCostAllocationByEnum.asEqually,
-        _ => LandedCostAllocationByEnum.asCashValueBefore,
+        ["cash_value_before"] = new[] { "asCashValueBeforeCustoms", "asCashValueBefore", "asCashValue" },
+        ["cash_value_after"] = new[] { "asCashValueAfterCustoms", "asCashValueAfter" },
+        ["quantity"] = new[] { "asQuantity" },
+        ["weight"] = new[] { "asWeight" },
+        ["volume"] = new[] { "asVolume" },
+        ["equally"] = new[] { "asEqually", "asEqual", "asEquality" },
     };
+
+    private static readonly string[] CostAmountCandidates = { "Amount", "LandedCostAmount", "CostAmount", "Price", "Total", "TotalAmount" };
+    private static readonly string[] LandedCostBaseTypeCandidates = { "asLandedCost", "asLandedCosts", "asLandedCostDocument" };
+
+    private static string InteropMembers(Type interopType) =>
+        string.Join(", ", interopType.GetProperties().Select(p => p.Name).OrderBy(n => n));
+
+    private static string EnumMembers(Type enumType) => string.Join(", ", Enum.GetNames(enumType));
+
+    /// <summary>
+    /// Sets the first property of <paramref name="interopType"/> found among <paramref name="candidates"/> on the
+    /// COM object (the RCW implements the interop interface, so reflection on that interface reaches the property).
+    /// Returns the name used, or null when none exists.
+    /// </summary>
+    private static string? TrySetInteropProperty(object target, Type interopType, object value, params string[] candidates)
+    {
+        foreach (var name in candidates)
+        {
+            var prop = interopType.GetProperty(name);
+            if (prop is null || !prop.CanWrite) continue;
+            prop.SetValue(target, Convert.ChangeType(value, prop.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
+            return name;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Sets an enum-typed property to the first of <paramref name="memberCandidates"/> the enum defines. Returns the
+    /// member used, or null when the enum has none of them.
+    /// </summary>
+    private static string? TrySetInteropEnum(object target, Type interopType, string propertyName, params string[] memberCandidates)
+    {
+        var prop = interopType.GetProperty(propertyName);
+        if (prop is null || !prop.CanWrite || !prop.PropertyType.IsEnum) return null;
+        foreach (var member in memberCandidates)
+        {
+            if (!Enum.TryParse(prop.PropertyType, member, ignoreCase: true, out var parsed) || parsed is null) continue;
+            prop.SetValue(target, parsed);
+            return member;
+        }
+        return null;
+    }
+
+    /// <summary>The base-type enum member for "previous landed cost document" (SAP object 69), by name or by value.</summary>
+    private static LandedCostBaseDocumentTypeEnum LandedCostBaseType()
+    {
+        var enumType = typeof(LandedCostBaseDocumentTypeEnum);
+        foreach (var member in LandedCostBaseTypeCandidates)
+            if (Enum.TryParse(enumType, member, ignoreCase: true, out var parsed) && parsed is LandedCostBaseDocumentTypeEnum typed)
+                return typed;
+        if (Enum.IsDefined(enumType, 69))
+            return (LandedCostBaseDocumentTypeEnum)69;
+        throw new InvalidOperationException(
+            "This DI API build has no LandedCostBaseDocumentTypeEnum member for a landed cost base document (object 69); " +
+            $"a delta push cannot be based on the previous document. Members: {EnumMembers(enumType)}.");
+    }
 
     public async Task<LandedCostPushResult> CreateLandedCostAsync(LandedCostPushRequest request)
     {
@@ -7453,7 +7515,7 @@ ORDER BY PostingDate, DocumentNumber";
                 var docDate = request.DocDate ?? DateTime.Today;
                 lc.PostingDate = docDate;
                 lc.DueDate = docDate;
-                lc.DocumentDate = docDate;
+                TrySetInteropProperty(lc, typeof(LandedCost), docDate, "DocumentDate", "TaxDate");   // absent in 10.00.280
                 // No VendorCode / BrokerCode (spec §6.3): the costs were billed and paid in Odoo.
                 if (!string.IsNullOrWhiteSpace(request.ShipRef))
                     lc.Reference = ClipForSap(request.ShipRef.Trim(), 100);
@@ -7465,7 +7527,7 @@ ORDER BY PostingDate, DocumentNumber";
                     lc.UserFields.Item("U_ShipRef").Value = ClipForSap(request.ShipRef.Trim(), 50);
 
                 var baseType = plan.BaseType == LandedCostPlanning.BaseTypeLandedCost
-                    ? LandedCostBaseDocumentTypeEnum.asLandedCost
+                    ? LandedCostBaseType()
                     : LandedCostBaseDocumentTypeEnum.asGoodsReceiptPO;
                 foreach (var baseLine in plan.ItemLines)
                 {
@@ -7475,12 +7537,26 @@ ORDER BY PostingDate, DocumentNumber";
                     line.BaseLine = baseLine.LineNum;
                 }
 
+                var allocationWarned = new HashSet<string>();
                 foreach (var cost in plan.CostLines)
                 {
                     var line = lc.LandedCost_CostLines.Add();
                     line.LandedCostCode = cost.LcCode;
-                    line.Amount = cost.Amount;
-                    line.AllocationBy = ToAllocationBy(cost.AllocationBy);
+                    if (TrySetInteropProperty(line, typeof(LandedCost_CostLine), cost.Amount, CostAmountCandidates) is null)
+                    {
+                        throw new InvalidOperationException(
+                            "This DI API build has no amount property on LandedCost_CostLine among " +
+                            $"{string.Join(", ", CostAmountCandidates)}. Its members: {InteropMembers(typeof(LandedCost_CostLine))}.");
+                    }
+                    var candidates = AllocationEnumCandidates.TryGetValue(cost.AllocationBy, out var names) ? names : Array.Empty<string>();
+                    if (TrySetInteropEnum(line, typeof(LandedCost_CostLine), "AllocationBy", candidates) is null
+                        && allocationWarned.Add(cost.AllocationBy))
+                    {
+                        // SAP then applies the code's own allocation method (OALC); the document is still valid.
+                        _logger.LogWarning(
+                            "LandedCostAllocationByEnum has no member for '{Allocation}' (tried {Tried}); leaving SAP's default. Members: {Members}",
+                            cost.AllocationBy, string.Join(", ", candidates), EnumMembers(typeof(LandedCostAllocationByEnum)));
+                    }
                 }
 
                 var added = svc.AddLandedCost(lc);
