@@ -50,6 +50,10 @@ Reads from SAP are direct SQL on the company database (`SapB1:Server` / `Company
 | `POST` | `/api/supplier-refunds/{docEntry}/cancel` | As above for ORCT. |
 | `POST` | `/api/supplier-adjustments` | Phase 3a. Journal entry: business-partner line (`ShortName = card_code`) and the mirror G/L line, sides from `direction`, FC amount at `rate`. Idempotent on `U_OdooRef`. Returns `jdt_docentry` (OJDT.TransId). |
 | `POST` | `/api/supplier-adjustments/{jdtDocEntry}/reverse` | SAP storno (`JournalEntries.Cancel()`), reversal stamped `U_OdooRef = "<ref>:REV"`. Idempotent on `OJDT.StornoToTr`; refusal → 409. |
+| `GET` | `/api/month-end/supplier-balances?as_of=` | Phase 5. Every supplier's balance at the date from the journal (JDT1), credit-positive, per currency. |
+| `GET` | `/api/month-end/grni?as_of=` | Phase 5. Goods received at the date and not invoiced or returned at the date, per GRPO, local currency. |
+| `GET` | `/api/month-end/inventory-valuation?as_of=` | Phase 5. SAP's perpetual inventory value at the date (cumulative OINM, includes capitalised landed costs), by warehouse. |
+| `GET` | `/api/month-end/landed-cost-credits?from=&to=` | Phase 5. Credits per landed cost code (JDT1 transaction type 69 on the OALC allocation accounts) and the OIPF documents of the period; defaults to the calendar month of `to`. |
 | `POST` | `/api/landed-costs` | Phase 4. SAP Landed Costs document (OIPF) through `LandedCostsService`: item lines from the container's GRPO (first push) or from the previous landed cost document (delta), one cost line per `lc_code` in TZS, no vendor. Idempotent on `U_OdooShipmentId` (`ref` / `ref:n`); guards → 422. |
 
 All endpoints need `X-Api-Key`.
@@ -113,6 +117,22 @@ final* (body in spec v4 §6.3). Behaviour worth knowing:
 - **Idempotency** is `OIPF.U_OdooShipmentId`; the UDF must exist (`POST /api/admin/setup-sap-udfs`). A re-sent key
   returns the existing document with `already_existed`.
 - Response: `{"success": true, "data": {"doc_entry": 77, "doc_num": 1007, "idempotency_key": "SO-2026-0012", "item_lines": 2, "cost_total": 1430000.0, "already_existed": false}}`.
+
+## Month-end (Phase 5)
+
+The control centre's month-end record (Integration ▸ Configuration ▸ SAP Purchases ▸ Month-end, `molas_sap_purchase_icc`)
+reads the four `GET /api/month-end/*` endpoints for the period's last day and compares them with Odoo:
+
+- **Supplier balances per CardCode** (must match): SAP's journal balance against Odoo's payable balance of the partner
+  with that CardCode, in EUR and TZS.
+- **GRNI:** the open goods-receipt value becomes the accrual (Dr Purchases / Cr GRNI) with its reversal on day 1.
+- **Inventory:** SAP's perpetual value against the Odoo inventory account; the difference is the month-end adjustment.
+- **Landed cost credits per code** against the Odoo clearing entries of the period, and the clearing balance by container.
+- **Issues:** payments, adjustments and containers in `pending` / `error`, failed purchases jobs, failed queue rows.
+
+All reads are plain SQL on the company database; nothing is written to SAP. `as_of` defaults to today; the period of
+the landed cost credits defaults to the calendar month of `to`. The GRNI query joins every GRPO line to its invoices
+and returns, so give it a moment on a large database (300 s command timeout).
 
 ## Configuration
 

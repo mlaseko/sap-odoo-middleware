@@ -13,6 +13,7 @@ using SapOdooMiddleware.Middleware;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
+using SapOdooMiddleware.Services.MonthEnd;
 using SapOdooMiddleware.Services.Autohub;
 using SapOdooMiddleware.Services.Autohub.Excel;
 using SapOdooMiddleware.Services.PurchaseSync;
@@ -88,6 +89,7 @@ builder.Services.AddScoped<IOdooPurchaseGateway, OdooPurchaseGateway>();
 builder.Services.AddScoped<PurchaseQueueRepository>();
 builder.Services.AddScoped<PurchaseSyncHandlers>();
 builder.Services.AddScoped<SapUdfSetupService>();   // UDF routine with the exclusive-access check (§4.1)
+builder.Services.AddScoped<IMonthEndReader, SapMonthEndSqlReader>();   // month-end reads (§7, Phase 5)
 builder.Services.AddHostedService<PurchaseSyncQueueProcessor>();
 
 // --- Item Provisioning settings ---
