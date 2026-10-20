@@ -1,6 +1,4 @@
-using System.Text.Json;
 using System.Text.Json.Nodes;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Models.PurchaseSync;
@@ -16,13 +14,18 @@ public sealed record OdooMoveInfo(
     decimal AmountResidual,
     string? Name);
 
-/// <summary>A container order (<c>supplier.order</c>) with its match keys.</summary>
-public sealed record OdooContainerOrder(int Id, string? Name, string? ContainerNo, string? InvoiceNo);
+/// <summary>Result of <c>x.sap.grpo.upsert</c>: the record and the container order it linked to, if any.</summary>
+public sealed record OdooGrpoUpsertResult(int GrpoId, int? OrderId);
 
 /// <summary>Journal → company → currency, read once per document.</summary>
 public sealed record OdooJournalInfo(int JournalId, int CompanyId, int CompanyCurrencyId, string CompanyCurrency);
 
-/// <summary>The Odoo operations the purchases handlers need, expressed in domain terms.</summary>
+/// <summary>
+/// The Odoo operations the purchases handlers need, expressed in domain terms. The reference models
+/// and the container match are owned by the Odoo module <c>molas_sap_purchase</c>, which exposes
+/// <c>x.sap.po.upsert(vals)</c>, <c>x.sap.grpo.upsert(vals, lines)</c> and
+/// <c>account.move.sap_match(move_id)</c>; the middleware calls those rather than writing the links itself.
+/// </summary>
 public interface IOdooPurchaseGateway
 {
     Task<int?> FindPartnerIdByCardCodeAsync(string cardCode);
@@ -38,13 +41,20 @@ public interface IOdooPurchaseGateway
     Task SetMoveSyncErrorAsync(int moveId, string? code);
     Task MessagePostAsync(string model, int id, string body);
 
-    Task<int> UpsertSapPoAsync(SapPoHeader po, int? partnerId, int? currencyId);
-    Task<List<int>> FindSapPoIdsAsync(IEnumerable<int> docEntries);
-    Task<int> UpsertSapGrpoAsync(SapGrpoHeader grpo, IEnumerable<int> poIds, int? orderId);
+    /// <summary><c>x.sap.po.upsert(vals)</c> → the record id.</summary>
+    Task<int> UpsertSapPoAsync(SapPoHeader po);
 
-    Task<List<OdooContainerOrder>> GetContainerOrdersAsync(bool refresh = false);
-    Task LinkGrpoToOrderAsync(int orderId, int grpoId);
-    Task LinkBillToOrdersAsync(int moveId, IReadOnlyCollection<int> orderIds, IReadOnlyCollection<int> poIds);
+    /// <summary><c>x.sap.grpo.upsert(vals, lines)</c> → the record id and the linked order id.</summary>
+    Task<OdooGrpoUpsertResult> UpsertSapGrpoAsync(SapGrpoHeader grpo);
+
+    /// <summary>Sets <c>x.sap.grpo.odoo_shipment_written</c> after the SAP stamp succeeded.</summary>
+    Task MarkGrpoShipmentWrittenAsync(int grpoId);
+
+    /// <summary>The container order's reference (<c>supplier.order.name</c>), used as <c>U_OdooShipmentId</c>.</summary>
+    Task<string?> GetOrderNameAsync(int orderId);
+
+    /// <summary><c>account.move.sap_match(move_id)</c> → the ids of the container orders linked.</summary>
+    Task<List<int>> SapMatchAsync(int moveId);
 
     Task NotifyCreditNoteAsync(int moveId);
 }
@@ -52,22 +62,18 @@ public interface IOdooPurchaseGateway
 /// <summary>JSON-RPC implementation over <see cref="IOdooRpc"/>.</summary>
 public sealed class OdooPurchaseGateway : IOdooPurchaseGateway
 {
-    private const string OrdersCacheKey = "purchase-sync:container-orders";
     private static readonly string[] MoveFields = ["id", "name", "state", "payment_state", "amount_total", "amount_residual"];
 
     private readonly IOdooRpc _rpc;
-    private readonly IMemoryCache _cache;
     private readonly IOptionsMonitor<PurchaseSyncSettings> _settings;
     private readonly ILogger<OdooPurchaseGateway> _logger;
 
     public OdooPurchaseGateway(
         IOdooRpc rpc,
-        IMemoryCache cache,
         IOptionsMonitor<PurchaseSyncSettings> settings,
         ILogger<OdooPurchaseGateway> logger)
     {
         _rpc = rpc;
-        _cache = cache;
         _settings = settings;
         _logger = logger;
     }
@@ -80,7 +86,7 @@ public sealed class OdooPurchaseGateway : IOdooPurchaseGateway
     {
         var ids = await _rpc.SearchAsync("res.partner", new JsonArray
         {
-            new JsonArray { "x_sap_cardcode", "=", cardCode.Trim() }
+            new JsonArray { "x_sap_cardcode", "=ilike", cardCode.Trim() }
         }, limit: 1);
         return ids.Count > 0 ? ids[0] : null;
     }
@@ -128,7 +134,7 @@ public sealed class OdooPurchaseGateway : IOdooPurchaseGateway
 
     public async Task<OdooMoveInfo?> FindMoveBySapDocEntryAsync(int objType, int docEntry)
     {
-        string field = objType == 19 ? "x_sap_credit_docentry" : "x_sap_invoice_docentry";
+        string field = objType == 19 ? ApDocumentMapper.CreditDocEntryField : ApDocumentMapper.InvoiceDocEntryField;
         string moveType = objType == 19 ? "in_refund" : "in_invoice";
 
         var rows = await _rpc.SearchReadAsync("account.move", new JsonArray
@@ -181,136 +187,84 @@ public sealed class OdooPurchaseGateway : IOdooPurchaseGateway
         _rpc.CallAsync(model, "message_post", [id], new JsonObject { ["body"] = body });
 
     // ------------------------------------------------------------------
-    // x.sap.po / x.sap.grpo
+    // x.sap.po / x.sap.grpo (owned by molas_sap_purchase; we call its upsert methods)
     // ------------------------------------------------------------------
 
-    public async Task<int> UpsertSapPoAsync(SapPoHeader po, int? partnerId, int? currencyId)
+    public async Task<int> UpsertSapPoAsync(SapPoHeader po)
     {
-        var values = new JsonObject
+        var vals = new JsonObject
         {
             ["docentry"] = po.DocEntry,
-            ["docnum"] = po.DocNum,
-            ["partner_id"] = partnerId.HasValue ? partnerId.Value : (JsonNode?)false,
-            ["currency_id"] = currencyId.HasValue ? currencyId.Value : (JsonNode?)false,
+            ["docnum"] = po.DocNum.ToString(),
+            ["cardcode"] = po.CardCode,
+            ["currency"] = po.DocCur,
             ["doc_total"] = (double)(po.DocTotalFc != 0 ? po.DocTotalFc : po.DocTotal),
             ["doc_date"] = OdooValues.Date(po.DocDate),
             ["due_date"] = po.DocDueDate.HasValue ? OdooValues.Date(po.DocDueDate.Value) : (JsonNode?)false,
             ["status"] = po.Status,
-            ["num_at_card"] = (JsonNode?)(po.NumAtCard ?? string.Empty),
+            ["comments"] = (JsonNode?)(po.NumAtCard ?? string.Empty),
         };
 
-        var existing = await _rpc.SearchAsync("x.sap.po", new JsonArray
-        {
-            new JsonArray { "docentry", "=", po.DocEntry }
-        }, limit: 1);
-
-        if (existing.Count > 0)
-        {
-            await _rpc.WriteAsync("x.sap.po", [existing[0]], values);
-            return existing[0];
-        }
-        return await _rpc.CreateAsync("x.sap.po", values);
+        var result = await _rpc.CallModelAsync("x.sap.po", "upsert", new JsonObject { ["vals"] = vals });
+        return result?.GetValue<int>()
+            ?? throw new PurchaseSyncException("UPSERT_FAILED", "x.sap.po.upsert returned no id.", retryable: true);
     }
 
-    public async Task<List<int>> FindSapPoIdsAsync(IEnumerable<int> docEntries)
+    public async Task<OdooGrpoUpsertResult> UpsertSapGrpoAsync(SapGrpoHeader grpo)
     {
-        var list = docEntries.Distinct().ToList();
-        if (list.Count == 0) return [];
-        return await _rpc.SearchAsync("x.sap.po", new JsonArray
-        {
-            new JsonArray { "docentry", "in", new JsonArray(list.Select(d => (JsonNode?)JsonValue.Create(d)).ToArray()) }
-        });
-    }
-
-    public async Task<int> UpsertSapGrpoAsync(SapGrpoHeader grpo, IEnumerable<int> poIds, int? orderId)
-    {
-        var lineJson = JsonSerializer.Serialize(grpo.Lines.Select(l => new
-        {
-            line_num = l.LineNum,
-            item_code = l.ItemCode,
-            description = l.Dscription,
-            quantity = l.Quantity,
-            base_type = l.BaseType,
-            base_entry = l.BaseEntry,
-        }));
-
-        var values = new JsonObject
+        var vals = new JsonObject
         {
             ["docentry"] = grpo.DocEntry,
-            ["docnum"] = grpo.DocNum,
-            ["po_ids"] = new JsonArray { new JsonArray { 6, 0, new JsonArray(poIds.Distinct().Select(i => (JsonNode?)JsonValue.Create(i)).ToArray()) } },
+            ["docnum"] = grpo.DocNum.ToString(),
+            ["cardcode"] = grpo.CardCode,
             ["ship_ref"] = (JsonNode?)(grpo.ShipRef ?? string.Empty),
             ["doc_date"] = OdooValues.Date(grpo.DocDate),
             ["doc_total_lc"] = (double)grpo.DocTotal,
-            ["line_json"] = lineJson,
+            ["po_docentries"] = new JsonArray(grpo.PoDocEntries.Select(d => (JsonNode?)JsonValue.Create(d)).ToArray()),
         };
-        if (orderId.HasValue)
-            values["order_id"] = orderId.Value;
 
-        var existing = await _rpc.SearchAsync("x.sap.grpo", new JsonArray
+        var lines = new JsonArray();
+        foreach (var l in grpo.Lines)
         {
-            new JsonArray { "docentry", "=", grpo.DocEntry }
-        }, limit: 1);
-
-        if (existing.Count > 0)
-        {
-            await _rpc.WriteAsync("x.sap.grpo", [existing[0]], values);
-            return existing[0];
-        }
-        return await _rpc.CreateAsync("x.sap.grpo", values);
-    }
-
-    // ------------------------------------------------------------------
-    // Container orders
-    // ------------------------------------------------------------------
-
-    public async Task<List<OdooContainerOrder>> GetContainerOrdersAsync(bool refresh = false)
-    {
-        if (!refresh && _cache.TryGetValue(OrdersCacheKey, out List<OdooContainerOrder>? cached) && cached != null)
-            return cached;
-
-        var model = _settings.CurrentValue.ContainerOrderModel;
-        var rows = await _rpc.SearchReadAsync(model, new JsonArray
-        {
-            "|",
-            new JsonArray { "container_no", "!=", false },
-            new JsonArray { "invoice_no", "!=", false }
-        }, ["id", "name", "container_no", "invoice_no"]);
-
-        var orders = rows.Select(r => new OdooContainerOrder(
-            r["id"]!.GetValue<int>(),
-            OdooValues.String(r["name"]),
-            OdooValues.String(r["container_no"]),
-            OdooValues.String(r["invoice_no"]))).ToList();
-
-        _cache.Set(OrdersCacheKey, orders, TimeSpan.FromMinutes(2));
-        return orders;
-    }
-
-    public Task LinkGrpoToOrderAsync(int orderId, int grpoId) =>
-        _rpc.WriteAsync(_settings.CurrentValue.ContainerOrderModel, [orderId], new JsonObject
-        {
-            ["x_sap_grpo_ids"] = new JsonArray { new JsonArray { 4, grpoId, 0 } }
-        });
-
-    public async Task LinkBillToOrdersAsync(int moveId, IReadOnlyCollection<int> orderIds, IReadOnlyCollection<int> poIds)
-    {
-        var values = new JsonObject
-        {
-            ["x_sap_po_ref_ids"] = new JsonArray { new JsonArray { 6, 0, new JsonArray(poIds.Select(i => (JsonNode?)JsonValue.Create(i)).ToArray()) } },
-        };
-        if (orderIds.Count > 0)
-            values["x_order_ids"] = new JsonArray { new JsonArray { 6, 0, new JsonArray(orderIds.Select(i => (JsonNode?)JsonValue.Create(i)).ToArray()) } };
-
-        await _rpc.WriteAsync("account.move", [moveId], values);
-
-        if (orderIds.Count > 0)
-        {
-            await _rpc.WriteAsync(_settings.CurrentValue.ContainerOrderModel, orderIds, new JsonObject
+            lines.Add(new JsonObject
             {
-                ["x_sap_ap_invoice_ids"] = new JsonArray { new JsonArray { 4, moveId, 0 } }
+                ["line_num"] = l.LineNum,
+                ["item_code"] = l.ItemCode,
+                ["name"] = (JsonNode?)(l.Dscription ?? string.Empty),
+                ["quantity"] = (double)l.Quantity,
             });
         }
+
+        var result = await _rpc.CallModelAsync("x.sap.grpo", "upsert", new JsonObject
+        {
+            ["vals"] = vals,
+            ["lines"] = lines,
+        });
+
+        var obj = result as JsonObject
+            ?? throw new PurchaseSyncException("UPSERT_FAILED", "x.sap.grpo.upsert returned no record.", retryable: true);
+
+        int grpoId = obj["id"]?.GetValue<int>()
+            ?? throw new PurchaseSyncException("UPSERT_FAILED", "x.sap.grpo.upsert returned no id.", retryable: true);
+        int? orderId = OdooValues.Many2OneId(obj["order_id"]);
+        return new OdooGrpoUpsertResult(grpoId, orderId);
+    }
+
+    public Task MarkGrpoShipmentWrittenAsync(int grpoId) =>
+        _rpc.WriteAsync("x.sap.grpo", [grpoId], new JsonObject { ["odoo_shipment_written"] = true });
+
+    public async Task<string?> GetOrderNameAsync(int orderId)
+    {
+        var row = await _rpc.ReadAsync(_settings.CurrentValue.ContainerOrderModel, orderId, ["id", "name"]);
+        return OdooValues.String(row?["name"]);
+    }
+
+    public async Task<List<int>> SapMatchAsync(int moveId)
+    {
+        var result = await _rpc.CallModelAsync("account.move", "sap_match", new JsonObject { ["move_id"] = moveId });
+        return result is JsonArray arr
+            ? arr.Select(n => n!.GetValue<int>()).ToList()
+            : [];
     }
 
     public Task NotifyCreditNoteAsync(int moveId) =>

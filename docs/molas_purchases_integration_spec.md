@@ -254,14 +254,14 @@ Implement inside the Shipments module and the Integration Control Centre, or as 
 ### 5.2 Fields and models
 
 **`res.partner`**
-- `x_sap_cardcode` already exists (control centre). Add a unique constraint per company if discovery shows none.
+- `x_sap_cardcode` already exists (control centre); `molas_sap_purchase` adds the uniqueness per company. The middleware matches it case-insensitively.
 
 **`account.move`** (existing fields are the control centre's)
 - **Vendor bill (`in_invoice`): `x_sap_invoice_docentry`** (existing) holds the SAP **A/P Invoice** (`OPCH`) DocEntry.
 - **Vendor credit note (`in_refund`): `x_sap_credit_docentry`** (existing) holds the SAP **A/P Credit Memo** (`ORPC`) DocEntry.
 - Uniqueness: one unique index on (`x_sap_invoice_docentry`, `move_type`, `company_id`) and one on (`x_sap_credit_docentry`, `move_type`, `company_id`), both for values > 0.
 - **`x_sap_docentry` on `account.move` is the SAP sales order DocEntry on customer invoices. The purchase flow never reads or writes it.**
-- New: `x_sap_docnum` (Integer), `x_sap_sync_error` (Char: `TOTAL_MISMATCH`, `CANCEL_AFTER_ALLOCATION`, …)
+- New: `x_sap_docnum` (Char), `x_sap_objtype` (Char, `18` / `19`), `x_sap_sync_error` (Text: `TOTAL_MISMATCH`, `CANCEL_AFTER_ALLOCATION`, …)
 - New: `x_sap_po_ref_ids` (M2M → `x.sap.po`)
 - New: `x_shipment_id` (M2O → `supplier.order`), `x_sap_lc_docentry` (Integer, landed cost JE)
 - New: `x_order_ids` (M2M → `supplier.order`: the orders a goods bill covers)
@@ -276,6 +276,8 @@ Implement inside the Shipments module and the Integration Control Centre, or as 
 - `payment_id` (M2O → `account.payment`, for Payment and Refund)
 - `move_id` (M2O → `account.move`: the JE for an Adjustment, or the synced credit note for a Credit Note)
 - `adjustment_reason`: `bank_charges` / `small_balance` (required for Adjustment)
+- `adjustment_direction`: `credit_supplier` (Cr supplier payable / Dr G/L: bank charges, the supplier received less than the top-up) or `debit_supplier` (Dr supplier payable / Cr G/L). Required for `small_balance`; `bank_charges` is always `credit_supplier`. Entry amounts stay positive; the direction carries the side.
+- `state`: `draft` / `posted` / `cancelled`. The control centre's reverse job fires on `cancelled`.
 - `x_sap_jdt_docentry` (SAP JE DocEntry for an Adjustment), `x_sap_sync_state` (same values as the payment), `x_sap_sync_error`
 - **Locking:** once posted, amount, currency, rate, date and type are read-only. Corrections are cancel/reverse only.
 - **Credit Note entries** are **created only by the sync**, from posted Odoo vendor credit notes (public, idempotent model method `sync_from_credit_note(move_ids)` that the middleware calls after posting the credit note). Users cannot create them.
@@ -286,9 +288,9 @@ Implement inside the Shipments module and the Integration Control Centre, or as 
 - `partial_reconcile_ids` (M2M → `account.partial.reconcile`)
 - **FIFO rebuild rule:** a rebuild deletes and recreates only `pending_sync` lines. `locked` and manual lines are kept, and FIFO fills only the remaining capacity.
 
-**`x.sap.po`** (reference only, written by the middleware): `docentry` (unique), `docnum`, `partner_id`, `currency_id`, `doc_total`, `doc_date`, `due_date`, `status`, `num_at_card`.
+**`x.sap.po`** (reference only, `molas_sap_purchase`): `docentry` (unique per company), `docnum` (Char), `cardcode`, `partner_id`, `currency_id`, `doc_total`, `doc_date`, `due_date`, `status`, `comments`, and the links `order_ids`, `grpo_ids`, `move_ids`. **The middleware calls `x.sap.po.upsert(vals)`** (`vals`: `docentry`, `docnum`, `cardcode`, `currency` as a code, `doc_total`, `doc_date`, `due_date`, `status`, `comments`); the partner and currency are resolved in Odoo. Returns the id.
 
-**`x.sap.grpo`** (reference only, written by the middleware): `docentry` (unique), `docnum`, `po_ids`, `ship_ref`, `doc_date`, `doc_total_lc`, `order_id` (M2O → `supplier.order`), `line_json` (item code and quantity per line, for the qty check).
+**`x.sap.grpo`** (reference only, `molas_sap_purchase`): `docentry` (unique per company), `docnum`, `cardcode`, `partner_id`, `po_ids`, `ship_ref`, `doc_date`, `doc_total_lc`, `order_id` (M2O → `supplier.order`), `line_ids` (`x.sap.grpo.line`: `line_num`, `item_code`, `name`, `quantity`, `price`), `link_state`, `qty_mismatch`, `qty_mismatch_note`, `odoo_shipment_written`. **The middleware calls `x.sap.grpo.upsert(vals, lines)`** (`vals` as for the PO plus `ship_ref`, `doc_total_lc`, `po_docentries`; `lines` replaced on every call); the container link by `U_ShipRef` and the quantity check against the order's lines run in Odoo. Returns `{'id', 'order_id'}`; the middleware writes `supplier.order.name` of `order_id` to the GRPO's `U_OdooShipmentId` and sets `odoo_shipment_written`.
 
 **`supplier.order`** (the container order, existing, extended): `x_sap_po_ids`, `x_sap_grpo_ids`, `x_sap_ap_invoice_ids`, `x_lc_state` (`draft` / `costs_final` / `pushed` / `error`), `x_sap_lc_docentries`, `x_lc_error`, and a `QTY_MISMATCH` flag. The existing `container_no` and `invoice_no` fields are the match keys (5.3).
 
@@ -369,20 +371,19 @@ Implement inside the Shipments module and the Integration Control Centre, or as 
 | `icc.sap.vatgroup.map` | `sap_vat_group` Char (unique), `tax_id` M2O `account.tax`, `active` | middleware, bill and credit-note lines (`PCH1.VatGroup` / `RPC1.VatGroup`) |
 | `icc.sap.itemgroup.map` | `sap_item_group` Integer (`OITB.ItmsGrpCod`, unique), `name`, `account_id` M2O `account.account`, `analytic_account_id` M2O (optional) | middleware, item lines of goods bills |
 | `icc.sap.glaccount.map` | `sap_gl_code` Char (unique), `account_id` M2O `account.account` | middleware, service-type lines (`AcctCode`) and `PCH3` expense lines |
-| `icc.sap.adjustment.map` | `reason` Selection (`bank_charges`, `small_balance`; unique), `account_id` M2O `account.account` (the Odoo side of the JE), `sap_gl_code` Char (the SAP mirror G/L; `small_balance` → `6011520`) | Shipments app (Odoo JE) and the adjustment job payload |
+| `icc.sap.adjustment.map` | `reason` Selection (`bank_charges`, `small_balance`; unique), `account_id` M2O `account.account` (the Odoo side of the JE), `sap_gl_code` Char (the SAP mirror G/L; `small_balance` → `6011520`) | Shipments app (Odoo JE, via `get_for_reason(reason)`) and the adjustment job payload |
 | `icc.ap.sync.settings` (singleton) | `total_tolerance` Float (0.01), `small_balance_limit` Monetary (10 EUR), `cutover_date` Date (**no default**), `bill_journal_id` M2O `account.journal` (purchase journal for synced bills) | middleware and Shipments app |
 
 The middleware reads these with `search_read` and caches them for 5 minutes. A missing key fails the queue row with `PARTNER_NOT_MAPPED`, `ACCOUNT_NOT_MAPPED` or `TAX_NOT_MAPPED` plus the key, and the row is retried from the queue view after the mapping is added.
 
-**Automated actions and jobs** (same pattern as `action_push_payment_to_sap`; all run on the existing 2-minute job cron, after the Odoo posting, never inside it):
+**Automated actions and jobs** (module `molas_sap_purchase_icc`, which depends on the control centre and on `molas_sap_purchase`; same pattern as `action_push_payment_to_sap`; all run on the existing 2-minute job cron, after the Odoo posting, never inside it; the four actions ship **inactive** and are enabled at the Phase 3 go-live):
 
 | Action | Trigger | Middleware call | Write-back |
 |---|---|---|---|
-| Push Supplier Payment | `account.payment` on_write: `payment_type=outbound`, `partner_type=supplier`, `state in (paid, in_process)`, `x_entry_id` set, `x_sap_sync_state=pending` | `POST /api/outgoing-payments` | `x_sap_docentry`, `x_sap_docnum`, `x_sap_objtype=46`, `x_sap_sync_state=synced` |
-| Push Supplier Refund | same, `payment_type=inbound`, `partner_type=supplier` | `POST /api/supplier-refunds` | same, `x_sap_objtype=24` |
-| Cancel Supplier Payment / Refund | `account.payment` on_write: `state in (cancel, draft)`, `x_sap_sync_state=synced` | `POST /api/outgoing-payments/{doc_entry}/cancel` or `POST /api/supplier-refunds/{doc_entry}/cancel` | `x_sap_sync_state=cancelled` |
-| Push Supplier Adjustment | `supplier.account.entry` on_write: `entry_type=adjustment`, posted, `x_sap_sync_state=pending` | `POST /api/supplier-adjustments` | `x_sap_jdt_docentry`, `x_sap_sync_state=synced` |
-| Reverse Supplier Adjustment | `supplier.account.entry` reversed, `x_sap_sync_state=synced` | `POST /api/supplier-adjustments/{jdt_docentry}/reverse` | `x_sap_sync_state=cancelled` |
+| Push Supplier Payment / Refund | `account.payment` on_write: `partner_type=supplier`, `state in (paid, in_process)`, `x_sap_sync_state=pending`, no `x_sap_docentry` (any supplier payment to a CardCode partner, Account Activity or not, so the SAP balance stays right) | `POST /api/outgoing-payments` (outbound) / `POST /api/supplier-refunds` (inbound) | `x_sap_docentry`, `x_sap_docnum`, `x_sap_objtype` (`46` / `24`), `x_sap_synced_at`, `x_sap_sync_state=synced` |
+| Cancel Supplier Payment / Refund | `account.payment` on_write: `state in (cancel, draft, rejected)`, `x_sap_sync_state=synced` | `POST /api/outgoing-payments/{doc_entry}/cancel` or `POST /api/supplier-refunds/{doc_entry}/cancel` | `x_sap_sync_state=cancelled`; the SAP keys are kept |
+| Push Supplier Adjustment | `supplier.account.entry` on_write: `entry_type=adjustment`, `move_id` set, `x_sap_sync_state=pending` | `POST /api/supplier-adjustments` | `x_sap_jdt_docentry`, `x_sap_sync_state=synced` |
+| Reverse Supplier Adjustment | `supplier.account.entry` on_write: `state=cancelled`, `x_sap_sync_state=synced` | `POST /api/supplier-adjustments/{jdt_docentry}/reverse` | `x_sap_sync_state=cancelled` |
 | Push Landed Costs (Phase 4) | `supplier.order` on_write: `x_lc_state=costs_final` | `POST /api/landed-costs` | `x_sap_lc_docentries`, `x_lc_state=pushed`, then post the Odoo clearing JE and set `x_sap_lc_docentry` on it; on failure `x_lc_state=error`, `x_lc_error` |
 
 - Any middleware error sets the record's `x_sap_sync_state=error` and `x_sap_sync_error`, and the job goes to `failed` with retry. A cancel or reverse refused by SAP is **not** auto-retried.
@@ -398,12 +399,11 @@ The middleware reads these with `search_read` and caches them for 5 minutes. A m
 
 A new hosted service polls `ODOO_WEBHOOK_QUEUE` for `Status='pending'` rows whose `EventType` is one of the six purchase values, using the same connection, batch, retry and status conventions as the delivery worker. SAP reads use **direct SQL** on the company database (the DI API lock stays free for writes). Odoo writes use JSON-RPC as `sap-integration`.
 
-- **`PO_UPSERT`** (`OPOR`/`POR1`): upsert `x.sap.po` by `docentry`; `status` from `DocStatus`/`CANCELED`.
+- **`PO_UPSERT`** (`OPOR`/`POR1`): read the header, call `x.sap.po.upsert(vals)`; `status` from `DocStatus`/`CANCELED`.
 - **`GRPO_LINK`** (`OPDN`/`PDN1`):
-  - upsert `x.sap.grpo` from `OPDN`/`PDN1` (POs from `BaseType=22`), including `line_json`;
-  - match `supplier.order` by `container_no` = `U_ShipRef` (normalised like NumAtCard); set `order_id` and add the GRPO to `x_sap_grpo_ids`;
-  - write `U_OdooShipmentId` back to the GRPO (DI API) when linked;
-  - no match → row `done` with note `NO_ORDER_FOR_SHIPREF`; the order's "Link" action can re-queue it.
+  - read the header and lines (base POs from `BaseType=22`) and call `x.sap.grpo.upsert(vals, lines)`; Odoo links the container order by `container_no` = `U_ShipRef` (normalised like NumAtCard) and flags `QTY_MISMATCH`;
+  - when `order_id` comes back, write `supplier.order.name` to the GRPO's `U_OdooShipmentId` (DI API) and set `odoo_shipment_written`;
+  - no match → row `done` with note `NO_ORDER_FOR_SHIPREF`; typing the container number on the order links the waiting GRPO in Odoo, or "Match the container" on the GRPO retries.
 - **`AP_INVOICE_CREATE`** (`OPCH`/`PCH1`/`PCH3`):
   1. Idempotency check on `x_sap_invoice_docentry` + `move_type='in_invoice'`.
   2. Partner by `x_sap_cardcode`; if missing, fail the row with `PARTNER_NOT_MAPPED` and create nothing.
@@ -415,7 +415,7 @@ A new hosted service polls `ODOO_WEBHOOK_QUEUE` for `Status='pending'` rows whos
      - `PCH3` expenses as extra lines on the mapped accounts
      - `x_sap_invoice_docentry`, `x_sap_docnum`
   5. Validate the total against `DocTotal` (local) or `DocTotalFC` (foreign) within `total_tolerance`. If it passes, **post**; if not, leave it in draft with `x_sap_sync_error = TOTAL_MISMATCH` and mark the row `done` with that note.
-  6. Run the container match (5.3) and set `x_order_ids`, `x_sap_po_ref_ids` and the orders' `x_sap_ap_invoice_ids`.
+  6. Call `account.move.sap_match(move_id)`: Odoo matches the bill's CardCode and `ref` against the orders' invoice numbers (5.3) and sets `x_order_ids`, `x_sap_po_ref_ids` and the orders' `x_sap_ap_invoice_ids`. The middleware also writes `x_sap_docnum` and `x_sap_objtype`.
   7. A service-type A/P invoice is synced the same way, with lines mapped by `AcctCode` through `icc.sap.glaccount.map`.
 - **`AP_CREDIT_CREATE`** (`ORPC`/`RPC1`/`RPC3`):
   - `in_refund`, same rules, `x_sap_credit_docentry`, `reversed_entry_id` = the original bill when `BaseType=18` and that bill is synced;
@@ -434,6 +434,7 @@ All endpoints: `X-Api-Key`, JSON in `snake_case`, the usual `ApiResponse` envelo
 {
   "odoo_payment_id": 123,
   "odoo_pay_ref": "VBNK1/2026/00042",      // account.payment.name → U_OdooPayRef (idempotency key)
+  "sap_objtype": "46",                      // informational: 46 outgoing, 24 incoming (refund)
   "card_code": "S00001",
   "doc_date": "2026-11-03",
   "currency": "EUR",
@@ -455,18 +456,20 @@ Idempotency: `SELECT DocEntry FROM OVPM WHERE U_OdooPayRef = @ref AND Canceled =
 
 ```json
 {
-  "odoo_ref": "SAE/2026/0007",              // supplier.account.entry name → U_OdooRef (idempotency key)
+  "odoo_entry_id": 7,
+  "odoo_ref": "SAE-7",                      // "SAE-<entry id>" → U_OdooRef (idempotency key, 50 chars max)
   "card_code": "S00001",
   "doc_date": "2026-11-03",
   "currency": "EUR",
   "rate": 2950.0,
-  "amount": 25.00,                          // positive = credit the supplier (payable up), negative = debit
+  "amount": 25.00,                          // always positive
+  "direction": "credit_supplier",           // credit_supplier: Cr BP / Dr G/L; debit_supplier: Dr BP / Cr G/L
   "reason": "bank_charges",                 // bank_charges | small_balance
   "sap_gl_code": "6011510",                 // mirror G/L from icc.sap.adjustment.map
   "memo": "Bank charges on SWIFT 2026-11-03"
 }
 ```
-Lines: BP line `ShortName = card_code` and G/L line `AccountCode = sap_gl_code`, opposite sides, FC amounts in `currency` at `rate`. Response: `{ "jdt_docentry": 5001, "already_existed": false }`.
+Lines: BP line `ShortName = card_code` and G/L line `AccountCode = sap_gl_code` on the sides `direction` says, FC amounts in `currency` at `rate`. Response: `{ "jdt_docentry": 5001, "already_existed": false }`.
 Idempotency: `OJDT.U_OdooRef`.
 
 **`POST /api/supplier-adjustments/{jdt_docentry}/reverse`** → `JournalEntries.Cancel()` (SAP posts the storno); the reversal carries `U_OdooRef = "<odoo_ref>:REV"`. Response `{ "reversal_docentry": 5002, "already_existed": false }`.

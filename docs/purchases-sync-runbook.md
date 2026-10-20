@@ -90,13 +90,12 @@ The queue connection is `WebhookQueue:ConnectionString` (shared with the deliver
   (`total_tolerance`, `cutover_date`, `bill_journal_id`, `small_balance_limit`); `icc.sap.vatgroup.map` (`sap_vat_group`, `tax_id`);
   `icc.sap.itemgroup.map` (`sap_item_group`, `account_id`, `analytic_account_id`); `icc.sap.glaccount.map` (`sap_gl_code`, `account_id`);
   `account.journal.company_id`, `res.company.currency_id`, `res.currency.name`.
-- Writes: `x.sap.po` (`docentry`, `docnum`, `partner_id`, `currency_id`, `doc_total`, `doc_date`, `due_date`, `status`, `num_at_card`);
-  `x.sap.grpo` (`docentry`, `docnum`, `po_ids`, `ship_ref`, `doc_date`, `doc_total_lc`, `order_id`, `line_json`);
-  `supplier.order.x_sap_grpo_ids`, `supplier.order.x_sap_ap_invoice_ids`;
-  `account.move` (`move_type`, `partner_id`, `journal_id`, `currency_id`, `ref`, `invoice_date`, `date`, `invoice_date_due`, `narration`,
-  `invoice_currency_rate`, `x_sap_invoice_docentry` or `x_sap_credit_docentry`, `x_sap_docnum`, `x_sap_sync_error`, `x_order_ids`,
-  `x_sap_po_ref_ids`, `reversed_entry_id`, `invoice_line_ids` with `name`, `quantity`, `price_unit`, `account_id`, `tax_ids`, `analytic_distribution`).
-- Calls: `account.move.action_post`, `account.move.button_cancel`, `account.move.message_post(body=)`,
-  `account.move.reversal` (create + `reverse_moves`), `supplier.account.entry.sync_from_credit_note(move_ids=[id])` (an `@api.model`
-  method the Shipments app exposes; keyword argument).
+- Writes: `account.move` (`move_type`, `partner_id`, `journal_id`, `currency_id`, `ref`, `invoice_date`, `date`, `invoice_date_due`, `narration`,
+  `invoice_currency_rate`, `x_sap_invoice_docentry` or `x_sap_credit_docentry`, `x_sap_docnum`, `x_sap_objtype`, `x_sap_sync_error`,
+  `reversed_entry_id`, `invoice_line_ids` with `name`, `quantity`, `price_unit`, `account_id`, `tax_ids`, `analytic_distribution`);
+  `x.sap.grpo.odoo_shipment_written`.
+- Calls (model methods of `molas_sap_purchase`, keyword arguments): `x.sap.po.upsert(vals=)`, `x.sap.grpo.upsert(vals=, lines=)`,
+  `account.move.sap_match(move_id=)`; and `account.move.action_post`, `account.move.button_cancel`, `account.move.message_post(body=)`,
+  `account.move.reversal` (create + `reverse_moves`), `supplier.account.entry.sync_from_credit_note(move_ids=[id])` (Phase 3, Odoo side).
+  The container and PO links on bills and GRPOs are made by those Odoo methods, not by the middleware.
 - SAP: `OPDN.U_OdooShipmentId` = `supplier.order.name` (DI API) when a GRPO links to an order.

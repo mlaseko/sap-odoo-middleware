@@ -34,6 +34,13 @@ public static class ApDocumentMapper
     public const string ErrTaxNotMapped = "TAX_NOT_MAPPED";
     public const string ErrTotalMismatch = "TOTAL_MISMATCH";
 
+    /// <summary>
+    /// The account.move fields that hold the SAP A/P DocEntry (spec v4 §5.2: the control centre's
+    /// existing invoice / credit fields are reused; in_invoice → OPCH.DocEntry, in_refund → ORPC.DocEntry).
+    /// </summary>
+    public const string InvoiceDocEntryField = "x_sap_invoice_docentry";
+    public const string CreditDocEntryField = "x_sap_credit_docentry";
+
     public static bool IsForeign(SapApDocument doc, string companyCurrency) =>
         !string.Equals(doc.DocCur?.Trim(), companyCurrency?.Trim(), StringComparison.OrdinalIgnoreCase);
 
@@ -135,7 +142,8 @@ public static class ApDocumentMapper
             ["ref"] = (JsonNode?)(string.IsNullOrWhiteSpace(doc.NumAtCard) ? null : doc.NumAtCard.Trim()),
             ["invoice_date"] = OdooValues.Date(doc.DocDate),
             ["date"] = OdooValues.Date(doc.DocDate),
-            ["x_sap_docnum"] = doc.DocNum,
+            ["x_sap_docnum"] = doc.DocNum.ToString(CultureInfo.InvariantCulture),
+            ["x_sap_objtype"] = doc.ObjType.ToString(CultureInfo.InvariantCulture),
         };
 
         if (doc.DocDueDate.HasValue)
@@ -146,13 +154,13 @@ public static class ApDocumentMapper
 
         if (doc.IsCreditMemo)
         {
-            values["x_sap_credit_docentry"] = doc.DocEntry;
+            values[CreditDocEntryField] = doc.DocEntry;
             if (ctx.ReversedEntryId.HasValue)
                 values["reversed_entry_id"] = ctx.ReversedEntryId.Value;
         }
         else
         {
-            values["x_sap_invoice_docentry"] = doc.DocEntry;
+            values[InvoiceDocEntryField] = doc.DocEntry;
         }
 
         if (foreign && doc.DocRate > 0)
