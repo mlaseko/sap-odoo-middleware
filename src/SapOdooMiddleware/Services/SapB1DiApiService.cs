@@ -206,6 +206,15 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         // OITM (Items) — Item Provisioning
         ("OITM", "Odoo_Category", "Odoo Category Name", 0, 70),
         ("OITM", "Odoo_Product_ID", "Odoo Product ID", 0, 20),
+
+        // Purchases sync (docs/molas_purchases_integration_spec.md §4.1)
+        ("OPDN", "ShipRef", "Container number (links GRPO to container order)", 0, 50),
+        ("OPDN", "OdooShipmentId", "Odoo container order reference", 0, 30),
+        ("OIPF", "OdooShipmentId", "Odoo container order reference (idempotency)", 0, 30),
+        ("OIPF", "ShipRef", "Container number", 0, 50),
+        ("OVPM", "OdooPayRef", "Odoo payment reference (idempotency)", 0, 50),
+        ("ORCT", "OdooPayRef", "Odoo refund reference (idempotency)", 0, 50),
+        ("OJDT", "OdooRef", "Odoo adjustment reference (idempotency)", 0, 50),
     ];
 
     public async Task<List<string>> EnsureUdfsAsync()
@@ -4267,6 +4276,49 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             finally
             {
                 Marshal.ReleaseComObject(items);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async Task UpdateGrpoOdooShipmentIdAsync(int docEntry, string odooShipmentId)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+
+            var grpo = (Documents)_company!.GetBusinessObject(BoObjectTypes.oPurchaseDeliveryNotes);
+            try
+            {
+                if (!grpo.GetByKey(docEntry))
+                    throw new InvalidOperationException(
+                        $"SAP GRPO DocEntry {docEntry} not found for the Odoo shipment stamp.");
+
+                bool set = TrySetUserField(grpo.UserFields, "U_OdooShipmentId",
+                    odooShipmentId ?? string.Empty, $"GRPO {docEntry}");
+                if (!set)
+                    throw new InvalidOperationException(
+                        "OPDN has no U_OdooShipmentId UDF — run POST /api/admin/setup-sap-udfs first.");
+
+                int result = grpo.Update();
+                if (result != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP Documents.Update failed for GRPO {docEntry} [{errCode}]: {errMsg}");
+                }
+
+                _logger.LogInformation(
+                    "SAP GRPO {DocEntry} stamped with U_OdooShipmentId='{OdooShipmentId}'.",
+                    docEntry, odooShipmentId);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(grpo);
             }
         }
         finally

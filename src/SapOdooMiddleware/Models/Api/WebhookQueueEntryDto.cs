@@ -6,6 +6,11 @@ namespace SapOdooMiddleware.Models.Api;
 public class WebhookQueueEntryDto
 {
     public int Id { get; set; }
+
+    /// <summary>SAP object type: 15 delivery, 22 PO, 20 GRPO, 18 A/P invoice, 19 A/P credit memo.</summary>
+    public string ObjectType { get; set; } = string.Empty;
+    public int? DocNum { get; set; }
+    public string? CardCode { get; set; }
     public int DocEntry { get; set; }
     public string OdooSoId { get; set; } = string.Empty;
     public DateTime? DeliveryDate { get; set; }

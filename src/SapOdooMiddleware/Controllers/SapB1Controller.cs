@@ -43,27 +43,32 @@ public class SapB1Controller : ControllerBase
     }
 
     /// <summary>
-    /// POST /api/sapb1/setup-udfs
-    /// Creates all required User-Defined Fields (UDFs) in SAP B1 if they don't exist.
-    /// Safe to call multiple times — existing UDFs are skipped.
+    /// POST /api/sapb1/setup-udfs?dry_run=false&amp;force=false
+    /// Creates all required User-Defined Fields (UDFs) in SAP B1 if they don't exist (safe to call
+    /// repeatedly). Refuses (409) while other users are connected to the company database unless
+    /// <c>force=true</c>; <c>dry_run=true</c> only lists the connected sessions.
+    /// Same routine as POST /api/admin/setup-sap-udfs.
     /// </summary>
     [HttpPost("setup-udfs")]
-    public async Task<IActionResult> SetupUdfs()
+    public async Task<IActionResult> SetupUdfs(
+        [FromServices] SapUdfSetupService udfSetup,
+        [FromQuery(Name = "dry_run")] bool dryRun = false,
+        [FromQuery] bool force = false,
+        CancellationToken ct = default)
     {
-        _logger.LogInformation("UDF setup requested.");
+        _logger.LogInformation("UDF setup requested (dry_run={DryRun}, force={Force}).", dryRun, force);
 
         try
         {
-            var results = await _sapService.EnsureUdfsAsync();
-
-            _logger.LogInformation("UDF setup completed: {Results}", string.Join("; ", results));
-
-            return Ok(ApiResponse<List<string>>.Ok(results));
+            var result = await udfSetup.RunAsync(dryRun, force, ct);
+            if (result.Refused)
+                return StatusCode(409, ApiResponse<SapUdfSetupResult>.Ok(result));
+            return Ok(ApiResponse<SapUdfSetupResult>.Ok(result));
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "UDF setup failed.");
-            return StatusCode(500, ApiResponse<List<string>>.Fail(ex.Message));
+            return StatusCode(500, ApiResponse<SapUdfSetupResult>.Fail(ex.Message));
         }
     }
 }

@@ -186,6 +186,13 @@ public interface ISapB1Service
     Task UpdateOdooProductIdAsync(string itemCode, string odooProductId);
 
     /// <summary>
+    /// Stamps the Odoo container order reference onto a Goods Receipt PO's <c>U_OdooShipmentId</c>
+    /// UDF (OPDN, <c>oPurchaseDeliveryNotes</c>) once GRPO_LINK has matched it by <c>U_ShipRef</c>.
+    /// Throws when the GRPO is missing, the UDF does not exist (run the UDF routine) or SAP refuses.
+    /// </summary>
+    Task UpdateGrpoOdooShipmentIdAsync(int docEntry, string odooShipmentId);
+
+    /// <summary>
     /// Returns a snapshot of the existing OITM item's Odoo-category UDF and price-list
     /// prices, or <c>null</c> if the item does not exist. Used by the orchestrator to
     /// decide between create and idempotent recovery.

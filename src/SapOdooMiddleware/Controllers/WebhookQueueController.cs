@@ -33,59 +33,55 @@ public class WebhookQueueController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/webhook-queue?status=failed
-    /// Lists queue entries, optionally filtered by status (pending, processing, done, failed).
+    /// GET /api/webhook-queue?status=failed&amp;event_type=AP_INVOICE_CREATE
+    /// Lists queue entries, optionally filtered by status (pending, processing, done, failed) and by
+    /// event type (webhook, resync, or one of the purchase events PO_UPSERT, GRPO_LINK,
+    /// AP_INVOICE_CREATE, AP_INVOICE_CANCEL, AP_CREDIT_CREATE, AP_CREDIT_CANCEL).
     /// </summary>
     [HttpGet]
-    public async Task<IActionResult> List([FromQuery] string? status = null)
+    public async Task<IActionResult> List(
+        [FromQuery] string? status = null,
+        [FromQuery(Name = "event_type")] string? eventType = null)
     {
         using var connection = await OpenConnectionAsync();
         await EnsureEventTypeColumnAsync(connection);
 
-        string sql;
-        SqlCommand cmd;
-
+        var where = new List<string>();
+        using var cmd = new SqlCommand { Connection = connection };
         if (!string.IsNullOrWhiteSpace(status))
         {
-            sql = """
-                SELECT [Id], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
-                       [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt],
-                       [EventType]
-                FROM [dbo].[ODOO_WEBHOOK_QUEUE]
-                WHERE [Status] = @Status
-                ORDER BY [CreatedAt] DESC
-                """;
-            cmd = new SqlCommand(sql, connection);
+            where.Add("[Status] = @Status");
             cmd.Parameters.AddWithValue("@Status", status.Trim().ToLowerInvariant());
         }
-        else
+        if (!string.IsNullOrWhiteSpace(eventType))
         {
-            sql = """
-                SELECT [Id], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
-                       [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt],
-                       [EventType]
-                FROM [dbo].[ODOO_WEBHOOK_QUEUE]
-                ORDER BY [CreatedAt] DESC
-                """;
-            cmd = new SqlCommand(sql, connection);
+            where.Add("[EventType] = @EventType");
+            cmd.Parameters.AddWithValue("@EventType", eventType.Trim());
         }
 
-        using (cmd)
-        {
-            var entries = new List<WebhookQueueEntryDto>();
-            using var reader = await cmd.ExecuteReaderAsync();
+        cmd.CommandText = """
+            SELECT [Id], [ObjectType], [DocNum], [CardCode], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
+                   [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt],
+                   [EventType]
+            FROM [dbo].[ODOO_WEBHOOK_QUEUE]
+            """
+            + (where.Count > 0 ? " WHERE " + string.Join(" AND ", where) : string.Empty)
+            + " ORDER BY [CreatedAt] DESC";
 
+        var entries = new List<WebhookQueueEntryDto>();
+        using (var reader = await cmd.ExecuteReaderAsync())
+        {
             while (await reader.ReadAsync())
             {
                 entries.Add(MapEntry(reader));
             }
-
-            _logger.LogInformation(
-                "WebhookQueue list: returned {Count} entries (filter={Status})",
-                entries.Count, status ?? "all");
-
-            return Ok(ApiResponse<List<WebhookQueueEntryDto>>.Ok(entries));
         }
+
+        _logger.LogInformation(
+            "WebhookQueue list: returned {Count} entries (status={Status}, event_type={EventType})",
+            entries.Count, status ?? "all", eventType ?? "all");
+
+        return Ok(ApiResponse<List<WebhookQueueEntryDto>>.Ok(entries));
     }
 
     /// <summary>
@@ -100,7 +96,7 @@ public class WebhookQueueController : ControllerBase
         await EnsureEventTypeColumnAsync(connection);
 
         const string sql = """
-            SELECT [Id], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
+            SELECT [Id], [ObjectType], [DocNum], [CardCode], [DocEntry], [OdooSoId], [DeliveryDate], [Status],
                    [RetryCount], [ErrorMessage], [ResponseBody], [CreatedAt], [ProcessedAt],
                    [EventType]
             FROM [dbo].[ODOO_WEBHOOK_QUEUE]
@@ -191,17 +187,20 @@ public class WebhookQueueController : ControllerBase
     /// Returns a count of entries grouped by status, plus a total count.
     /// </summary>
     [HttpGet("summary")]
-    public async Task<IActionResult> Summary()
+    public async Task<IActionResult> Summary([FromQuery(Name = "event_type")] string? eventType = null)
     {
         using var connection = await OpenConnectionAsync();
+        await EnsureEventTypeColumnAsync(connection);
 
-        const string sql = """
-            SELECT [Status], COUNT(*) AS [Count]
-            FROM [dbo].[ODOO_WEBHOOK_QUEUE]
-            GROUP BY [Status]
-            """;
+        using var cmd = new SqlCommand { Connection = connection };
+        string where = string.Empty;
+        if (!string.IsNullOrWhiteSpace(eventType))
+        {
+            where = " WHERE [EventType] = @EventType";
+            cmd.Parameters.AddWithValue("@EventType", eventType.Trim());
+        }
+        cmd.CommandText = "SELECT [Status], COUNT(*) AS [Count] FROM [dbo].[ODOO_WEBHOOK_QUEUE]" + where + " GROUP BY [Status]";
 
-        using var cmd = new SqlCommand(sql, connection);
         using var reader = await cmd.ExecuteReaderAsync();
 
         var summary = new Dictionary<string, int>();
@@ -269,9 +268,15 @@ public class WebhookQueueController : ControllerBase
     private static WebhookQueueEntryDto MapEntry(SqlDataReader reader)
     {
         int eventTypeOrdinal = reader.GetOrdinal("EventType");
+        int objectTypeOrdinal = reader.GetOrdinal("ObjectType");
+        int docNumOrdinal = reader.GetOrdinal("DocNum");
+        int cardCodeOrdinal = reader.GetOrdinal("CardCode");
         return new WebhookQueueEntryDto
         {
             Id = reader.GetInt32(reader.GetOrdinal("Id")),
+            ObjectType = reader.IsDBNull(objectTypeOrdinal) ? string.Empty : reader.GetString(objectTypeOrdinal).Trim(),
+            DocNum = reader.IsDBNull(docNumOrdinal) ? null : reader.GetInt32(docNumOrdinal),
+            CardCode = reader.IsDBNull(cardCodeOrdinal) ? null : reader.GetString(cardCodeOrdinal).Trim(),
             DocEntry = reader.GetInt32(reader.GetOrdinal("DocEntry")),
             OdooSoId = reader.IsDBNull(reader.GetOrdinal("OdooSoId"))
                 ? string.Empty
