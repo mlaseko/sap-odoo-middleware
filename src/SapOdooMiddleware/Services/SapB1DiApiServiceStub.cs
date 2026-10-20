@@ -277,6 +277,10 @@ internal class SapB1DiApiServiceStub : ISapB1Service
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
+    public Task<LandedCostPushResult> CreateLandedCostAsync(LandedCostPushRequest request) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
     public Task<List<(int DocEntry, int DocNum, bool Cancelled)>> FindIncomingPaymentsByInvoiceAsync(
         int invoiceDocEntry) =>
         throw new PlatformNotSupportedException(

@@ -16,6 +16,7 @@ ASP.NET Core Web API middleware that integrates **Odoo** and **SAP Business One*
 | SAP UDF setup with exclusive-access check | Middleware → SAP B1 | `POST /api/admin/setup-sap-udfs` |
 | Supplier payment / refund on account (purchases Phase 3a) | Odoo (control centre jobs) → SAP B1 | `POST /api/outgoing-payments`, `POST /api/supplier-refunds`, `…/{docEntry}/cancel` |
 | Supplier adjustment journal entry and reversal (Phase 3a) | Odoo (control centre jobs) → SAP B1 | `POST /api/supplier-adjustments`, `…/{jdtDocEntry}/reverse` |
+| Landed costs on the container's GRPO (purchases Phase 4) | Odoo (control centre job) → SAP B1 | `POST /api/landed-costs` (`LandedCostsService`, idempotent on `U_OdooShipmentId`) |
 
 ## Prerequisites
 

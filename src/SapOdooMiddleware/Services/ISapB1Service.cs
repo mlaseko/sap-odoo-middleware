@@ -480,6 +480,15 @@ public interface ISapB1Service
     Task<AdjustmentReverseResult> ReverseSupplierAdjustmentJournalAsync(int transId, string reversalRef);
 
     /// <summary>
+    /// Creates a SAP Landed Costs document (OIPF, object 69) through <c>LandedCostsService</c> (spec v4 §6.3): item
+    /// lines from the container's GRPO (first push) or from the previous landed cost document (delta), one cost line
+    /// per landed cost code in local currency, no vendor or broker, <c>U_OdooShipmentId</c> / <c>U_ShipRef</c> set.
+    /// Idempotent on <c>OIPF.U_OdooShipmentId</c> (<c>ref</c> or <c>ref:n</c>). The §6.3 guards raise
+    /// <see cref="LandedCostGuardException"/> before SAP is touched.
+    /// </summary>
+    Task<LandedCostPushResult> CreateLandedCostAsync(LandedCostPushRequest request);
+
+    /// <summary>
     /// Finds the Incoming Payments applied to an AR Invoice via the RCT2 allocation
     /// lines (InvType 13). Returns every matching payment (DocEntry, DocNum, whether
     /// it is already cancelled), newest first.
