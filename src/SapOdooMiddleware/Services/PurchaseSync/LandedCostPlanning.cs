@@ -3,7 +3,7 @@ using SapOdooMiddleware.Models.PurchaseSync;
 namespace SapOdooMiddleware.Services.PurchaseSync;
 
 /// <summary>A goods receipt (OPDN) as the planner needs it.</summary>
-public sealed record SapGrpoHeader(int DocEntry, int DocNum, string CardCode, bool Cancelled, string? ShipRef);
+public sealed record LandedCostGrpo(int DocEntry, int DocNum, string CardCode, bool Cancelled, string? ShipRef);
 
 /// <summary>An item line of a GRPO (PDN1) or of a landed cost document (IPF1).</summary>
 public sealed record SapBaseLine(int LineNum, string ItemCode, double Quantity, string? WhsCode);
@@ -88,7 +88,7 @@ public static class LandedCostPlanning
     /// </summary>
     public static LandedCostPlan Build(
         LandedCostPushRequest request,
-        SapGrpoHeader? grpo,
+        LandedCostGrpo? grpo,
         IReadOnlyList<SapBaseLine> grpoLines,
         SapLandedCostHeader? previous,
         IReadOnlyList<SapBaseLine> previousLines,

@@ -7377,10 +7377,10 @@ ORDER BY PostingDate, DocumentNumber";
                 Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value), FieldString(f, "U_OdooShipmentId")))
             .FirstOrDefault();
 
-    private SapGrpoHeader? ReadGrpoHeader(int docEntry) =>
+    private LandedCostGrpo? ReadGrpoHeader(int docEntry) =>
         QueryRows(
             $"SELECT \"DocEntry\", \"DocNum\", \"CardCode\", \"CANCELED\" FROM OPDN WHERE \"DocEntry\" = {docEntry}",
-            f => new SapGrpoHeader(
+            f => new LandedCostGrpo(
                 Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value), FieldString(f, "CardCode"),
                 FieldString(f, "CANCELED") == "Y", null))
             .FirstOrDefault();
