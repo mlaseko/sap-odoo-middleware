@@ -285,7 +285,11 @@ Spec: `docs/molas_purchases_integration_spec.md` (v4). Runbook: `docs/purchases-
   via the DI API `LandedCostsService` (`LandedCost`, `LandedCost_ItemLines` base 20 GRPO / 69 previous landed cost,
   `LandedCost_CostLines`, `AddLandedCost`). Pure guards and planning in `Services/PurchaseSync/LandedCostPlanning`
   (unit-tested); idempotent on `OIPF.U_OdooShipmentId` (`ref` / `ref:n`); §6.3 guards → 422 (`LandedCostGuardException`).
-  Reads (OPDN/PDN1, OIPF/IPF1, OALC) are Recordset queries inside the DI service.
+  Reads (OPDN/PDN1, OIPF/IPF1, OALC) are Recordset queries inside the DI service. **Gotcha:** DI API 10.00.280's
+  interop has no `LandedCost.DocumentDate`, no `LandedCost_CostLine.Amount` and other spellings of the
+  `LandedCostAllocationByEnum` / `LandedCostBaseDocumentTypeEnum` members, so those are resolved at runtime from
+  candidate names (`TrySetInteropProperty` / `TrySetInteropEnum`); an error or warning lists the members the installed
+  interop actually has — add the real name to the candidate list when one shows up in the log.
 - **UDFs:** `RequiredUdfs` gained OPDN/OIPF/OVPM/ORCT/OJDT fields; `SapUdfSetupService` adds the exclusive-access check
   (`sys.dm_exec_sessions` on the company DB; needs VIEW SERVER STATE for the SQL login). Endpoint
   `POST /api/admin/setup-sap-udfs` (alias of `/api/sapb1/setup-udfs`).
