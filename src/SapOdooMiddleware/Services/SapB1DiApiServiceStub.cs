@@ -1,4 +1,5 @@
 using SapOdooMiddleware.Models.Inventory;
+using SapOdooMiddleware.Models.PurchaseSync;
 using SapOdooMiddleware.Models.Sap;
 using SapOdooMiddleware.Services.Autohub;
 
@@ -257,6 +258,22 @@ internal class SapB1DiApiServiceStub : ISapB1Service
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
     public Task<SapPaymentCancelResponse> CancelIncomingPaymentAsync(int docEntry) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<SupplierPaymentResult> CreateSupplierPaymentOnAccountAsync(SupplierPaymentRequest request) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<SapPaymentCancelResponse> CancelSupplierPaymentAsync(int docEntry, bool isRefund) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<SupplierAdjustmentResult> CreateSupplierAdjustmentJournalAsync(SupplierAdjustmentRequest request) =>
+        throw new PlatformNotSupportedException(
+            "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
+
+    public Task<AdjustmentReverseResult> ReverseSupplierAdjustmentJournalAsync(int transId, string reversalRef) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
