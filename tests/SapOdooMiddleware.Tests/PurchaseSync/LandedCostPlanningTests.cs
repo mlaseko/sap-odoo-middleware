@@ -7,7 +7,7 @@ public class LandedCostPlanningTests
 {
     private static readonly string[] Codes = { "C02", "C08", "EXC" };
 
-    private static readonly SapGrpoHeader Grpo = new(345, 1345, "S00001", Cancelled: false, ShipRef: "MSKU1234567");
+    private static readonly LandedCostGrpo Grpo = new(345, 1345, "S00001", Cancelled: false, ShipRef: "MSKU1234567");
 
     private static readonly List<SapBaseLine> GrpoLines = new()
     {
