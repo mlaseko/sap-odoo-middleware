@@ -81,16 +81,12 @@ public sealed class PurchaseSyncHandlers
         if (BeforeCutover(mappings, po.DocDate))
             return HandlerResult.Done(NoteBeforeCutover);
 
-        int? partnerId = await _odoo.FindPartnerIdByCardCodeAsync(po.CardCode);
-        int? currencyId = null;
-        try { currencyId = await _odoo.GetCurrencyIdAsync(po.DocCur); }
-        catch (PurchaseSyncException ex) { _logger.LogWarning("PO {DocEntry}: {Message}", po.DocEntry, ex.Message); }
-
-        int id = await _odoo.UpsertSapPoAsync(po, partnerId, currencyId);
+        // x.sap.po.upsert resolves the partner from the CardCode and the currency from its code.
+        int id = await _odoo.UpsertSapPoAsync(po);
         _logger.LogInformation("PO_UPSERT: OPOR {DocEntry} ({DocNum}) → x.sap.po {Id} status={Status}",
             po.DocEntry, po.DocNum, id, po.Status);
 
-        return HandlerResult.Done(new { x_sap_po_id = id, status = po.Status, partner_id = partnerId });
+        return HandlerResult.Done(new { x_sap_po_id = id, status = po.Status });
     }
 
     // ------------------------------------------------------------------
@@ -109,25 +105,20 @@ public sealed class PurchaseSyncHandlers
         if (BeforeCutover(mappings, grpo.DocDate))
             return HandlerResult.Done(NoteBeforeCutover);
 
-        var poIds = await _odoo.FindSapPoIdsAsync(grpo.PoDocEntries);
-        var orders = await _odoo.GetContainerOrdersAsync();
-        var match = string.IsNullOrWhiteSpace(grpo.ShipRef)
-            ? null
-            : orders.FirstOrDefault(o => RefNormalizer.Matches(o.ContainerNo, grpo.ShipRef));
-
-        int grpoId = await _odoo.UpsertSapGrpoAsync(grpo, poIds, match?.Id);
+        // x.sap.grpo.upsert replaces the lines, links the base POs and matches the container order
+        // by U_ShipRef (spec §5.3); the quantity check against the order's lines runs in Odoo.
+        var upsert = await _odoo.UpsertSapGrpoAsync(grpo);
 
         string? stampNote = null;
-        if (match != null)
+        if (upsert.OrderId is { } orderId)
         {
-            await _odoo.LinkGrpoToOrderAsync(match.Id, grpoId);
-
-            string shipmentRef = string.IsNullOrWhiteSpace(match.Name) ? match.Id.ToString() : match.Name!;
+            string shipmentRef = await _odoo.GetOrderNameAsync(orderId) ?? orderId.ToString();
             if (!string.Equals(grpo.OdooShipmentId?.Trim(), shipmentRef, StringComparison.Ordinal))
             {
                 try
                 {
                     await _sapWriter.UpdateGrpoOdooShipmentIdAsync(grpo.DocEntry, shipmentRef);
+                    await _odoo.MarkGrpoShipmentWrittenAsync(upsert.GrpoId);
                     stampNote = "stamped";
                 }
                 catch (Exception ex)
@@ -137,18 +128,22 @@ public sealed class PurchaseSyncHandlers
                     stampNote = $"U_OdooShipmentId not written: {ex.Message}";
                 }
             }
+            else
+            {
+                stampNote = "already stamped";
+            }
         }
 
         _logger.LogInformation("GRPO_LINK: OPDN {DocEntry} ShipRef='{ShipRef}' → x.sap.grpo {GrpoId}, order={OrderId}",
-            grpo.DocEntry, grpo.ShipRef, grpoId, match?.Id);
+            grpo.DocEntry, grpo.ShipRef, upsert.GrpoId, upsert.OrderId);
 
         return HandlerResult.Done(new
         {
-            x_sap_grpo_id = grpoId,
-            order_id = match?.Id,
-            note = match is null ? NoteNoOrderForShipRef : "linked",
+            x_sap_grpo_id = upsert.GrpoId,
+            order_id = upsert.OrderId,
+            note = upsert.OrderId is null ? NoteNoOrderForShipRef : "linked",
             ship_ref = grpo.ShipRef,
-            po_ids = poIds,
+            po_docentries = grpo.PoDocEntries,
             sap_stamp = stampNote,
         });
     }
@@ -237,21 +232,18 @@ public sealed class PurchaseSyncHandlers
                 label, doc.DocEntry, expected, created.AmountTotal, moveId);
         }
 
-        // Container and PO links (never fail the row for these).
+        // Container and PO links: account.move.sap_match matches the bill's CardCode + ref (NumAtCard)
+        // against the orders' invoice numbers and links their POs (spec §5.3). Never fails the row.
         List<int> orderIds = [];
-        List<int> poIds = [];
         string? linkNote = null;
         try
         {
-            var orders = await _odoo.GetContainerOrdersAsync();
-            orderIds = orders.Where(o => RefNormalizer.Matches(o.InvoiceNo, doc.NumAtCard)).Select(o => o.Id).Distinct().ToList();
-            poIds = await _odoo.FindSapPoIdsAsync(doc.PoDocEntries);
-            await _odoo.LinkBillToOrdersAsync(moveId, orderIds, poIds);
+            orderIds = await _odoo.SapMatchAsync(moveId);
         }
         catch (Exception ex) when (ex is OdooRpcException or PurchaseSyncException)
         {
-            linkNote = $"link failed: {ex.Message}";
-            _logger.LogWarning(ex, "{Label} {DocEntry}: container/PO link failed on move {MoveId}.", label, doc.DocEntry, moveId);
+            linkNote = $"sap_match failed: {ex.Message}";
+            _logger.LogWarning(ex, "{Label} {DocEntry}: account.move.sap_match failed on move {MoveId}.", label, doc.DocEntry, moveId);
         }
 
         string? creditNoteNote = null;
@@ -272,7 +264,6 @@ public sealed class PurchaseSyncHandlers
             posted,
             error,
             order_ids = orderIds,
-            po_ids = poIds,
             link = linkNote,
             credit_note = creditNoteNote,
         });

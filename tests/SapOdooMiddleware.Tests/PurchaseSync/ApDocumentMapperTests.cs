@@ -116,8 +116,9 @@ public class ApDocumentMapperTests
         Assert.Equal("LM 12345", values["ref"]!.GetValue<string>());
         Assert.Equal("2026-11-03", values["invoice_date"]!.GetValue<string>());
         Assert.Equal("2026-12-03", values["invoice_date_due"]!.GetValue<string>());
-        Assert.Equal(1001, values["x_sap_invoice_docentry"]!.GetValue<int>());
-        Assert.Equal(2001, values["x_sap_docnum"]!.GetValue<int>());
+        Assert.Equal(1001, values[ApDocumentMapper.InvoiceDocEntryField]!.GetValue<int>());
+        Assert.Equal("2001", values["x_sap_docnum"]!.GetValue<string>());
+        Assert.Equal("18", values["x_sap_objtype"]!.GetValue<string>());
         Assert.Null(values["x_sap_credit_docentry"]);
         Assert.Null(values["reversed_entry_id"]);
         Assert.Equal(1.0 / 2950.0, values["invoice_currency_rate"]!.GetValue<double>(), 12);
@@ -147,8 +148,9 @@ public class ApDocumentMapperTests
         var values = ApDocumentMapper.BuildMoveValues(doc, ctx, lines);
 
         Assert.Equal("in_refund", values["move_type"]!.GetValue<string>());
-        Assert.Equal(555, values["x_sap_credit_docentry"]!.GetValue<int>());
-        Assert.Null(values["x_sap_invoice_docentry"]);
+        Assert.Equal(555, values[ApDocumentMapper.CreditDocEntryField]!.GetValue<int>());
+        Assert.Null(values[ApDocumentMapper.InvoiceDocEntryField]);
+        Assert.Equal("19", values["x_sap_objtype"]!.GetValue<string>());
         Assert.Equal(4242, values["reversed_entry_id"]!.GetValue<int>());
         Assert.Equal(2950.0, values["invoice_currency_rate"]!.GetValue<double>(), 6);
     }

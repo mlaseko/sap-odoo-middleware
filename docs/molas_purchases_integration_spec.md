@@ -254,14 +254,14 @@ Implement inside the Shipments module and the Integration Control Centre, or as 
 ### 5.2 Fields and models
 
 **`res.partner`**
-- `x_sap_cardcode` already exists (control centre). Add a unique constraint per company if discovery shows none.
+- `x_sap_cardcode` already exists (control centre); `molas_sap_purchase` adds the uniqueness per company. The middleware matches it case-insensitively.
 
 **`account.move`** (existing fields are the control centre's)
 - **Vendor bill (`in_invoice`): `x_sap_invoice_docentry`** (existing) holds the SAP **A/P Invoice** (`OPCH`) DocEntry.
 - **Vendor credit note (`in_refund`): `x_sap_credit_docentry`** (existing) holds the SAP **A/P Credit Memo** (`ORPC`) DocEntry.
 - Uniqueness: one unique index on (`x_sap_invoice_docentry`, `move_type`, `company_id`) and one on (`x_sap_credit_docentry`, `move_type`, `company_id`), both for values > 0.
 - **`x_sap_docentry` on `account.move` is the SAP sales order DocEntry on customer invoices. The purchase flow never reads or writes it.**
-- New: `x_sap_docnum` (Integer), `x_sap_sync_error` (Char: `TOTAL_MISMATCH`, `CANCEL_AFTER_ALLOCATION`, …)
+- New: `x_sap_docnum` (Char), `x_sap_objtype` (Char, `18` / `19`), `x_sap_sync_error` (Text: `TOTAL_MISMATCH`, `CANCEL_AFTER_ALLOCATION`, …)
 - New: `x_sap_po_ref_ids` (M2M → `x.sap.po`)
 - New: `x_shipment_id` (M2O → `supplier.order`), `x_sap_lc_docentry` (Integer, landed cost JE)
 - New: `x_order_ids` (M2M → `supplier.order`: the orders a goods bill covers)
@@ -286,9 +286,9 @@ Implement inside the Shipments module and the Integration Control Centre, or as 
 - `partial_reconcile_ids` (M2M → `account.partial.reconcile`)
 - **FIFO rebuild rule:** a rebuild deletes and recreates only `pending_sync` lines. `locked` and manual lines are kept, and FIFO fills only the remaining capacity.
 
-**`x.sap.po`** (reference only, written by the middleware): `docentry` (unique), `docnum`, `partner_id`, `currency_id`, `doc_total`, `doc_date`, `due_date`, `status`, `num_at_card`.
+**`x.sap.po`** (reference only, `molas_sap_purchase`): `docentry` (unique per company), `docnum` (Char), `cardcode`, `partner_id`, `currency_id`, `doc_total`, `doc_date`, `due_date`, `status`, `comments`, and the links `order_ids`, `grpo_ids`, `move_ids`. **The middleware calls `x.sap.po.upsert(vals)`** (`vals`: `docentry`, `docnum`, `cardcode`, `currency` as a code, `doc_total`, `doc_date`, `due_date`, `status`, `comments`); the partner and currency are resolved in Odoo. Returns the id.
 
-**`x.sap.grpo`** (reference only, written by the middleware): `docentry` (unique), `docnum`, `po_ids`, `ship_ref`, `doc_date`, `doc_total_lc`, `order_id` (M2O → `supplier.order`), `line_json` (item code and quantity per line, for the qty check).
+**`x.sap.grpo`** (reference only, `molas_sap_purchase`): `docentry` (unique per company), `docnum`, `cardcode`, `partner_id`, `po_ids`, `ship_ref`, `doc_date`, `doc_total_lc`, `order_id` (M2O → `supplier.order`), `line_ids` (`x.sap.grpo.line`: `line_num`, `item_code`, `name`, `quantity`, `price`), `link_state`, `qty_mismatch`, `qty_mismatch_note`, `odoo_shipment_written`. **The middleware calls `x.sap.grpo.upsert(vals, lines)`** (`vals` as for the PO plus `ship_ref`, `doc_total_lc`, `po_docentries`; `lines` replaced on every call); the container link by `U_ShipRef` and the quantity check against the order's lines run in Odoo. Returns `{'id', 'order_id'}`; the middleware writes `supplier.order.name` of `order_id` to the GRPO's `U_OdooShipmentId` and sets `odoo_shipment_written`.
 
 **`supplier.order`** (the container order, existing, extended): `x_sap_po_ids`, `x_sap_grpo_ids`, `x_sap_ap_invoice_ids`, `x_lc_state` (`draft` / `costs_final` / `pushed` / `error`), `x_sap_lc_docentries`, `x_lc_error`, and a `QTY_MISMATCH` flag. The existing `container_no` and `invoice_no` fields are the match keys (5.3).
 
@@ -398,12 +398,11 @@ The middleware reads these with `search_read` and caches them for 5 minutes. A m
 
 A new hosted service polls `ODOO_WEBHOOK_QUEUE` for `Status='pending'` rows whose `EventType` is one of the six purchase values, using the same connection, batch, retry and status conventions as the delivery worker. SAP reads use **direct SQL** on the company database (the DI API lock stays free for writes). Odoo writes use JSON-RPC as `sap-integration`.
 
-- **`PO_UPSERT`** (`OPOR`/`POR1`): upsert `x.sap.po` by `docentry`; `status` from `DocStatus`/`CANCELED`.
+- **`PO_UPSERT`** (`OPOR`/`POR1`): read the header, call `x.sap.po.upsert(vals)`; `status` from `DocStatus`/`CANCELED`.
 - **`GRPO_LINK`** (`OPDN`/`PDN1`):
-  - upsert `x.sap.grpo` from `OPDN`/`PDN1` (POs from `BaseType=22`), including `line_json`;
-  - match `supplier.order` by `container_no` = `U_ShipRef` (normalised like NumAtCard); set `order_id` and add the GRPO to `x_sap_grpo_ids`;
-  - write `U_OdooShipmentId` back to the GRPO (DI API) when linked;
-  - no match → row `done` with note `NO_ORDER_FOR_SHIPREF`; the order's "Link" action can re-queue it.
+  - read the header and lines (base POs from `BaseType=22`) and call `x.sap.grpo.upsert(vals, lines)`; Odoo links the container order by `container_no` = `U_ShipRef` (normalised like NumAtCard) and flags `QTY_MISMATCH`;
+  - when `order_id` comes back, write `supplier.order.name` to the GRPO's `U_OdooShipmentId` (DI API) and set `odoo_shipment_written`;
+  - no match → row `done` with note `NO_ORDER_FOR_SHIPREF`; typing the container number on the order links the waiting GRPO in Odoo, or "Match the container" on the GRPO retries.
 - **`AP_INVOICE_CREATE`** (`OPCH`/`PCH1`/`PCH3`):
   1. Idempotency check on `x_sap_invoice_docentry` + `move_type='in_invoice'`.
   2. Partner by `x_sap_cardcode`; if missing, fail the row with `PARTNER_NOT_MAPPED` and create nothing.
@@ -415,7 +414,7 @@ A new hosted service polls `ODOO_WEBHOOK_QUEUE` for `Status='pending'` rows whos
      - `PCH3` expenses as extra lines on the mapped accounts
      - `x_sap_invoice_docentry`, `x_sap_docnum`
   5. Validate the total against `DocTotal` (local) or `DocTotalFC` (foreign) within `total_tolerance`. If it passes, **post**; if not, leave it in draft with `x_sap_sync_error = TOTAL_MISMATCH` and mark the row `done` with that note.
-  6. Run the container match (5.3) and set `x_order_ids`, `x_sap_po_ref_ids` and the orders' `x_sap_ap_invoice_ids`.
+  6. Call `account.move.sap_match(move_id)`: Odoo matches the bill's CardCode and `ref` against the orders' invoice numbers (5.3) and sets `x_order_ids`, `x_sap_po_ref_ids` and the orders' `x_sap_ap_invoice_ids`. The middleware also writes `x_sap_docnum` and `x_sap_objtype`.
   7. A service-type A/P invoice is synced the same way, with lines mapped by `AcctCode` through `icc.sap.glaccount.map`.
 - **`AP_CREDIT_CREATE`** (`ORPC`/`RPC1`/`RPC3`):
   - `in_refund`, same rules, `x_sap_credit_docentry`, `reversed_entry_id` = the original bill when `BaseType=18` and that bill is synced;
