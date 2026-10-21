@@ -3,6 +3,8 @@
 Spec: [`molas_purchases_integration_spec.md`](molas_purchases_integration_spec.md) (v4). This page is the
 operational side of Phase 1: what runs, how to deploy it, and what each error code means.
 
+Go-live, in order: [`purchases-go-live-checklist.md`](purchases-go-live-checklist.md).
+
 ## What runs
 
 | Piece | Where | Purpose |

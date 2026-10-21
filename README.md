@@ -11,7 +11,7 @@ ASP.NET Core Web API middleware that integrates **Odoo** and **SAP Business One*
 | Incoming Payment creation | Odoo → SAP B1 | `POST /api/incoming-payments` |
 | Delivery confirmation | SAP B1 → Odoo | `POST /api/deliveries` |
 | COGS Journal Entry | Middleware → Odoo | `POST /api/cogs-journals` |
-| Purchases sync: POs, GRPOs, A/P invoices, A/P credit memos → Odoo (`x.sap.po`, `x.sap.grpo`, vendor bills) | SAP B1 → Odoo | `ODOO_WEBHOOK_QUEUE` worker (`PurchaseSyncQueueProcessor`), see [docs/purchases-sync-runbook.md](docs/purchases-sync-runbook.md) |
+| Purchases sync: POs, GRPOs, A/P invoices, A/P credit memos → Odoo (`x.sap.po`, `x.sap.grpo`, vendor bills) | SAP B1 → Odoo | `ODOO_WEBHOOK_QUEUE` worker (`PurchaseSyncQueueProcessor`), see [docs/purchases-sync-runbook.md](docs/purchases-sync-runbook.md) and the go-live order in [docs/purchases-go-live-checklist.md](docs/purchases-go-live-checklist.md) |
 | Purchases backfill (dry-run CSV / enqueue) | Middleware | `GET` / `POST /api/purchases/backfill` |
 | SAP UDF setup with exclusive-access check | Middleware → SAP B1 | `POST /api/admin/setup-sap-udfs` |
 | Supplier payment / refund on account (purchases Phase 3a) | Odoo (control centre jobs) → SAP B1 | `POST /api/outgoing-payments`, `POST /api/supplier-refunds`, `…/{docEntry}/cancel` |
