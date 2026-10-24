@@ -69,7 +69,7 @@ All endpoints need `X-Api-Key`.
 | `BEFORE_CUTOVER` | Document dated before `cutover_date`. Nothing created. | None. |
 | `CANCELLATION_DOC_SKIPPED` | The row was the cancellation document itself (`CANCELED = 'C'`). | None; the original's `C` event drives the reversal. |
 | `ALREADY_SYNCED` | Idempotency hit: the move already exists and is not draft. | None. |
-| `NO_ORDER_FOR_SHIPREF` | GRPO's `U_ShipRef` matched no `supplier.order.container_no`. `x.sap.grpo` was still written. | Fix the container number on the order or the GRPO, then retry the row (or use the order's "Link" action). |
+| `NO_ORDER_FOR_SHIPREF` | GRPO's `U_ShipRef` matched no `supplier.order.container_no`. `x.sap.grpo` was still written. Since 2026-10-24 SAP refuses a new GRPO with `U_ShipRef` empty (error 42100), so this means the number differs from the order's or the order has none yet. | Fix the container number on the order or the GRPO; editing the GRPO in SAP queues it again (or use "Match the container" on the receipt in Odoo). |
 | `PARTNER_NOT_MAPPED` (failed, terminal) | No `res.partner.x_sap_cardcode` = the SAP CardCode. | Set the CardCode on the supplier, retry the row. |
 | `ACCOUNT_NOT_MAPPED` (failed, terminal) | Item group / G/L / expense account has no mapping. The message names the key. | Add the mapping, `POST /api/purchases/mappings/refresh`, retry the row. |
 | `TAX_NOT_MAPPED` (failed, terminal) | SAP VatGroup has no `icc.sap.vatgroup.map` entry. | Same. |

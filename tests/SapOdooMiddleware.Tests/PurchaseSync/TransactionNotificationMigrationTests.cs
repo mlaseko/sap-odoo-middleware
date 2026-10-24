@@ -4,8 +4,8 @@ namespace SapOdooMiddleware.Tests.PurchaseSync;
 
 /// <summary>
 /// Guards the stored-procedure migration against the rules of spec v4 §4.2: the six EventType
-/// values are written explicitly, the procedure never sets @error outside the pre-existing
-/// commented block, and the delivery block is untouched.
+/// values are written explicitly, the procedure sets @error only in the pre-existing commented
+/// block and the one GRPO container-number check, and the delivery block is untouched.
 /// </summary>
 public class TransactionNotificationMigrationTests
 {
@@ -30,15 +30,30 @@ public class TransactionNotificationMigrationTests
     }
 
     [Fact]
-    public void Migration_NeverSetsErrorOutsideTheCommentedLegacyBlock()
+    public void Migration_SetsErrorOnlyInTheLegacyBlockAndTheGrpoShipRefCheck()
     {
         var sql = LoadMigration();
-        var matches = Regex.Matches(sql, @"SET\s+@error\s*=", RegexOptions.IgnoreCase);
-        // exactly one occurrence, the legacy 42090 one inside /* ... */
-        Assert.Single(matches);
+        var matches = Regex.Matches(sql, @"SET\s+@error\s*=\s*(\d+)", RegexOptions.IgnoreCase);
+        // the legacy 42090 one inside /* ... */, and the container-number check on a new GRPO (rule g)
+        Assert.Equal(2, matches.Count);
         int commentStart = sql.IndexOf("/*", StringComparison.Ordinal);
         int commentEnd = sql.IndexOf("*/", StringComparison.Ordinal);
         Assert.InRange(matches[0].Index, commentStart, commentEnd);
+        Assert.Equal("42100", matches[1].Groups[1].Value);
+    }
+
+    [Fact]
+    public void Migration_RefusesANewGrpoWithoutTheContainerNumber_AndQueuesOnlyWhenAccepted()
+    {
+        var sql = LoadMigration();
+        int check = sql.IndexOf("IF @object_type = '20' AND @transaction_type = 'A'\n", StringComparison.Ordinal);
+        if (check < 0)
+            check = sql.IndexOf("IF @object_type = '20' AND @transaction_type = 'A'\r\n", StringComparison.Ordinal);
+        int queue = sql.IndexOf("IF @object_type = '20' AND @transaction_type IN ('A', 'U') AND @error = 0", StringComparison.Ordinal);
+        Assert.True(check > 0, "GRPO container-number check not found");
+        Assert.True(queue > check, "the GRPO queue block must follow the check and skip a refused receipt");
+        Assert.Contains("LTRIM(RTRIM(ISNULL(T0.[U_ShipRef], N''))) = N''", sql);
+        Assert.Contains("ISNULL(T0.[CANCELED], 'N') <> 'C'", sql);
     }
 
     [Fact]
