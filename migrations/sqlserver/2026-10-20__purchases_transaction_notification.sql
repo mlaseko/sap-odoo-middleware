@@ -14,8 +14,12 @@
 --   d. Dedupe: skip the insert only when a row with the same ObjectType + DocEntry + TransType is
 --      still 'pending'.
 --   e. Non-clustered index on (Status, EventType, ObjectType, DocEntry).
---   f. One IF block per object type, each with its own TRY/CATCH writing a 'failed' row. @error is
---      never set by the new blocks; a SAP transaction is never blocked.
+--   f. One IF block per object type, each with its own TRY/CATCH writing a 'failed' row. The queue
+--      blocks never set @error; a SAP transaction is never blocked by the queue.
+--   g. (2026-10-24) One validation: a new Goods Receipt PO must carry the container number in
+--      U_ShipRef, the key that links it to its container order in Odoo. Adding one without it is
+--      refused with error 42100. Updates of existing receipts and cancellation documents are not checked.
+--      OPDN.U_ShipRef must exist before this script runs (POST /api/admin/setup-sap-udfs).
 --
 -- The object-15 delivery block is reproduced VERBATIM from the procedure as exported on 2026-10-20
 -- and is not modified. Run in SSMS against Molas_Lubes_LTD. Safe to re-run.
@@ -233,9 +237,26 @@ BEGIN
     END
 
     --------------------------------------------------------------------------------------------------
+    --  Object Type 20 = Goods Receipt PO (OPDN) — A: the container number is required (rule g)
+    --------------------------------------------------------------------------------------------------
+    IF @object_type = '20' AND @transaction_type = 'A'
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM [dbo].[OPDN] T0
+            WHERE T0.[DocEntry] = CAST(@list_of_cols_val_tab_del AS INT)
+              AND ISNULL(T0.[CANCELED], 'N') <> 'C'
+              AND LTRIM(RTRIM(ISNULL(T0.[U_ShipRef], N''))) = N''
+        )
+        BEGIN
+            SET @error = 42100
+            SET @error_message = N'Enter the container number in the ShipRef field before adding the goods receipt.'
+        END
+    END
+
+    --------------------------------------------------------------------------------------------------
     --  Object Type 20 = Goods Receipt PO (OPDN) — A, U → GRPO_LINK
     --------------------------------------------------------------------------------------------------
-    IF @object_type = '20' AND @transaction_type IN ('A', 'U')
+    IF @object_type = '20' AND @transaction_type IN ('A', 'U') AND @error = 0
     BEGIN
         BEGIN TRY
             SET @p_docentry = CAST(@list_of_cols_val_tab_del AS INT);

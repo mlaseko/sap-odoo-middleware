@@ -41,7 +41,8 @@ only after steps 1 to 6 below. Until then leave it empty: the system is safe wit
    to create. Until these exist every Odoo → SAP push fails closed on purpose.
 3. In SSMS, against `Molas_Lubes_LTD`, run `migrations/sqlserver/2026-10-20__purchases_transaction_notification.sql`
    (safe to re-run). It adds the blocks for objects 22, 20, 18, 19 to `SBO_SP_TransactionNotification` and the index
-   on `ODOO_WEBHOOK_QUEUE`.
+   on `ODOO_WEBHOOK_QUEUE`, and refuses a new goods receipt without the container number in `U_ShipRef` (error
+   42100), the field that links it to its container order.
 4. Verify: add a remark to any purchase order in SAP and run
    `SELECT TOP 5 * FROM ODOO_WEBHOOK_QUEUE WHERE EventType = 'PO_UPSERT' ORDER BY Id DESC` → one new `pending` row.
    The middleware leaves it `pending` with "waiting for cut-over date" in its log while the date is empty.
