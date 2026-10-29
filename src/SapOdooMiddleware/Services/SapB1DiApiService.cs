@@ -6219,6 +6219,12 @@ ORDER BY PostingDate, DocumentNumber";
                 if (series > 0) posting.Series = series;
                 if (bplId is > 0)
                     SetBranchLateBound(posting, bplId.Value);    // OIQR.BPLId — mandatory in multi-branch companies
+                // Post on the approval day, not the count day. Left unset, the posting
+                // inherits the counting document's date, and SAP refuses an Inventory
+                // Posting dated before an existing one (error 10001484, "There is a
+                // document of this type with a later posting date [OMRV.DocDate]"), so a
+                // session approved after a newer posting could never be posted.
+                SetPostingDatesToday(posting);
                 posting.UserFields.Item("U_AppRef").Value = appRef;
 
                 foreach (var l in lines)
@@ -6311,6 +6317,7 @@ ORDER BY PostingDate, DocumentNumber";
                 if (series > 0) posting.Series = series;
                 if (bplId is > 0)
                     SetBranchLateBound(posting, bplId.Value);
+                SetPostingDatesToday(posting);                 // same date rule as the counting posting above
                 if (!string.IsNullOrWhiteSpace(request.Remarks))
                     TrySetLateBound(posting, "Remarks", request.Remarks);
                 posting.UserFields.Item("U_AppRef").Value = request.AppRef;
@@ -6359,6 +6366,19 @@ ORDER BY PostingDate, DocumentNumber";
     /// Best-effort late-bound property set: silently skipped when this DI API build
     /// does not declare the property (for optional fields like Remarks).
     /// </summary>
+    /// <summary>
+    /// Dates an Inventory Posting on the day it is created. The DI API object names
+    /// the field DocumentDate (OIQR.DocDate); it is set late-bound like the other
+    /// posting fields so a typelib without the member degrades to a warning instead
+    /// of failing the post.
+    /// </summary>
+    private void SetPostingDatesToday(object posting)
+    {
+        var today = DateTime.Today;
+        TrySetLateBound(posting, "DocumentDate", today);
+        TrySetLateBound(posting, "TaxDate", today);
+    }
+
     private void TrySetLateBound(object serviceObject, string propertyName, object value)
     {
         try
