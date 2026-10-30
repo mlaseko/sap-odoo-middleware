@@ -6305,10 +6305,12 @@ ORDER BY PostingDate, DocumentNumber";
             rs.DoQuery($"SELECT \"CountDate\", \"CountTime\" FROM OINC WHERE \"DocEntry\" = {countingDocEntry}");
             if (!rs.EoF)
             {
-                var date = rs.Fields.Item("CountDate").Value;
+                // Field.Value is dynamic through COM interop; type it so overloads bind statically.
+                object? date = rs.Fields.Item("CountDate").Value;
                 if (date is DateTime d && d.Year > 1900) countDate = d.Date;
-                var time = rs.Fields.Item("CountTime").Value;
-                if (time is not null && int.TryParse(Convert.ToString(time), out var hhmm) && hhmm >= 0 && hhmm <= 2359)
+                object? time = rs.Fields.Item("CountTime").Value;
+                string? timeText = time is null ? null : Convert.ToString(time, System.Globalization.CultureInfo.InvariantCulture);
+                if (int.TryParse(timeText, out int hhmm) && hhmm >= 0 && hhmm <= 2359)
                     countTime = hhmm;
             }
         }
