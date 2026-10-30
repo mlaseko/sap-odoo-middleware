@@ -804,6 +804,42 @@ public class AutohubInventoryController : ControllerBase
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
 
+            // A line whose count equals the system quantity moves no stock. SAP (with
+            // "Close counted rows with zero diff" on) strips such lines from the posting,
+            // and a posting left with no lines fails "Specify at least one item"
+            // (1470000281). Post only the lines with a real difference; the matching
+            // lines are closed with the session below.
+            var differenceLines = postLines
+                .Where(p => (byLineNum[p.LineNum].CountedQty ?? 0m) != byLineNum[p.LineNum].SystemQty)
+                .ToList();
+            int zeroDifferenceLines = postLines.Count - differenceLines.Count;
+            var requested = lineNums.ToHashSet();
+            bool coversEveryOpenLine = lines
+                .Where(l => l.LineStatus != "C")
+                .All(l => requested.Contains(l.LineNum));
+
+            if (differenceLines.Count == 0)
+            {
+                if (!coversEveryOpenLine)
+                    return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(
+                        "Every selected line matches the system quantity, so there is nothing to post. " +
+                        "Close the counting session once its other lines are counted."));
+
+                await _sap.CloseInventoryCountingAsync(request.CountingDocEntry, ct);
+                _logger.LogInformation(
+                    "Counting {Counting} closed without posting: all {Lines} line(s) match the system (app_ref={AppRef})",
+                    request.CountingDocEntry, zeroDifferenceLines, request.AppRef);
+
+                return Ok(ApiResponse<InventoryDocResult>.Ok(
+                    new InventoryDocResult { ClosedWithoutPosting = true },
+                    new Dictionary<string, object>
+                    {
+                        ["posted_lines"] = 0,
+                        ["zero_difference_lines"] = zeroDifferenceLines,
+                        ["counting_closed"] = true,
+                    }));
+            }
+
             // Same branch requirement as counting creation (OIQR.BPLId) — derive it
             // from the counting's warehouse.
             var (bplId, branchError) = await ResolveActiveBranchAsync(lines[0].WhsCode, ct);
@@ -811,12 +847,37 @@ public class AutohubInventoryController : ControllerBase
                 return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
 
             var result = await _sap.CreateInventoryPostingAsync(
-                request.CountingDocEntry, postLines, request.AppRef,
+                request.CountingDocEntry, differenceLines, request.AppRef,
                 _settings.PostingSeries, bplId, ct);
+
+            // The posting closed the difference lines. When the request covered every
+            // open line, only matching lines are left open: close the session so it
+            // does not linger. The posting already succeeded, so a failed close is
+            // logged and reported, not raised.
+            bool countingClosed = false;
+            if (zeroDifferenceLines > 0 && coversEveryOpenLine)
+            {
+                try
+                {
+                    await _sap.CloseInventoryCountingAsync(request.CountingDocEntry, ct);
+                    countingClosed = true;
+                }
+                catch (Exception closeEx)
+                {
+                    _logger.LogWarning(closeEx,
+                        "Posting {DocEntry} created but closing counting {Counting} failed",
+                        result.DocEntry, request.CountingDocEntry);
+                }
+            }
 
             return Ok(ApiResponse<InventoryDocResult>.Ok(
                 result,
-                new Dictionary<string, object> { ["posted_lines"] = postLines.Count }));
+                new Dictionary<string, object>
+                {
+                    ["posted_lines"] = differenceLines.Count,
+                    ["zero_difference_lines"] = zeroDifferenceLines,
+                    ["counting_closed"] = countingClosed,
+                }));
         }
         catch (Exception ex)
         {

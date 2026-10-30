@@ -6374,9 +6374,25 @@ ORDER BY PostingDate, DocumentNumber";
     /// </summary>
     private void SetPostingDatesToday(object posting)
     {
-        var today = DateTime.Today;
-        TrySetLateBound(posting, "DocumentDate", today);
-        TrySetLateBound(posting, "TaxDate", today);
+        // The InventoryPosting data interface names its posting date PostingDate
+        // (OIQR.DocDate); it has no DocumentDate or TaxDate, so those names were
+        // skipped without effect. A missing member is logged as a warning, not at
+        // debug level, so a silent skip shows in the service log.
+        try
+        {
+            posting.GetType().InvokeMember(
+                "PostingDate",
+                System.Reflection.BindingFlags.SetProperty,
+                binder: null,
+                target: posting,
+                args: new object[] { DateTime.Today });
+        }
+        catch (Exception ex) when (IsUnknownComName(ex))
+        {
+            _logger.LogWarning(
+                "InventoryPosting.PostingDate is not declared on this DI API build; " +
+                "the posting keeps SAP's default date.");
+        }
     }
 
     private void TrySetLateBound(object serviceObject, string propertyName, object value)

@@ -69,4 +69,7 @@ public class InventoryDocResult
     public int DocNum { get; set; }
     /// <summary>True when a document with this AppRef already existed — no new post was made.</summary>
     public bool AlreadyExisted { get; set; }
+    /// <summary>True when every approved counting line matched the system quantity:
+    /// nothing was posted and the counting session was closed instead (DocEntry 0).</summary>
+    public bool ClosedWithoutPosting { get; set; }
 }
