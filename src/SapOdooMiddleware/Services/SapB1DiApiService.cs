@@ -6248,10 +6248,15 @@ ORDER BY PostingDate, DocumentNumber";
                 // count date itself stays on the lines, so SAP still values the
                 // variance against stock on the day it was counted.
                 SetPostingDatesToday(posting);
+                // SAP's own Copy From also carries the counting's Count Date and Time onto
+                // the posting header; the DI API leaves it empty (1899-12-30), and SAP then
+                // refuses the posting with the same 10001484. The count date is what SAP
+                // measures the variance against, so stock moved since the count is kept.
+                SetCountDateFromCounting(posting, countingDocEntry);
                 _logger.LogInformation(
-                    "Inventory posting for counting {Counting}: PostingDate={PostingDate}, CountDate={CountDate}, Lines={Lines}",
+                    "Inventory posting for counting {Counting}: PostingDate={PostingDate}, CountDate={CountDate}, CountTime={CountTime}, Lines={Lines}",
                     countingDocEntry, ReadLateBound(posting, "PostingDate"),
-                    ReadLateBound(posting, "CountDate"), lines.Count);
+                    ReadLateBound(posting, "CountDate"), ReadLateBound(posting, "CountTime"), lines.Count);
 
                 var result = svc.Add(posting);
                 int docEntry = result.DocumentEntry;
@@ -6285,6 +6290,65 @@ ORDER BY PostingDate, DocumentNumber";
     /// Reads DocNum for a freshly created service-based document (OINC/OIQR) — the
     /// service Add() only returns DocumentEntry. Caller already holds <see cref="_lock"/>.
     /// </summary>
+    /// <summary>
+    /// Copies OINC.CountDate / CountTime (time stored as HHMM) onto the posting header,
+    /// as SAP's Copy From does. Logged as a warning, never thrown, when a value is
+    /// missing or this DI API build refuses the member.
+    /// </summary>
+    private void SetCountDateFromCounting(object posting, int countingDocEntry)
+    {
+        DateTime? countDate = null;
+        int? countTime = null;
+        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        try
+        {
+            rs.DoQuery($"SELECT \"CountDate\", \"CountTime\" FROM OINC WHERE \"DocEntry\" = {countingDocEntry}");
+            if (!rs.EoF)
+            {
+                var date = rs.Fields.Item("CountDate").Value;
+                if (date is DateTime d && d.Year > 1900) countDate = d.Date;
+                var time = rs.Fields.Item("CountTime").Value;
+                if (time is not null && int.TryParse(Convert.ToString(time), out var hhmm) && hhmm >= 0 && hhmm <= 2359)
+                    countTime = hhmm;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read the count date of counting {Counting}", countingDocEntry);
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(rs);
+        }
+
+        if (countDate is null)
+        {
+            _logger.LogWarning("Counting {Counting} has no count date; the posting keeps SAP's default.", countingDocEntry);
+            return;
+        }
+        TrySetLoggedLateBound(posting, "CountDate", countDate.Value);
+        if (countTime is not null)
+            TrySetLoggedLateBound(posting, "CountTime",
+                countDate.Value.AddHours(countTime.Value / 100).AddMinutes(countTime.Value % 100));
+    }
+
+    private void TrySetLoggedLateBound(object serviceObject, string propertyName, object value)
+    {
+        try
+        {
+            serviceObject.GetType().InvokeMember(
+                propertyName,
+                System.Reflection.BindingFlags.SetProperty,
+                binder: null,
+                target: serviceObject,
+                args: new[] { value });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "InventoryPosting.{Property} could not be set to {Value}", propertyName, value);
+        }
+    }
+
     private int QueryDocNumByEntry(string headerTable, int docEntry)
     {
         var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
