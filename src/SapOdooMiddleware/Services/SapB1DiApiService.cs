@@ -6292,28 +6292,28 @@ ORDER BY PostingDate, DocumentNumber";
     /// service Add() only returns DocumentEntry. Caller already holds <see cref="_lock"/>.
     /// </summary>
     /// <summary>
-    /// Copies OINC.CountDate / CountTime (time stored as HHMM) onto the posting header,
-    /// as SAP's Copy From does. Logged as a warning, never thrown, when a value is
-    /// missing or this DI API build refuses the member.
+    /// Copies the counting's Count Date and Count Time onto the posting header, as
+    /// SAP's Copy From does. Read through InventoryCountingsService (the same data
+    /// interface that creates and closes countings), not SQL: OINC has no
+    /// "CountTime" column on this database, which made the earlier query fail.
+    /// Logged as a warning, never thrown, when a value cannot be read or set.
     /// </summary>
     private void SetCountDateFromCounting(object posting, int countingDocEntry)
     {
-        DateTime? countDate = null;
-        int? countTime = null;
-        var rs = (Recordset)_company!.GetBusinessObject(BoObjectTypes.BoRecordset);
+        object? countDate = null;
+        object? countTime = null;
+        var cs = _company!.GetCompanyService();
+        InventoryCountingsService? svc = null;
+        InventoryCounting? counting = null;
         try
         {
-            rs.DoQuery($"SELECT \"CountDate\", \"CountTime\" FROM OINC WHERE \"DocEntry\" = {countingDocEntry}");
-            if (!rs.EoF)
-            {
-                // Field.Value is dynamic through COM interop; type it so overloads bind statically.
-                object? date = rs.Fields.Item("CountDate").Value;
-                if (date is DateTime d && d.Year > 1900) countDate = d.Date;
-                object? time = rs.Fields.Item("CountTime").Value;
-                string? timeText = time is null ? null : Convert.ToString(time, System.Globalization.CultureInfo.InvariantCulture);
-                if (int.TryParse(timeText, out int hhmm) && hhmm >= 0 && hhmm <= 2359)
-                    countTime = hhmm;
-            }
+            svc = (InventoryCountingsService)cs.GetBusinessService(ServiceTypes.InventoryCountingsService);
+            var prms = (InventoryCountingParams)svc.GetDataInterface(
+                InventoryCountingsServiceDataInterfaces.icsInventoryCountingParams);
+            prms.DocumentEntry = countingDocEntry;
+            counting = svc.Get(prms);
+            countDate = ReadLateBoundValue(counting, "CountDate");
+            countTime = ReadLateBoundValue(counting, "CountTime");
         }
         catch (Exception ex)
         {
@@ -6321,18 +6321,38 @@ ORDER BY PostingDate, DocumentNumber";
         }
         finally
         {
-            Marshal.ReleaseComObject(rs);
+            if (counting is not null) try { Marshal.ReleaseComObject(counting); } catch { /* ignored */ }
+            if (svc is not null) try { Marshal.ReleaseComObject(svc); } catch { /* ignored */ }
+            try { Marshal.ReleaseComObject(cs); } catch { /* ignored */ }
         }
 
-        if (countDate is null)
+        if (countDate is not DateTime date || date.Year <= 1900)
         {
             _logger.LogWarning("Counting {Counting} has no count date; the posting keeps SAP's default.", countingDocEntry);
             return;
         }
-        TrySetLoggedLateBound(posting, "CountDate", countDate.Value);
+        TrySetLoggedLateBound(posting, "CountDate", date);
+        // Same type as the counting's own member, so it is copied as read.
         if (countTime is not null)
-            TrySetLoggedLateBound(posting, "CountTime",
-                countDate.Value.AddHours(countTime.Value / 100).AddMinutes(countTime.Value % 100));
+            TrySetLoggedLateBound(posting, "CountTime", countTime);
+    }
+
+    /// <summary>Reads a COM property; null when it cannot be read.</summary>
+    private static object? ReadLateBoundValue(object serviceObject, string propertyName)
+    {
+        try
+        {
+            return serviceObject.GetType().InvokeMember(
+                propertyName,
+                System.Reflection.BindingFlags.GetProperty,
+                binder: null,
+                target: serviceObject,
+                args: null);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     private void TrySetLoggedLateBound(object serviceObject, string propertyName, object value)
