@@ -59,7 +59,7 @@ public class AutohubCountingPostingTests
         var sap = new Mock<IAutohubSapB1Service>();
         sap.Setup(s => s.CreateInventoryPostingAsync(
                 It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
-                It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
+                It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
            .ReturnsAsync(new InventoryDocResult { DocEntry = 500, DocNum = 500 });
         return sap;
     }
@@ -78,7 +78,7 @@ public class AutohubCountingPostingTests
         sap.Verify(s => s.CloseInventoryCountingAsync(Counting, It.IsAny<CancellationToken>()), Times.Once);
         sap.Verify(s => s.CreateInventoryPostingAsync(
             It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
-            It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -93,7 +93,7 @@ public class AutohubCountingPostingTests
         sap.Verify(s => s.CreateInventoryPostingAsync(
             Counting,
             It.Is<List<CountingPostLine>>(l => l.Count == 2 && l.All(p => p.LineNum != 0)),
-            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
+            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
         sap.Verify(s => s.CloseInventoryCountingAsync(Counting, It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -119,7 +119,7 @@ public class AutohubCountingPostingTests
 
         sap.Verify(s => s.CreateInventoryPostingAsync(
             Counting, It.Is<List<CountingPostLine>>(l => l.Count == 1 && l[0].Price == 25d),
-            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
+            It.IsAny<string>(), It.IsAny<int>(), 1, It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -137,7 +137,7 @@ public class AutohubCountingPostingTests
         Assert.Contains("ITEM1", string.Join(" ", body.Errors ?? new List<string>()));
         sap.Verify(s => s.CreateInventoryPostingAsync(
             It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
-            It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
         sap.Verify(s => s.CloseInventoryCountingAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -152,7 +152,7 @@ public class AutohubCountingPostingTests
         Assert.IsType<OkObjectResult>(result);
         sap.Verify(s => s.CreateInventoryPostingAsync(
             Counting, It.Is<List<CountingPostLine>>(l => l.Count == 1 && l[0].LineNum == 1),
-            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
+            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
         sap.Verify(s => s.CloseInventoryCountingAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 }

@@ -861,7 +861,7 @@ public class AutohubInventoryController : ControllerBase
 
             var result = await _sap.CreateInventoryPostingAsync(
                 request.CountingDocEntry, differenceLines, request.AppRef,
-                _settings.PostingSeries, bplId, ct);
+                _settings.PostingSeries, _settings.PostingPriceList, bplId, ct);
 
             // The posting closed the difference lines. When the request covered every
             // open line, only matching lines are left open: close the session so it
@@ -1002,7 +1002,7 @@ public class AutohubInventoryController : ControllerBase
                 return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
 
             var result = await _sap.CreateDirectInventoryPostingAsync(
-                request, _settings.PostingSeries, bplId, ct);
+                request, _settings.PostingSeries, _settings.PostingPriceList, bplId, ct);
 
             return Ok(ApiResponse<InventoryDocResult>.Ok(
                 result,

@@ -220,12 +220,12 @@ internal class SapB1DiApiServiceStub : ISapB1Service
 
     public Task<InventoryDocResult> CreateInventoryPostingAsync(
         int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
-        int? bplId, CancellationToken ct) =>
+        int priceList, int? bplId, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
     public Task<InventoryDocResult> CreateDirectInventoryPostingAsync(
-        DirectPostingCreate request, int series, int? bplId, CancellationToken ct) =>
+        DirectPostingCreate request, int series, int priceList, int? bplId, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
