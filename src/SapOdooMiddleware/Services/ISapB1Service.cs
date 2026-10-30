@@ -366,11 +366,12 @@ public interface ISapB1Service
     /// (BaseEntry = counting DocEntry, BaseLine = counting LineNum) so SAP posts the
     /// stock/GL adjustments and closes those counting lines.
     /// <paramref name="bplId"/> sets the header branch (OIQR.BPLId) — required when
-    /// SAP's multi-branch feature is enabled.
+    /// SAP's multi-branch feature is enabled. <paramref name="priceList"/> is the
+    /// header's price source (OIQR.PriceSrc 1 = by price list, OIQR.PriceList).
     /// </summary>
     Task<InventoryDocResult> CreateInventoryPostingAsync(
         int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
-        int? bplId, CancellationToken ct);
+        int priceList, int? bplId, CancellationToken ct);
 
     /// <summary>
     /// Creates a STANDALONE Inventory Posting (OIQR) with no base counting document —
@@ -379,7 +380,7 @@ public interface ISapB1Service
     /// current stock at post time and writes the stock/GL adjustment.
     /// </summary>
     Task<InventoryDocResult> CreateDirectInventoryPostingAsync(
-        DirectPostingCreate request, int series, int? bplId, CancellationToken ct);
+        DirectPostingCreate request, int series, int priceList, int? bplId, CancellationToken ct);
 
     /// <summary>
     /// Creates a Goods Receipt (OIGN, object 59, <c>oInventoryGenEntry</c>) — standalone

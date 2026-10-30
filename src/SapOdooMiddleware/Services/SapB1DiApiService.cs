@@ -6199,7 +6199,7 @@ ORDER BY PostingDate, DocumentNumber";
     /// <inheritdoc/>
     public async Task<InventoryDocResult> CreateInventoryPostingAsync(
         int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
-        int? bplId, CancellationToken ct)
+        int priceList, int? bplId, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
@@ -6220,6 +6220,12 @@ ORDER BY PostingDate, DocumentNumber";
                 if (bplId is > 0)
                     SetBranchLateBound(posting, bplId.Value);    // OIQR.BPLId — mandatory in multi-branch companies
                 posting.UserFields.Item("U_AppRef").Value = appRef;
+                // Price source "by price list" on the header, as SAP's own screen uses
+                // (OIQR.PriceSrc 1, PriceList 1 on the posting that SAP accepted). Left
+                // unset, SAP falls back to PriceSrc 3 and looks up each item's last
+                // evaluated price, which refused these postings with 10001484
+                // [OMRV.DocDate][line: n].
+                SetPriceListSource(posting, priceList);
 
                 var postingLines = new List<object>(lines.Count);
                 foreach (var l in lines)
@@ -6263,9 +6269,10 @@ ORDER BY PostingDate, DocumentNumber";
                 foreach (var pl in postingLines)
                     ApplyCountDate(pl, countDate, countTime, "line");
                 _logger.LogInformation(
-                    "Inventory posting for counting {Counting}: Series={Series}, PostingDate={PostingDate}, " +
+                    "Inventory posting for counting {Counting}: Series={Series}, PriceSource={PriceSource}, PriceList={PriceList}, PostingDate={PostingDate}, " +
                     "CountDate={CountDate}, CountTime={CountTime}, Line0CountDate={LineCountDate}, Line0CountTime={LineCountTime}, Lines={Lines}",
-                    countingDocEntry, ReadLateBound(posting, "Series"), ReadLateBound(posting, "PostingDate"),
+                    countingDocEntry, ReadLateBound(posting, "Series"), ReadLateBound(posting, "PriceSource"),
+                    ReadLateBound(posting, "PriceList"), ReadLateBound(posting, "PostingDate"),
                     ReadLateBound(posting, "CountDate"), ReadLateBound(posting, "CountTime"),
                     postingLines.Count > 0 ? ReadLateBound(postingLines[0], "CountDate") : "n/a",
                     postingLines.Count > 0 ? ReadLateBound(postingLines[0], "CountTime") : "n/a",
@@ -6344,6 +6351,18 @@ ORDER BY PostingDate, DocumentNumber";
         return (date, countTime);
     }
 
+    /// <summary>
+    /// Header price source "by price list" (raw 1, the OIQR.PriceSrc value SAP's screen
+    /// writes) and the list itself. Set late-bound so COM coerces the raw value into the
+    /// typelib's enum, as BaseType is. A refused member is a logged warning.
+    /// </summary>
+    private void SetPriceListSource(object posting, int priceList)
+    {
+        if (priceList <= 0) return;
+        TrySetLoggedLateBound(posting, "PriceSource", 1);
+        TrySetLoggedLateBound(posting, "PriceList", priceList);
+    }
+
     /// <summary>Sets CountDate / CountTime on the posting header or one of its lines.</summary>
     private void ApplyCountDate(object target, DateTime? countDate, object? countTime, string where)
     {
@@ -6409,7 +6428,7 @@ ORDER BY PostingDate, DocumentNumber";
 
     /// <inheritdoc/>
     public async Task<InventoryDocResult> CreateDirectInventoryPostingAsync(
-        DirectPostingCreate request, int series, int? bplId, CancellationToken ct)
+        DirectPostingCreate request, int series, int priceList, int? bplId, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
@@ -6430,6 +6449,7 @@ ORDER BY PostingDate, DocumentNumber";
                 if (bplId is > 0)
                     SetBranchLateBound(posting, bplId.Value);
                 SetPostingDatesToday(posting);                 // same date rule as the counting posting above
+                SetPriceListSource(posting, priceList);        // same price source as the counting posting
                 if (!string.IsNullOrWhiteSpace(request.Remarks))
                     TrySetLateBound(posting, "Remarks", request.Remarks);
                 posting.UserFields.Item("U_AppRef").Value = request.AppRef;
