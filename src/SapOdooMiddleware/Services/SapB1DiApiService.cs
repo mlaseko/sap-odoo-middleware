@@ -6219,12 +6219,6 @@ ORDER BY PostingDate, DocumentNumber";
                 if (series > 0) posting.Series = series;
                 if (bplId is > 0)
                     SetBranchLateBound(posting, bplId.Value);    // OIQR.BPLId — mandatory in multi-branch companies
-                // Post on the approval day, not the count day. Left unset, the posting
-                // inherits the counting document's date, and SAP refuses an Inventory
-                // Posting dated before an existing one (error 10001484, "There is a
-                // document of this type with a later posting date [OMRV.DocDate]"), so a
-                // session approved after a newer posting could never be posted.
-                SetPostingDatesToday(posting);
                 posting.UserFields.Item("U_AppRef").Value = appRef;
 
                 foreach (var l in lines)
@@ -6244,6 +6238,20 @@ ORDER BY PostingDate, DocumentNumber";
                     pl.BaseLine = l.LineNum;
                     pl.CountedQuantity = l.CountedQty;
                 }
+
+                // Post on the approval day, not the count day. Copying lines from a
+                // counting sets the posting date to the count date (as SAP's own
+                // Copy From does), so the date is set after the lines. With "Block
+                // documents with earlier posting date" on, a count-dated posting fails
+                // 10001484 ("There is a document of this type with a later posting
+                // date [OMRV.DocDate]") once any newer Inventory Posting exists. The
+                // count date itself stays on the lines, so SAP still values the
+                // variance against stock on the day it was counted.
+                SetPostingDatesToday(posting);
+                _logger.LogInformation(
+                    "Inventory posting for counting {Counting}: PostingDate={PostingDate}, CountDate={CountDate}, Lines={Lines}",
+                    countingDocEntry, ReadLateBound(posting, "PostingDate"),
+                    ReadLateBound(posting, "CountDate"), lines.Count);
 
                 var result = svc.Add(posting);
                 int docEntry = result.DocumentEntry;
@@ -6387,6 +6395,25 @@ ORDER BY PostingDate, DocumentNumber";
             _logger.LogWarning(
                 "InventoryPosting.PostingDate is not declared on this DI API build; " +
                 "the posting keeps SAP's default date.");
+        }
+    }
+
+    /// <summary>Reads an optional COM property for logging; "n/a" when it cannot be read.</summary>
+    private static string ReadLateBound(object serviceObject, string propertyName)
+    {
+        try
+        {
+            var value = serviceObject.GetType().InvokeMember(
+                propertyName,
+                System.Reflection.BindingFlags.GetProperty,
+                binder: null,
+                target: serviceObject,
+                args: null);
+            return value is DateTime date ? date.ToString("yyyy-MM-dd") : value?.ToString() ?? "null";
+        }
+        catch (Exception)
+        {
+            return "n/a";   // logging only: never let a read block the posting
         }
     }
 
