@@ -20,6 +20,27 @@ public class PricingCalculationServiceTests
         }
         public Task<decimal?> GetCostToRetailRatioAsync(string brand, decimal costTzs, CancellationToken ct)
             => Task.FromResult(string.Equals(brand, "DEFAULT", StringComparison.OrdinalIgnoreCase) ? _defaultRatio : _brandRatio);
+
+        public async Task<RatioBand?> GetRatioBandAsync(string brand, decimal costTzs, CancellationToken ct)
+            => await GetCostToRetailRatioAsync(brand, costTzs, ct) is { } r ? new RatioBand(r, 0m, null) : null;
+
+        // The service matches bands in memory, so list one unbounded band per brand the tests use.
+        public Task<IReadOnlyList<BrandRatioRow>> GetAllActiveBandsAsync(CancellationToken ct)
+        {
+            var rows = new List<BrandRatioRow>();
+            if (_brandRatio is { } b)
+                foreach (var brand in new[] { "VIKA", "DPA", "OE" })
+                    rows.Add(new BrandRatioRow(brand, 0m, null, b));
+            if (_defaultRatio is { } d)
+                rows.Add(new BrandRatioRow("DEFAULT", 0m, null, d));
+            return Task.FromResult<IReadOnlyList<BrandRatioRow>>(rows);
+        }
+
+        public Task<IReadOnlyDictionary<string, decimal>> GetAllActiveFloorsAsync(CancellationToken ct)
+            => Task.FromResult<IReadOnlyDictionary<string, decimal>>(new Dictionary<string, decimal>());
+
+        public Task<decimal?> GetMinRetailFloorAsync(string brand, CancellationToken ct)
+            => Task.FromResult<decimal?>(null);
     }
 
     // The real 7 magnitude-based rounding rules.

@@ -1,3 +1,4 @@
+using Moq;
 using Microsoft.Extensions.Logging.Abstractions;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Services.Autohub;
@@ -35,7 +36,13 @@ public class AutoMatchServiceTests
         string? docSupplier = null)
         => new(Guid.NewGuid(), Guid.NewGuid(), (oems ?? Array.Empty<string>()).ToList(), article, promo, brand, docSupplier);
 
-    private static AutoMatchService Build(FakeOitm oitm) => new(oitm, new OemFilterService(), NullLogger<AutoMatchService>.Instance);
+    // Every candidate exists in SAP, so these tests exercise the matching rules, not the SAP check.
+    private static AutoMatchService Build(FakeOitm oitm)
+    {
+        var sap = new Mock<SapOdooMiddleware.Services.IAutohubSapB1Service>();
+        sap.Setup(s => s.ItemExistsAsync(It.IsAny<string>())).ReturnsAsync(true);
+        return new(oitm, new OemFilterService(), sap.Object, NullLogger<AutoMatchService>.Instance);
+    }
 
     [Fact]
     public async Task Promotional_IsSkipped()

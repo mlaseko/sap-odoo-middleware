@@ -18,6 +18,8 @@ public class ForexConversionServiceTests
             Calls++;
             return Task.FromResult(_rate);
         }
+        public Task<IReadOnlyList<ForexRateRow>> GetActiveRatesAsync(CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<ForexRateRow>>(Array.Empty<ForexRateRow>());
     }
 
     private static ForexConversionService Build(FakeForexRepo repo)
