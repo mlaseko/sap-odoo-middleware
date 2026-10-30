@@ -47,6 +47,10 @@ public class AutohubCountingPostingTests
            .ReturnsAsync(lines.ToList());
         sql.Setup(s => s.GetWarehouseBranchAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
            .ReturnsAsync(new WarehouseBranch { BplId = 1, BranchName = "Main", Active = true });
+        // Price list 01 (cost) holds 25 for every test item unless a test says otherwise.
+        sql.Setup(s => s.GetItemPricesAsync(It.IsAny<IReadOnlyCollection<string>>(), 1, It.IsAny<CancellationToken>()))
+           .ReturnsAsync((IReadOnlyCollection<string> codes, int priceList, CancellationToken token) =>
+               codes.ToDictionary(c => c, c => 25m, StringComparer.OrdinalIgnoreCase));
         return sql;
     }
 
@@ -102,6 +106,38 @@ public class AutohubCountingPostingTests
         var result = await Build(sql, sap).CreatePosting(Request(0), CancellationToken.None);
 
         Assert.IsType<UnprocessableEntityObjectResult>(result);
+        sap.Verify(s => s.CloseInventoryCountingAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task PostingLines_ArePricedFromPriceList01()
+    {
+        var sql = Sql(Line(0, 1, 1), Line(1, 3, 2));
+        var sap = Sap();
+
+        await Build(sql, sap).CreatePosting(Request(0, 1), CancellationToken.None);
+
+        sap.Verify(s => s.CreateInventoryPostingAsync(
+            Counting, It.Is<List<CountingPostLine>>(l => l.Count == 1 && l[0].Price == 25d),
+            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ItemWithoutPriceList01Price_IsRefused_AndNothingPosts()
+    {
+        var sql = Sql(Line(0, 1, 1), Line(1, 3, 2));
+        sql.Setup(s => s.GetItemPricesAsync(It.IsAny<IReadOnlyCollection<string>>(), 1, It.IsAny<CancellationToken>()))
+           .ReturnsAsync(new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase) { ["ITEM1"] = 0m });
+        var sap = Sap();
+
+        var result = await Build(sql, sap).CreatePosting(Request(0, 1), CancellationToken.None);
+
+        var refused = Assert.IsType<UnprocessableEntityObjectResult>(result);
+        var body = Assert.IsType<ApiResponse<InventoryDocResult>>(refused.Value);
+        Assert.Contains("ITEM1", string.Join(" ", body.Errors ?? new List<string>()));
+        sap.Verify(s => s.CreateInventoryPostingAsync(
+            It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
+            It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
         sap.Verify(s => s.CloseInventoryCountingAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 

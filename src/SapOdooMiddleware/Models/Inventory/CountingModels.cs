@@ -158,6 +158,8 @@ public class CountingPostLine
 {
     public int LineNum { get; set; }
     public double CountedQty { get; set; }
+    /// <summary>Unit price from the posting price list (server-filled).</summary>
+    public double? Price { get; set; }
 }
 
 // ── Direct Inventory Posting (no counting session) ──────────────────
@@ -187,4 +189,8 @@ public class DirectPostingLineCreate
     public int? BinAbs { get; set; }
     /// <summary>The absolute new quantity (0 zeroes the stock out).</summary>
     public double CountedQty { get; set; }
+    /// <summary>Unit price from the posting price list. Filled by the server, never read
+    /// from the request body.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public double? Price { get; set; }
 }
