@@ -6221,9 +6221,11 @@ ORDER BY PostingDate, DocumentNumber";
                     SetBranchLateBound(posting, bplId.Value);    // OIQR.BPLId — mandatory in multi-branch companies
                 posting.UserFields.Item("U_AppRef").Value = appRef;
 
+                var postingLines = new List<object>(lines.Count);
                 foreach (var l in lines)
                 {
                     var pl = posting.InventoryPostingLines.Add();
+                    postingLines.Add(pl);
                     // This DI API build does not expose the base-type enum
                     // (InventoryPostingLineBaseTypeEnum — the spec §9.5 version caveat), so
                     // set BaseType late-bound: COM coerces the raw object type
@@ -6253,11 +6255,21 @@ ORDER BY PostingDate, DocumentNumber";
                 // the posting header; the DI API leaves it empty (1899-12-30), and SAP then
                 // refuses the posting with the same 10001484. The count date is what SAP
                 // measures the variance against, so stock moved since the count is kept.
-                SetCountDateFromCounting(posting, countingDocEntry);
+                // Copy From puts the count date and time on every row as well; rows left
+                // empty (1899-12-30) are what SAP still refused with 10001484 [line: n]
+                // after the header carried the count date.
+                var (countDate, countTime) = ReadCountingCountDate(countingDocEntry);
+                ApplyCountDate(posting, countDate, countTime, "header");
+                foreach (var pl in postingLines)
+                    ApplyCountDate(pl, countDate, countTime, "line");
                 _logger.LogInformation(
-                    "Inventory posting for counting {Counting}: PostingDate={PostingDate}, CountDate={CountDate}, CountTime={CountTime}, Lines={Lines}",
-                    countingDocEntry, ReadLateBound(posting, "PostingDate"),
-                    ReadLateBound(posting, "CountDate"), ReadLateBound(posting, "CountTime"), lines.Count);
+                    "Inventory posting for counting {Counting}: Series={Series}, PostingDate={PostingDate}, " +
+                    "CountDate={CountDate}, CountTime={CountTime}, Line0CountDate={LineCountDate}, Line0CountTime={LineCountTime}, Lines={Lines}",
+                    countingDocEntry, ReadLateBound(posting, "Series"), ReadLateBound(posting, "PostingDate"),
+                    ReadLateBound(posting, "CountDate"), ReadLateBound(posting, "CountTime"),
+                    postingLines.Count > 0 ? ReadLateBound(postingLines[0], "CountDate") : "n/a",
+                    postingLines.Count > 0 ? ReadLateBound(postingLines[0], "CountTime") : "n/a",
+                    lines.Count);
 
                 var result = svc.Add(posting);
                 int docEntry = result.DocumentEntry;
@@ -6292,13 +6304,11 @@ ORDER BY PostingDate, DocumentNumber";
     /// service Add() only returns DocumentEntry. Caller already holds <see cref="_lock"/>.
     /// </summary>
     /// <summary>
-    /// Copies the counting's Count Date and Count Time onto the posting header, as
-    /// SAP's Copy From does. Read through InventoryCountingsService (the same data
-    /// interface that creates and closes countings), not SQL: OINC has no
-    /// "CountTime" column on this database, which made the earlier query fail.
-    /// Logged as a warning, never thrown, when a value cannot be read or set.
+    /// The counting's Count Date and Count Time, read through InventoryCountingsService
+    /// (the data interface that creates and closes countings), not SQL: OINC has no
+    /// "CountTime" column on this database. (null, null) when they cannot be read.
     /// </summary>
-    private void SetCountDateFromCounting(object posting, int countingDocEntry)
+    private (DateTime? Date, object? Time) ReadCountingCountDate(int countingDocEntry)
     {
         object? countDate = null;
         object? countTime = null;
@@ -6329,12 +6339,19 @@ ORDER BY PostingDate, DocumentNumber";
         if (countDate is not DateTime date || date.Year <= 1900)
         {
             _logger.LogWarning("Counting {Counting} has no count date; the posting keeps SAP's default.", countingDocEntry);
-            return;
+            return (null, null);
         }
-        TrySetLoggedLateBound(posting, "CountDate", date);
+        return (date, countTime);
+    }
+
+    /// <summary>Sets CountDate / CountTime on the posting header or one of its lines.</summary>
+    private void ApplyCountDate(object target, DateTime? countDate, object? countTime, string where)
+    {
+        if (countDate is null) return;
+        TrySetLoggedLateBound(target, "CountDate", countDate.Value, where);
         // Same type as the counting's own member, so it is copied as read.
         if (countTime is not null)
-            TrySetLoggedLateBound(posting, "CountTime", countTime);
+            TrySetLoggedLateBound(target, "CountTime", countTime, where);
     }
 
     /// <summary>Reads a COM property; null when it cannot be read.</summary>
@@ -6355,7 +6372,7 @@ ORDER BY PostingDate, DocumentNumber";
         }
     }
 
-    private void TrySetLoggedLateBound(object serviceObject, string propertyName, object value)
+    private void TrySetLoggedLateBound(object serviceObject, string propertyName, object value, string where = "header")
     {
         try
         {
@@ -6368,7 +6385,7 @@ ORDER BY PostingDate, DocumentNumber";
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "InventoryPosting.{Property} could not be set to {Value}", propertyName, value);
+            _logger.LogWarning(ex, "InventoryPosting {Where} {Property} could not be set to {Value}", where, propertyName, value);
         }
     }
 
@@ -6497,7 +6514,9 @@ ORDER BY PostingDate, DocumentNumber";
                 binder: null,
                 target: serviceObject,
                 args: null);
-            return value is DateTime date ? date.ToString("yyyy-MM-dd") : value?.ToString() ?? "null";
+            return value is DateTime date
+                ? date.ToString(date.TimeOfDay == TimeSpan.Zero ? "yyyy-MM-dd" : "yyyy-MM-dd HH:mm")
+                : value?.ToString() ?? "null";
         }
         catch (Exception)
         {
