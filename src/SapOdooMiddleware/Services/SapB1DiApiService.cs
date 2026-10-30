@@ -6363,21 +6363,16 @@ ORDER BY PostingDate, DocumentNumber";
     }
 
     /// <summary>
-    /// Best-effort late-bound property set: silently skipped when this DI API build
-    /// does not declare the property (for optional fields like Remarks).
-    /// </summary>
-    /// <summary>
-    /// Dates an Inventory Posting on the day it is created. The DI API object names
-    /// the field DocumentDate (OIQR.DocDate); it is set late-bound like the other
-    /// posting fields so a typelib without the member degrades to a warning instead
-    /// of failing the post.
+    /// Dates an Inventory Posting on the day it is created. The InventoryPosting data
+    /// interface names the field PostingDate (OIQR.DocDate); it is set late-bound like
+    /// the other posting fields so a typelib without the member degrades to a warning
+    /// instead of failing the post.
     /// </summary>
     private void SetPostingDatesToday(object posting)
     {
-        // The InventoryPosting data interface names its posting date PostingDate
-        // (OIQR.DocDate); it has no DocumentDate or TaxDate, so those names were
-        // skipped without effect. A missing member is logged as a warning, not at
-        // debug level, so a silent skip shows in the service log.
+        // The interface has no DocumentDate or TaxDate, so those names were skipped
+        // without effect. A missing member is logged as a warning, not at debug
+        // level, so a silent skip shows in the service log.
         try
         {
             posting.GetType().InvokeMember(
@@ -6395,6 +6390,10 @@ ORDER BY PostingDate, DocumentNumber";
         }
     }
 
+    /// <summary>
+    /// Best-effort late-bound property set: silently skipped when this DI API build
+    /// does not declare the property (for optional fields like Remarks).
+    /// </summary>
     private void TrySetLateBound(object serviceObject, string propertyName, object value)
     {
         try

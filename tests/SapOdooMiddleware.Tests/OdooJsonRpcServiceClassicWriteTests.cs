@@ -55,7 +55,7 @@ public class OdooJsonRpcServiceClassicWriteTests
         });
 
         var httpClient = new HttpClient(handler);
-        return new OdooJsonRpcService(settings, httpClient, NullLogger<OdooJsonRpcService>.Instance);
+        return new OdooJsonRpcService(settings, Options.Create(new PricingSettings()), httpClient, NullLogger<OdooJsonRpcService>.Instance);
     }
 
     [Fact]

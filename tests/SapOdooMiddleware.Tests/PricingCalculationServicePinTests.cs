@@ -51,6 +51,26 @@ public class PricingCalculationServicePinTests
                     return Task.FromResult<decimal?>(ratio);
             return Task.FromResult<decimal?>(null);
         }
+
+        public Task<RatioBand?> GetRatioBandAsync(string brand, decimal costTzs, CancellationToken ct)
+        {
+            if (Table.TryGetValue(brand, out var bands))
+                foreach (var (min, max, ratio) in bands)
+                    if (costTzs >= min && (max is null || costTzs < max))
+                        return Task.FromResult<RatioBand?>(new RatioBand(ratio, min, max));
+            return Task.FromResult<RatioBand?>(null);
+        }
+
+        public Task<IReadOnlyList<BrandRatioRow>> GetAllActiveBandsAsync(CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<BrandRatioRow>>(Table
+                .SelectMany(kv => kv.Value.Select(b => new BrandRatioRow(kv.Key, b.Min, b.Max, b.Ratio)))
+                .ToList());
+
+        public Task<IReadOnlyDictionary<string, decimal>> GetAllActiveFloorsAsync(CancellationToken ct)
+            => Task.FromResult<IReadOnlyDictionary<string, decimal>>(new Dictionary<string, decimal>());
+
+        public Task<decimal?> GetMinRetailFloorAsync(string brand, CancellationToken ct)
+            => Task.FromResult<decimal?>(null);
     }
 
     // The 7 seeded magnitude-based rounding rules.
