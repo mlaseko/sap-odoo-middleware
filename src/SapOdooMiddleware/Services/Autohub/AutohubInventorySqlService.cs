@@ -166,7 +166,11 @@ public interface IAutohubInventorySqlService
     Task<List<CountingLineDetail>> GetCountingLinesAsync(int docEntry, CancellationToken ct);
 
     /// <summary>Variance review lines (spec §8.4), sorted by absolute variance value descending.</summary>
-    Task<List<CountingVarianceLine>> GetCountingVarianceAsync(int docEntry, CancellationToken ct);
+    Task<List<CountingVarianceLine>> GetCountingVarianceAsync(int docEntry, int priceList, CancellationToken ct);
+
+    /// <summary>ITM1 prices on one price list for the given items; items without a row are absent.</summary>
+    Task<Dictionary<string, decimal>> GetItemPricesAsync(
+        IReadOnlyCollection<string> itemCodes, int priceList, CancellationToken ct);
 
     /// <summary>
     /// Default-bin seed candidates (spec §10): the top stocked non-system bin per
@@ -1346,28 +1350,31 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     }
 
     public async Task<List<CountingVarianceLine>> GetCountingVarianceAsync(
-        int docEntry, CancellationToken ct)
+        int docEntry, int priceList, CancellationToken ct)
     {
-        // Spec §8.4 — most expensive discrepancies first.
+        // Spec §8.4 — most expensive discrepancies first. Valued at the posting price
+        // list (the same price the Inventory Posting uses), not OITW.AvgPrice.
         const string sql = """
             SELECT L.LineNum, L.ItemCode, I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
                    L.WhsCode, B.BinCode,
                    L.InWhsQty, L.CountQty,
                    ISNULL(L.CountQty, 0) - L.InWhsQty AS VarianceQty,
-                   (ISNULL(L.CountQty, 0) - L.InWhsQty) * ISNULL(W.AvgPrice, 0) AS VarianceValue,
+                   (ISNULL(L.CountQty, 0) - L.InWhsQty) * ISNULL(P.Price, 0) AS VarianceValue,
                    L.Counted, L.LineStatus
             FROM INC1 L
             JOIN OITM I ON I.ItemCode = L.ItemCode
             JOIN OITW W ON W.ItemCode = L.ItemCode AND W.WhsCode = L.WhsCode
+            LEFT JOIN ITM1 P ON P.ItemCode = L.ItemCode AND P.PriceList = @priceList
             LEFT JOIN OBIN B ON B.AbsEntry = L.BinEntry
             WHERE L.DocEntry = @doc
-            ORDER BY ABS((ISNULL(L.CountQty, 0) - L.InWhsQty) * ISNULL(W.AvgPrice, 0)) DESC;
+            ORDER BY ABS((ISNULL(L.CountQty, 0) - L.InWhsQty) * ISNULL(P.Price, 0)) DESC;
             """;
 
         var list = new List<CountingVarianceLine>();
         await using var conn = await OpenAsync(ct);
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@doc", docEntry);
+        cmd.Parameters.AddWithValue("@priceList", priceList);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -1389,6 +1396,29 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             });
         }
         return list;
+    }
+
+    public async Task<Dictionary<string, decimal>> GetItemPricesAsync(
+        IReadOnlyCollection<string> itemCodes, int priceList, CancellationToken ct)
+    {
+        var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        var codes = itemCodes.Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => c.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (codes.Count == 0) return prices;
+
+        var names = codes.Select((_, i) => $"@c{i}").ToList();
+        var sql = $"SELECT ItemCode, Price FROM ITM1 WHERE PriceList = @priceList AND ItemCode IN ({string.Join(", ", names)});";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@priceList", priceList);
+        for (int i = 0; i < codes.Count; i++) cmd.Parameters.AddWithValue(names[i], codes[i]);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (!reader.IsDBNull(1))
+                prices[reader.GetString(0)] = reader.GetDecimal(1);
+        }
+        return prices;
     }
 
     // ── Default-bin seeding (spec §10) ───────────────────────────────

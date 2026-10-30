@@ -6237,6 +6237,7 @@ ORDER BY PostingDate, DocumentNumber";
                     pl.BaseEntry = countingDocEntry;
                     pl.BaseLine = l.LineNum;
                     pl.CountedQuantity = l.CountedQty;
+                    if (l.Price.HasValue) pl.Price = l.Price.Value;   // posting price list (PL01 = cost)
                 }
 
                 // Post on the approval day, not the count day. Copying lines from a
@@ -6406,6 +6407,7 @@ ORDER BY PostingDate, DocumentNumber";
                     if (l.BinAbs.HasValue)
                         pl.BinEntry = l.BinAbs.Value;
                     pl.CountedQuantity = l.CountedQty;
+                    if (l.Price.HasValue) pl.Price = l.Price.Value;   // posting price list (PL01 = cost)
                 }
 
                 var result = svc.Add(posting);

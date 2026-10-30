@@ -669,7 +669,7 @@ public class AutohubInventoryController : ControllerBase
     [ProducesResponseType(typeof(ApiResponse<List<CountingVarianceLine>>), StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetCountingVariance(int docEntry, CancellationToken ct)
     {
-        var lines = await _sql.GetCountingVarianceAsync(docEntry, ct);
+        var lines = await _sql.GetCountingVarianceAsync(docEntry, _settings.PostingPriceList, ct);
         if (lines.Count == 0)
             return NotFound(ApiResponse<List<CountingVarianceLine>>.Fail(
                 $"Counting document {docEntry} not found (or has no lines)."));
@@ -840,6 +840,19 @@ public class AutohubInventoryController : ControllerBase
                     }));
             }
 
+            // Every posting line is priced from the posting price list (PL01 = cost).
+            var priceError = await ApplyPostingPricesAsync(
+                differenceLines.Select(p => byLineNum[p.LineNum].ItemCode).ToList(),
+                (code, price) =>
+                {
+                    foreach (var p in differenceLines.Where(p =>
+                                 string.Equals(byLineNum[p.LineNum].ItemCode, code, StringComparison.OrdinalIgnoreCase)))
+                        p.Price = price;
+                },
+                ct);
+            if (priceError is not null)
+                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(priceError));
+
             // Same branch requirement as counting creation (OIQR.BPLId) — derive it
             // from the counting's warehouse.
             var (bplId, branchError) = await ResolveActiveBranchAsync(lines[0].WhsCode, ct);
@@ -969,6 +982,19 @@ public class AutohubInventoryController : ControllerBase
             }
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
+            // Every posting line is priced from the posting price list (PL01 = cost).
+            var priceError = await ApplyPostingPricesAsync(
+                request.Lines.Select(l => l.ItemCode).ToList(),
+                (code, price) =>
+                {
+                    foreach (var l in request.Lines.Where(l =>
+                                 string.Equals(l.ItemCode, code, StringComparison.OrdinalIgnoreCase)))
+                        l.Price = price;
+                },
+                ct);
+            if (priceError is not null)
+                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(priceError));
 
             // Branch (OIQR.BPLId) — same requirement as all service-created documents.
             var (bplId, branchError) = await ResolveActiveBranchAsync(request.WhsCode, ct);
@@ -2032,6 +2058,30 @@ public class AutohubInventoryController : ControllerBase
     /// when the warehouse has no branch or the branch is inactive — callers return
     /// 422 with the message instead of letting SAP fail with -5002.
     /// </summary>
+    /// <summary>
+    /// Prices posting lines from the posting price list. An item with no price, or a
+    /// zero price, on that list stops the posting: posting it would value the stock
+    /// movement at whatever SAP falls back to, not at cost.
+    /// </summary>
+    private async Task<string?> ApplyPostingPricesAsync(
+        IReadOnlyCollection<string> itemCodes, Action<string, double> apply, CancellationToken ct)
+    {
+        var priceList = _settings.PostingPriceList;
+        var prices = await _sql.GetItemPricesAsync(itemCodes, priceList, ct);
+        var missing = new List<string>();
+        foreach (var code in itemCodes.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (prices.TryGetValue(code, out var price) && price > 0m)
+                apply(code, (double)price);
+            else
+                missing.Add(code);
+        }
+        return missing.Count == 0
+            ? null
+            : $"No price on price list {priceList} for {string.Join(", ", missing)}. " +
+              "Set it in SAP (Item Master Data, price list) before posting.";
+    }
+
     private async Task<(int? BplId, string? Error)> ResolveActiveBranchAsync(
         string whsCode, CancellationToken ct)
     {
