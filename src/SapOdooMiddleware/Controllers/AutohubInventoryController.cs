@@ -2211,7 +2211,9 @@ public class AutohubInventoryController : ControllerBase
             l => l.LineNum,
             l => CountingRecalculator.MeasurePoint(
                 l, byLine.GetValueOrDefault(l.LineNum), countDate ?? DateTime.Today, zone));
+        // From the count date too, so the review can show what moved before each count.
         var since = points.Values.Min(p => p.From).Date;
+        if (countDate is DateTime counted && counted.Date < since) since = counted.Date;
         var movements = await _sql.GetCountingMovementsAsync(docEntry, since, ct);
         var stockNow = await _sql.GetCountingStockNowAsync(docEntry, ct);
         foreach (var line in lines)
@@ -2219,7 +2221,7 @@ public class AutohubInventoryController : ControllerBase
             var point = points[line.LineNum];
             result[line.LineNum] = CountingRecalculator.Recalculate(
                 line, point.Counted, point.From, point.Known,
-                stockNow.GetValueOrDefault(line.LineNum), movements);
+                stockNow.GetValueOrDefault(line.LineNum), movements, countDate);
         }
         return (result, countDate);
     }

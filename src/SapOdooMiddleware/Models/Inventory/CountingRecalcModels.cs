@@ -70,7 +70,18 @@ public class CountingRecalcLine
     public string Status { get; set; } = "";
     /// <summary>Price on the posting price list (PL01, cost); null when the item has none. Preview only.</summary>
     public decimal? UnitPrice { get; set; }
+    /// <summary>Movements after the line was counted (carried into UpdatedQty).</summary>
     public List<CountingLineMovement> Movements { get; set; } = new();
+    /// <summary>Stock into the bin since the counting's count date (start of day), before or after the count.</summary>
+    public decimal MovedInSinceCountDate { get; set; }
+    /// <summary>Stock out of the bin since the counting's count date (start of day), before or after the count.</summary>
+    public decimal MovedOutSinceCountDate { get; set; }
+    /// <summary>
+    /// Every movement since the count date, for the reviewer: the ones before
+    /// <see cref="MeasuredFrom"/> were already seen by the counter; the ones at or
+    /// after it are in <see cref="Movements"/> and carried forward.
+    /// </summary>
+    public List<CountingLineMovement> MovementsSinceCountDate { get; set; } = new();
 }
 
 /// <summary>POST /api/autohub/inv/countings/{docEntry}/recalc response.</summary>

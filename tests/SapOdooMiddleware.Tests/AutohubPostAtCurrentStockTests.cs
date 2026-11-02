@@ -130,6 +130,26 @@ public class AutohubPostAtCurrentStockTests
     }
 
     [Fact]
+    public void MovementsSinceTheCountDate_IncludeThoseBeforeTheCount()
+    {
+        // BM10528: count date 18 Oct, delivered 28 Oct 14:29, counted empty at 16:00.
+        // Nothing is carried forward, but the reviewer still sees the delivery.
+        var r = CountingRecalculator.Recalculate(Line(0, 1, 0), 0, new DateTime(2026, 10, 28, 16, 0, 0), true, 0,
+            new[]
+            {
+                Move(0, new DateTime(2026, 10, 17, 9, 0, 0), 5, 0),        // before the count date: ignored
+                Move(0, new DateTime(2026, 10, 28, 14, 29, 0), 0, 1),
+                Move(1, new DateTime(2026, 10, 28, 14, 29, 0), 0, 3),      // another line
+            },
+            CountDate);
+        Assert.Empty(r.Movements);
+        Assert.Equal(CountingRecalculator.StatusZero, r.Status);
+        Assert.Equal(1, r.MovedOutSinceCountDate);
+        Assert.Equal(0, r.MovedInSinceCountDate);
+        Assert.Single(r.MovementsSinceCountDate);
+    }
+
+    [Fact]
     public void MoreOutThanCounted_IsAConflict()
     {
         // Counted empty, then one delivered from that bin: the count is doubtful.
@@ -301,6 +321,11 @@ public class AutohubPostAtCurrentStockTests
         Assert.Equal(2, second.UpdatedQty);         // +1 transferred in
         Assert.Equal(0, second.Adjustment);
         Assert.Equal(25m, second.UnitPrice);
+        // Since the count date: the first line's delivery (after its count) and the
+        // second line's transfer (no capture time, so measured from the count date).
+        Assert.Equal(1, first.MovedOutSinceCountDate);
+        Assert.Equal(1, second.MovedInSinceCountDate);
+        sql.Verify(s => s.GetCountingMovementsAsync(Counting, CountDate, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
