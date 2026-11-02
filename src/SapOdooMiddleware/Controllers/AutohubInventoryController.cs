@@ -2063,6 +2063,15 @@ public class AutohubInventoryController : ControllerBase
         var differenceLines = postLines
             .Where(p => recalc[p.LineNum].Status == CountingRecalculator.StatusPost)
             .ToList();
+
+        // SAP values stock going out at the item's cost; with none it refuses the whole
+        // posting (10001287). Name the lines before anything is changed in SAP.
+        var noCost = differenceLines.Select(p => recalc[p.LineNum]).Where(r => r.NoWarehouseCost).ToList();
+        if (noCost.Count > 0)
+            return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(
+                "SAP has no cost for these items, so it cannot value the stock going out: " +
+                string.Join("; ", noCost.Select(r => $"{r.ItemCode}{BinSuffix(r.BinCode)} in warehouse {r.WhsCode} (adjustment {Qty(r.Adjustment ?? 0m)})")) +
+                ". Revalue them in SAP (Inventory Revaluation, price change) or untick them, then post again."));
         foreach (var p in differenceLines)
             p.CountedQty = (double)recalc[p.LineNum].UpdatedQty;
         int zeroDifferenceLines = postLines.Count - differenceLines.Count;
@@ -2216,12 +2225,15 @@ public class AutohubInventoryController : ControllerBase
         if (countDate is DateTime counted && counted.Date < since) since = counted.Date;
         var movements = await _sql.GetCountingMovementsAsync(docEntry, since, ct);
         var stockNow = await _sql.GetCountingStockNowAsync(docEntry, ct);
+        var costs = await _sql.GetCountingCostsAsync(docEntry, ct);
         foreach (var line in lines)
         {
             var point = points[line.LineNum];
-            result[line.LineNum] = CountingRecalculator.Recalculate(
+            var r = CountingRecalculator.Recalculate(
                 line, point.Counted, point.From, point.Known,
                 stockNow.GetValueOrDefault(line.LineNum), movements, countDate);
+            CountingRecalculator.ApplyCost(r, costs?.GetValueOrDefault(line.LineNum));
+            result[line.LineNum] = r;
         }
         return (result, countDate);
     }

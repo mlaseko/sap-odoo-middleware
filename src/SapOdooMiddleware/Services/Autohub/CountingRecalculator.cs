@@ -91,6 +91,24 @@ public static class CountingRecalculator
     }
 
     /// <summary>
+    /// Marks a line SAP would refuse with 10001287 "Item cost not found": it takes stock
+    /// out (adjustment &lt; 0) of a moving-average item whose warehouse and item cost are
+    /// both 0 (VAG14320 on counting 27). Stock going out is valued at that cost, not the
+    /// posting price list. Other valuation methods are left to SAP.
+    /// </summary>
+    public static void ApplyCost(CountingRecalcLine line, CountingLineCost? cost)
+    {
+        if (cost is null) return;
+        line.WarehouseCost = cost.WarehouseAvgPrice > 0 ? cost.WarehouseAvgPrice : cost.ItemAvgPrice;
+        line.NoWarehouseCost =
+            line.Status == StatusPost &&
+            line.Adjustment is < 0 &&
+            string.Equals(cost.EvalSystem, "A", StringComparison.OrdinalIgnoreCase) &&
+            cost.WarehouseAvgPrice <= 0 &&
+            cost.ItemAvgPrice <= 0;
+    }
+
+    /// <summary>
     /// Which count and which moment a line is measured from. The app's capture time is
     /// used only when the app's count equals the counting's own count, so a count changed
     /// in SAP after capture never borrows the app's older time. Otherwise the counting's

@@ -181,6 +181,9 @@ public interface IAutohubInventorySqlService
     /// </summary>
     Task<Dictionary<int, decimal>> GetCountingStockNowAsync(int docEntry, CancellationToken ct);
 
+    /// <summary>Every counting line's valuation method and cost (OITM.EvalSystem, OITW.AvgPrice, OITM.AvgPrice), by LineNum.</summary>
+    Task<Dictionary<int, CountingLineCost>> GetCountingCostsAsync(int docEntry, CancellationToken ct);
+
     /// <summary>
     /// Stock movements into and out of each counted line's bin (OILM joined to OBTL on
     /// MessageID; OILM alone for a line without a bin), entered on or after
@@ -1469,6 +1472,34 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         while (await reader.ReadAsync(ct))
             stock[reader.GetInt32(0)] = reader.IsDBNull(1) ? 0m : reader.GetDecimal(1);
         return stock;
+    }
+
+    public async Task<Dictionary<int, CountingLineCost>> GetCountingCostsAsync(int docEntry, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT L.LineNum, I.EvalSystem, ISNULL(W.AvgPrice, 0), ISNULL(I.AvgPrice, 0)
+            FROM INC1 L
+            JOIN OITM I ON I.ItemCode = L.ItemCode
+            LEFT JOIN OITW W ON W.ItemCode = L.ItemCode AND W.WhsCode = L.WhsCode
+            WHERE L.DocEntry = @doc;
+            """;
+        var costs = new Dictionary<int, CountingLineCost>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@doc", docEntry);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            int lineNum = reader.GetInt32(0);
+            costs[lineNum] = new CountingLineCost
+            {
+                LineNum = lineNum,
+                EvalSystem = reader.IsDBNull(1) ? "" : Convert.ToString(reader.GetValue(1)) ?? "",
+                WarehouseAvgPrice = reader.IsDBNull(2) ? 0m : reader.GetDecimal(2),
+                ItemAvgPrice = reader.IsDBNull(3) ? 0m : reader.GetDecimal(3),
+            };
+        }
+        return costs;
     }
 
     public async Task<List<CountingLineMovement>> GetCountingMovementsAsync(
