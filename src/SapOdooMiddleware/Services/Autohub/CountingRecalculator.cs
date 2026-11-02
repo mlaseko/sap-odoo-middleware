@@ -34,13 +34,20 @@ public static class CountingRecalculator
         DateTime measuredFrom,
         bool countTimeKnown,
         decimal stockNow,
-        IEnumerable<CountingLineMovement> movements)
+        IEnumerable<CountingLineMovement> movements,
+        DateTime? countDate = null)
     {
         var from = ToMinute(measuredFrom);
-        var after = movements
-            .Where(m => m.LineNum == line.LineNum && m.CreatedAt >= from)
+        var mine = movements
+            .Where(m => m.LineNum == line.LineNum)
             .OrderBy(m => m.CreatedAt)
             .ToList();
+        var after = mine.Where(m => m.CreatedAt >= from).ToList();
+        // For the reviewer: everything since the count date (start of day), whether the
+        // counter saw it (before the count) or it was carried forward (after).
+        var sinceCountDate = countDate is DateTime date
+            ? mine.Where(m => m.CreatedAt >= date.Date).ToList()
+            : after;
         decimal movedIn = after.Sum(m => m.QtyIn);
         decimal movedOut = after.Sum(m => m.QtyOut);
         decimal net = movedIn - movedOut;
@@ -77,6 +84,9 @@ public static class CountingRecalculator
             Adjustment = adjustment,
             Status = status,
             Movements = after,
+            MovedInSinceCountDate = sinceCountDate.Sum(m => m.QtyIn),
+            MovedOutSinceCountDate = sinceCountDate.Sum(m => m.QtyOut),
+            MovementsSinceCountDate = sinceCountDate,
         };
     }
 
