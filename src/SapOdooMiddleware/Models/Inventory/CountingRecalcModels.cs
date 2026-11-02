@@ -82,6 +82,24 @@ public class CountingRecalcLine
     /// after it are in <see cref="Movements"/> and carried forward.
     /// </summary>
     public List<CountingLineMovement> MovementsSinceCountDate { get; set; } = new();
+    /// <summary>The item's cost SAP values stock going out at: OITW.AvgPrice, else OITM.AvgPrice.</summary>
+    public decimal? WarehouseCost { get; set; }
+    /// <summary>
+    /// The line takes stock out (adjustment &lt; 0) of a moving-average item that has no
+    /// cost in SAP (warehouse and item cost 0): SAP refuses it with 10001287 "Item cost
+    /// not found". Fixed in SAP with an Inventory Revaluation (price change).
+    /// </summary>
+    public bool NoWarehouseCost { get; set; }
+}
+
+/// <summary>What SAP values a counting line's stock at (OITM.EvalSystem, OITW / OITM AvgPrice).</summary>
+public class CountingLineCost
+{
+    public int LineNum { get; set; }
+    /// <summary>A moving average, S standard, F FIFO, B serial/batch.</summary>
+    public string EvalSystem { get; set; } = "";
+    public decimal WarehouseAvgPrice { get; set; }
+    public decimal ItemAvgPrice { get; set; }
 }
 
 /// <summary>POST /api/autohub/inv/countings/{docEntry}/recalc response.</summary>

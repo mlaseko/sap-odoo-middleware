@@ -300,6 +300,54 @@ public class AutohubPostAtCurrentStockTests
     }
 
     [Fact]
+    public void ApplyCost_FlagsStockGoingOutOfAZeroCostMovingAverageItem()
+    {
+        var shortage = CountingRecalculator.Recalculate(Line(0, 2, 0), 0, new DateTime(2026, 10, 18, 15, 26, 0), true, 2,
+            Array.Empty<CountingLineMovement>());
+        CountingRecalculator.ApplyCost(shortage, new CountingLineCost { EvalSystem = "A", WarehouseAvgPrice = 0, ItemAvgPrice = 0 });
+        Assert.True(shortage.NoWarehouseCost);
+
+        // Costed in the warehouse or on the item: fine.
+        var costed = CountingRecalculator.Recalculate(Line(0, 2, 0), 0, new DateTime(2026, 10, 18, 15, 26, 0), true, 2,
+            Array.Empty<CountingLineMovement>());
+        CountingRecalculator.ApplyCost(costed, new CountingLineCost { EvalSystem = "A", WarehouseAvgPrice = 0, ItemAvgPrice = 31260 });
+        Assert.False(costed.NoWarehouseCost);
+        Assert.Equal(31260m, costed.WarehouseCost);
+
+        // Stock coming in is valued at the posting price list, so no cost is needed.
+        var over = CountingRecalculator.Recalculate(Line(0, 1, 2), 2, new DateTime(2026, 10, 18, 15, 26, 0), true, 1,
+            Array.Empty<CountingLineMovement>());
+        CountingRecalculator.ApplyCost(over, new CountingLineCost { EvalSystem = "A" });
+        Assert.False(over.NoWarehouseCost);
+    }
+
+    [Fact]
+    public async Task ZeroCostShortage_IsRefusedBeforeAnythingChangesInSap()
+    {
+        // VAG14320: 2 in the bin at cost 0, counted 0 → −2 cannot be valued (10001287).
+        var sql = Sql(new[] { Line(0, 2, 0, "VAG14320", "003-GF-BSKT02"), Line(1, 4, 3, "BM11922") }, new() { [0] = 2, [1] = 4 });
+        sql.Setup(s => s.GetCountingCostsAsync(Counting, It.IsAny<CancellationToken>()))
+           .ReturnsAsync(new Dictionary<int, CountingLineCost>
+           {
+               [0] = new() { LineNum = 0, EvalSystem = "A" },
+               [1] = new() { LineNum = 1, EvalSystem = "A", WarehouseAvgPrice = 25 },
+           });
+        var sap = Sap();
+
+        var result = await Build(sql, sap).CreatePosting(Request(new[] { 0, 1 }), CancellationToken.None);
+
+        Assert.IsType<UnprocessableEntityObjectResult>(result);
+        Assert.Contains("VAG14320 in 003-GF-BSKT02 in warehouse 003 (adjustment -2)", Errors(result));
+        Assert.DoesNotContain("BM11922", Errors(result));
+        sap.Verify(s => s.UpdateInventoryCountingLinesAsync(
+            It.IsAny<int>(), It.IsAny<List<CountingLineUpdate>>(), It.IsAny<List<CountingLineAddition>>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        sap.Verify(s => s.CreateInventoryPostingAtCurrentStockAsync(
+            It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
     public async Task Recalc_ListsEveryCountedOpenLine()
     {
         var sql = Sql(new[] { Line(0, 9, 8), Line(1, 1, 1) }, new() { [0] = 8, [1] = 2 },
