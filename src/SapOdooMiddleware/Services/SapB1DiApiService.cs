@@ -6197,12 +6197,6 @@ ORDER BY PostingDate, DocumentNumber";
     }
 
     /// <inheritdoc/>
-    public Task<InventoryDocResult> CreateInventoryPostingAsync(
-        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
-        int priceList, int? bplId, CancellationToken ct) =>
-        CreateCountingPostingAsync(countingDocEntry, lines, appRef, series, priceList, bplId, null, ct);
-
-    /// <inheritdoc/>
     public Task<InventoryDocResult> CreateInventoryPostingAtCurrentStockAsync(
         int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
         int priceList, int? bplId, DateTime countMoment, CancellationToken ct) =>

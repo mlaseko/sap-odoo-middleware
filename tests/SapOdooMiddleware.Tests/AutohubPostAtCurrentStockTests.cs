@@ -12,11 +12,10 @@ using SapOdooMiddleware.Services.Autohub;
 namespace SapOdooMiddleware.Tests;
 
 /// <summary>
-/// AutohubInventory:PostAtCurrentStock. Counting 27 (count date 18 Oct) failed
-/// 1470000505: bins counted empty had been sold from after the count date, and SAP
-/// deducted the sale a second time. With the switch on, each count is carried forward
-/// by the stock that moved in and out of its bin since it was counted, and the
-/// posting measures against stock now. With it off, nothing changes.
+/// Posting at current stock. Counting 27 (count date 18 Oct) failed 1470000505:
+/// bins counted empty had been sold from after the count date, and SAP deducted the
+/// sale a second time. Each count is now carried forward by the stock that moved in
+/// and out of its bin since it was counted, and the posting measures against stock now.
 /// </summary>
 public class AutohubPostAtCurrentStockTests
 {
@@ -42,9 +41,9 @@ public class AutohubPostAtCurrentStockTests
     };
 
     private static AutohubInventoryController Build(
-        Mock<IAutohubInventorySqlService> sql, Mock<IAutohubSapB1Service> sap, bool on = true) =>
+        Mock<IAutohubInventorySqlService> sql, Mock<IAutohubSapB1Service> sap) =>
         new(sql.Object, new Mock<IBinResolver>().Object, sap.Object,
-            Options.Create(new AutohubInventorySettings { PostAtCurrentStock = on, CountTimeZone = "UTC" }), null!,
+            Options.Create(new AutohubInventorySettings { CountTimeZone = "UTC" }), null!,
             new Mock<IPickMirrorRefreshNotifier>().Object,
             NullLogger<AutohubInventoryController>.Instance);
 
@@ -74,10 +73,6 @@ public class AutohubPostAtCurrentStockTests
                 It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
                 It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
            .ReturnsAsync(new InventoryDocResult { DocEntry = 600, DocNum = 600 });
-        sap.Setup(s => s.CreateInventoryPostingAsync(
-                It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
-                It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
-           .ReturnsAsync(new InventoryDocResult { DocEntry = 500, DocNum = 500 });
         return sap;
     }
 
@@ -180,10 +175,10 @@ public class AutohubPostAtCurrentStockTests
         Assert.Equal(new DateTime(2026, 10, 19, 11, 30, 0), point.From);
     }
 
-    // ── The posting with the switch on ───────────────────────────────
+    // ── The posting ──────────────────────────────────────────────────
 
     [Fact]
-    public async Task SwitchOn_PostsUpdatedCounts_AtCurrentStock_AndClosesMatchingLines()
+    public async Task PostsUpdatedCounts_AtCurrentStock_AndClosesMatchingLines()
     {
         var lines = new[]
         {
@@ -215,14 +210,11 @@ public class AutohubPostAtCurrentStockTests
                 && l.Single(p => p.LineNum == 1).CountedQty == 7d
                 && l.Single(p => p.LineNum == 2).CountedQty == 3d),
             "count-27", It.IsAny<int>(), 1, It.IsAny<int?>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()), Times.Once);
-        sap.Verify(s => s.CreateInventoryPostingAsync(
-            It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
-            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
         sap.Verify(s => s.CloseInventoryCountingAsync(Counting, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task SwitchOn_LineWithoutCaptureTime_MeasuresFromTheCountDate()
+    public async Task LineWithoutCaptureTime_MeasuresFromTheCountDate()
     {
         // No app capture: the count date (start of day) is the measuring point, so a
         // later sale of a bin counted empty is a conflict, never a negative bin.
@@ -243,7 +235,7 @@ public class AutohubPostAtCurrentStockTests
     }
 
     [Fact]
-    public async Task SwitchOn_StockMovedSinceTheReview_IsRefusedWith409()
+    public async Task StockMovedSinceTheReview_IsRefusedWith409()
     {
         var sql = Sql(new[] { Line(0, 9, 8, "VAG10497") }, new() { [0] = 8 },
             Move(0, new DateTime(2026, 10, 27, 9, 0, 0), 0, 1));
@@ -261,7 +253,7 @@ public class AutohubPostAtCurrentStockTests
     }
 
     [Fact]
-    public async Task SwitchOn_RefusedPosting_WritesTheOriginalCountsBack()
+    public async Task RefusedPosting_WritesTheOriginalCountsBack()
     {
         var sql = Sql(new[] { Line(0, 9, 8, "VAG10497") }, new() { [0] = 8 },
             Move(0, new DateTime(2026, 10, 27, 9, 0, 0), 0, 1));
@@ -283,27 +275,12 @@ public class AutohubPostAtCurrentStockTests
             Counting, It.Is<List<CountingLineUpdate>>(u => u.Count == 1 && u[0].CountedQty == 8d),
             It.IsAny<List<CountingLineAddition>>(), "003", It.IsAny<CancellationToken>()), Times.Once);
         // No other route is tried.
-        sap.Verify(s => s.CreateInventoryPostingAsync(
-            It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
-            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
         sap.Verify(s => s.CreateDirectInventoryPostingAsync(
             It.IsAny<DirectPostingCreate>(), It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
-    public async Task Recalc_ReportsDisabled_WhenTheSwitchIsOff()
-    {
-        var sql = Sql(new[] { Line(0, 1, 0) }, new() { [0] = 0 });
-        var result = await Build(sql, Sap(), on: false).RecalculateCounting(Counting, new CountingRecalcRequest(), CancellationToken.None);
-
-        var body = Assert.IsType<ApiResponse<CountingRecalcResult>>(Assert.IsType<OkObjectResult>(result).Value);
-        Assert.False(body.Data!.Enabled);
-        Assert.Empty(body.Data.Lines);
-        sql.Verify(s => s.GetCountingMovementsAsync(It.IsAny<int>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()), Times.Never);
-    }
-
-    [Fact]
-    public async Task Recalc_ListsEveryCountedOpenLine_WhenTheSwitchIsOn()
+    public async Task Recalc_ListsEveryCountedOpenLine()
     {
         var sql = Sql(new[] { Line(0, 9, 8), Line(1, 1, 1) }, new() { [0] = 8, [1] = 2 },
             Move(0, new DateTime(2026, 10, 27, 9, 0, 0), 0, 1),
@@ -326,44 +303,27 @@ public class AutohubPostAtCurrentStockTests
         Assert.Equal(25m, second.UnitPrice);
     }
 
-    // ── The switch off: today's behaviour, with a clearer error ─────────
-
     [Fact]
-    public async Task SwitchOff_PostsAsBefore_IgnoringLineCounts()
+    public async Task NegativeStockRefusal_NamesTheItemAndBin()
     {
-        var sql = Sql(new[] { Line(0, 9, 8) }, new() { [0] = 8 }, Move(0, new DateTime(2026, 10, 27, 9, 0, 0), 0, 1));
+        // Stock moved between the calculation and SAP's Add: SAP refuses, and the
+        // error names the line that would go below zero instead of "line: n".
+        var sql = Sql(new[] { Line(0, 4, 3, "BM11922"), Line(1, 2, 1, "BM10528") }, new() { [0] = 4, [1] = 2 });
         var sap = Sap();
-
-        var result = await Build(sql, sap, on: false).CreatePosting(
-            Request(new[] { 0 }, Captured(0, 8, new DateTime(2026, 10, 20, 10, 0, 0))), CancellationToken.None);
-
-        Assert.IsType<OkObjectResult>(result);
-        sap.Verify(s => s.CreateInventoryPostingAsync(
-            Counting, It.Is<List<CountingPostLine>>(l => l.Count == 1 && l[0].CountedQty == 8d),
-            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
-        sap.Verify(s => s.UpdateInventoryCountingLinesAsync(
-            It.IsAny<int>(), It.IsAny<List<CountingLineUpdate>>(), It.IsAny<List<CountingLineAddition>>(),
-            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
-        sql.Verify(s => s.GetCountingMovementsAsync(It.IsAny<int>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()), Times.Never);
-    }
-
-    [Fact]
-    public async Task SwitchOff_NegativeStockRefusal_NamesTheItemAndBin()
-    {
-        var sql = Sql(new[] { Line(0, 4, 3, "BM11922"), Line(1, 1, 0, "BM10528") }, new() { [0] = 4, [1] = 0 });
-        var sap = Sap();
-        sap.Setup(s => s.CreateInventoryPostingAsync(
+        sap.Setup(s => s.CreateInventoryPostingAtCurrentStockAsync(
                 It.IsAny<int>(), It.IsAny<List<CountingPostLine>>(), It.IsAny<string>(),
-                It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
+                It.IsAny<int>(), It.IsAny<int>(), It.IsAny<int?>(), It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
+           .Callback(() => sql.Setup(s => s.GetCountingStockNowAsync(Counting, It.IsAny<CancellationToken>()))
+                              .ReturnsAsync(new Dictionary<int, decimal> { [0] = 4, [1] = 0 }))
            .ThrowsAsync(new InvalidOperationException(
                "SAP InventoryPostingsService.Add failed [-10]: 1470000505 - Quantity falls into negative inventory [IQR1.Quantity][line: 2]"));
 
-        var result = await Build(sql, sap, on: false).CreatePosting(Request(new[] { 0, 1 }), CancellationToken.None);
+        var result = await Build(sql, sap).CreatePosting(Request(new[] { 0, 1 }), CancellationToken.None);
 
         Assert.Equal(500, Assert.IsType<ObjectResult>(result).StatusCode);
         var errors = Errors(result);
         Assert.Contains("1470000505", errors);
         Assert.Contains("BM10528 in 003-GF-BSKT06 (stock now 0, change -1)", errors);
-        Assert.DoesNotContain("BM11922", errors);
+        Assert.DoesNotContain("BM11922 in", errors);
     }
 }
