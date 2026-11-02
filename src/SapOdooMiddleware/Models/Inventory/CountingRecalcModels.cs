@@ -1,10 +1,10 @@
 namespace SapOdooMiddleware.Models.Inventory;
 
-// ── Posting at current stock (AutohubInventory:PostAtCurrentStock) ──────────
+// ── Posting at current stock ─────────────────────────────────────────────────
 //
 // A counting line is a physical count at one moment. Stock keeps moving after it
 // (deliveries, returns, transfers), and a session can wait days for approval. With
-// the switch on, each line's count is carried forward to the posting moment:
+// every counting posting, each line's count is carried forward to the posting moment:
 //   updated count = counted + (stock in − stock out of that bin since it was counted)
 //   adjustment    = updated count − stock now
 // and the posting measures every line against stock now, so a bin can no longer be
@@ -76,7 +76,7 @@ public class CountingRecalcLine
 /// <summary>POST /api/autohub/inv/countings/{docEntry}/recalc response.</summary>
 public class CountingRecalcResult
 {
-    /// <summary>AutohubInventory:PostAtCurrentStock. False: postings measure against the count date, as before.</summary>
+    /// <summary>Always true; kept so the app can tell this middleware from an older one.</summary>
     public bool Enabled { get; set; }
     public DateTime? CountDate { get; set; }
     public DateTime? CalculatedAt { get; set; }

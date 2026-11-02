@@ -364,22 +364,12 @@ public interface ISapB1Service
     /// Creates an Inventory Posting (OIQR, object 10000071) from reviewer-approved
     /// counting lines via <c>InventoryPostingsService</c>, with base refs
     /// (BaseEntry = counting DocEntry, BaseLine = counting LineNum) so SAP posts the
-    /// stock/GL adjustments and closes those counting lines.
-    /// <paramref name="bplId"/> sets the header branch (OIQR.BPLId) — required when
-    /// SAP's multi-branch feature is enabled. <paramref name="priceList"/> is the
+    /// stock/GL adjustments and closes those counting lines. Measured against stock at
+    /// <paramref name="countMoment"/>: the header and every line carry that count date
+    /// and time, so SAP's variance is CountedQty − stock at that moment. Posting date is
+    /// today. <paramref name="bplId"/> sets the header branch (OIQR.BPLId) — required
+    /// when SAP's multi-branch feature is enabled. <paramref name="priceList"/> is the
     /// header's price source (OIQR.PriceSrc 1 = by price list, OIQR.PriceList).
-    /// </summary>
-    Task<InventoryDocResult> CreateInventoryPostingAsync(
-        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
-        int priceList, int? bplId, CancellationToken ct);
-
-    /// <summary>
-    /// The same Inventory Posting as <see cref="CreateInventoryPostingAsync"/>, measured
-    /// against stock at <paramref name="countMoment"/> instead of the counting's count
-    /// date: the header and every line carry that count date and time, so SAP's variance
-    /// is CountedQty − stock at that moment (AutohubInventory:PostAtCurrentStock).
-    /// Everything else (posting date today, price source, base refs, series, branch) is
-    /// identical.
     /// </summary>
     Task<InventoryDocResult> CreateInventoryPostingAtCurrentStockAsync(
         int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,

@@ -153,7 +153,7 @@ public class PostingCreate
     public List<int> LineNums { get; set; } = new();
     /// <summary>
     /// When each line was counted in the app, and the updated count the reviewer saw.
-    /// Used only with AutohubInventory:PostAtCurrentStock on; ignored otherwise.
+    /// Lines without one are measured from the counting's count date.
     /// </summary>
     public List<CountingLineCount> LineCounts { get; set; } = new();
 }

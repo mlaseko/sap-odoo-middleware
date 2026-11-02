@@ -686,10 +686,9 @@ public class AutohubInventoryController : ControllerBase
 
     /// <summary>
     /// POST /api/autohub/inv/countings/{docEntry}/recalc
-    /// What each counted, open line would post at current stock
-    /// (AutohubInventory:PostAtCurrentStock): the count carried forward by the stock
-    /// that moved in and out of its bin since it was counted, stock now, and the
-    /// adjustment. <c>enabled: false</c> (and no lines) while the switch is off.
+    /// What each counted, open line posts at current stock: the count carried forward
+    /// by the stock that moved in and out of its bin since it was counted, stock now,
+    /// and the adjustment. <c>enabled</c> is always true (kept for the app).
     /// </summary>
     [HttpPost("countings/{docEntry:int}/recalc")]
     [ProducesResponseType(typeof(ApiResponse<CountingRecalcResult>), StatusCodes.Status200OK)]
@@ -697,9 +696,6 @@ public class AutohubInventoryController : ControllerBase
     public async Task<IActionResult> RecalculateCounting(
         int docEntry, [FromBody] CountingRecalcRequest? request, CancellationToken ct)
     {
-        if (!_settings.PostAtCurrentStock)
-            return Ok(ApiResponse<CountingRecalcResult>.Ok(new CountingRecalcResult { Enabled = false }));
-
         try
         {
             var lines = await _sql.GetCountingLinesAsync(docEntry, ct);
@@ -851,112 +847,9 @@ public class AutohubInventoryController : ControllerBase
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
 
-            if (_settings.PostAtCurrentStock)
-                return await CreatePostingAtCurrentStockAsync(request, lines, postLines, lineNums, ct);
-
-            // A line whose count equals the system quantity moves no stock. SAP (with
-            // "Close counted rows with zero diff" on) strips such lines from the posting,
-            // and a posting left with no lines fails "Specify at least one item"
-            // (1470000281). Post only the lines with a real difference; the matching
-            // lines are closed with the session below.
-            var differenceLines = postLines
-                .Where(p => (byLineNum[p.LineNum].CountedQty ?? 0m) != byLineNum[p.LineNum].SystemQty)
-                .ToList();
-            int zeroDifferenceLines = postLines.Count - differenceLines.Count;
-            var requested = lineNums.ToHashSet();
-            bool coversEveryOpenLine = lines
-                .Where(l => l.LineStatus != "C")
-                .All(l => requested.Contains(l.LineNum));
-
-            if (differenceLines.Count == 0)
-            {
-                if (!coversEveryOpenLine)
-                    return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(
-                        "Every selected line matches the system quantity, so there is nothing to post. " +
-                        "Close the counting session once its other lines are counted."));
-
-                await _sap.CloseInventoryCountingAsync(request.CountingDocEntry, ct);
-                _logger.LogInformation(
-                    "Counting {Counting} closed without posting: all {Lines} line(s) match the system (app_ref={AppRef})",
-                    request.CountingDocEntry, zeroDifferenceLines, request.AppRef);
-
-                return Ok(ApiResponse<InventoryDocResult>.Ok(
-                    new InventoryDocResult { ClosedWithoutPosting = true },
-                    new Dictionary<string, object>
-                    {
-                        ["posted_lines"] = 0,
-                        ["zero_difference_lines"] = zeroDifferenceLines,
-                        ["counting_closed"] = true,
-                    }));
-            }
-
-            // Every posting line is priced from the posting price list (PL01 = cost).
-            var priceError = await ApplyPostingPricesAsync(
-                differenceLines.Select(p => byLineNum[p.LineNum].ItemCode).ToList(),
-                (code, price) =>
-                {
-                    foreach (var p in differenceLines.Where(p =>
-                                 string.Equals(byLineNum[p.LineNum].ItemCode, code, StringComparison.OrdinalIgnoreCase)))
-                        p.Price = price;
-                },
-                ct);
-            if (priceError is not null)
-                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(priceError));
-
-            // Same branch requirement as counting creation (OIQR.BPLId) — derive it
-            // from the counting's warehouse.
-            var (bplId, branchError) = await ResolveActiveBranchAsync(lines[0].WhsCode, ct);
-            if (branchError is not null)
-                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
-
-            InventoryDocResult result;
-            try
-            {
-                result = await _sap.CreateInventoryPostingAsync(
-                    request.CountingDocEntry, differenceLines, request.AppRef,
-                    _settings.PostingSeries, _settings.PostingPriceList, bplId, ct);
-            }
-            catch (Exception ex) when (IsNegativeStockRefusal(ex))
-            {
-                // SAP names only a posting line number; name the item and bin instead.
-                var detail = await NegativeStockDetailAsync(
-                    request.CountingDocEntry,
-                    differenceLines.Select(p => (byLineNum[p.LineNum], (decimal)p.CountedQty - byLineNum[p.LineNum].SystemQty)),
-                    ct);
-                _logger.LogError(ex,
-                    "Inventory posting failed (app_ref={AppRef}, counting={Counting})",
-                    request.AppRef, request.CountingDocEntry);
-                return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message + detail));
-            }
-
-            // The posting closed the difference lines. When the request covered every
-            // open line, only matching lines are left open: close the session so it
-            // does not linger. The posting already succeeded, so a failed close is
-            // logged and reported, not raised.
-            bool countingClosed = false;
-            if (zeroDifferenceLines > 0 && coversEveryOpenLine)
-            {
-                try
-                {
-                    await _sap.CloseInventoryCountingAsync(request.CountingDocEntry, ct);
-                    countingClosed = true;
-                }
-                catch (Exception closeEx)
-                {
-                    _logger.LogWarning(closeEx,
-                        "Posting {DocEntry} created but closing counting {Counting} failed",
-                        result.DocEntry, request.CountingDocEntry);
-                }
-            }
-
-            return Ok(ApiResponse<InventoryDocResult>.Ok(
-                result,
-                new Dictionary<string, object>
-                {
-                    ["posted_lines"] = differenceLines.Count,
-                    ["zero_difference_lines"] = zeroDifferenceLines,
-                    ["counting_closed"] = countingClosed,
-                }));
+            // Every count is carried forward to the posting moment and posted against
+            // stock now (see CreatePostingAtCurrentStockAsync).
+            return await CreatePostingAtCurrentStockAsync(request, lines, postLines, lineNums, ct);
         }
         catch (Exception ex)
         {
@@ -2129,10 +2022,10 @@ public class AutohubInventoryController : ControllerBase
     /// zero price, on that list stops the posting: posting it would value the stock
     /// movement at whatever SAP falls back to, not at cost.
     /// </summary>
-    // ── Posting at current stock (AutohubInventory:PostAtCurrentStock) ──────────
+    // ── Posting at current stock ─────────────────────────────────────────────────
 
     /// <summary>
-    /// The posting with the switch on. Each selected line's count is carried forward by
+    /// The counting posting. Each selected line's count is carried forward by
     /// the stock that moved in and out of its bin since it was counted; the adjustment
     /// is that updated count minus stock now. Conflicts (more left than was counted)
     /// refuse; lines that now match close with the session; the rest update the
