@@ -374,6 +374,18 @@ public interface ISapB1Service
         int priceList, int? bplId, CancellationToken ct);
 
     /// <summary>
+    /// The same Inventory Posting as <see cref="CreateInventoryPostingAsync"/>, measured
+    /// against stock at <paramref name="countMoment"/> instead of the counting's count
+    /// date: the header and every line carry that count date and time, so SAP's variance
+    /// is CountedQty − stock at that moment (AutohubInventory:PostAtCurrentStock).
+    /// Everything else (posting date today, price source, base refs, series, branch) is
+    /// identical.
+    /// </summary>
+    Task<InventoryDocResult> CreateInventoryPostingAtCurrentStockAsync(
+        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
+        int priceList, int? bplId, DateTime countMoment, CancellationToken ct);
+
+    /// <summary>
     /// Creates a STANDALONE Inventory Posting (OIQR) with no base counting document —
     /// a direct stock correction. Each line carries item + warehouse (+ bin) +
     /// CountedQuantity as the absolute new quantity; SAP computes the variance against

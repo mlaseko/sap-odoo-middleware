@@ -151,6 +151,11 @@ public class PostingCreate
     public int CountingDocEntry { get; set; }
     /// <summary>INC1 LineNum values approved for posting. Must all be counted and open.</summary>
     public List<int> LineNums { get; set; } = new();
+    /// <summary>
+    /// When each line was counted in the app, and the updated count the reviewer saw.
+    /// Used only with AutohubInventory:PostAtCurrentStock on; ignored otherwise.
+    /// </summary>
+    public List<CountingLineCount> LineCounts { get; set; } = new();
 }
 
 /// <summary>One posting line handed to the DI API (built server-side from the counting lines).</summary>
