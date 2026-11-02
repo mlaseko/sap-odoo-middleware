@@ -172,6 +172,23 @@ public interface IAutohubInventorySqlService
     Task<Dictionary<string, decimal>> GetItemPricesAsync(
         IReadOnlyCollection<string> itemCodes, int priceList, CancellationToken ct);
 
+    /// <summary>OINC.CountDate of one counting, or null when the counting does not exist.</summary>
+    Task<DateTime?> GetCountingCountDateAsync(int docEntry, CancellationToken ct);
+
+    /// <summary>
+    /// Stock now for every line of a counting, by LineNum: the bin's OIBQ.OnHandQty for a
+    /// line with a bin (0 when the bin holds none), OITW.OnHand for a line without one.
+    /// </summary>
+    Task<Dictionary<int, decimal>> GetCountingStockNowAsync(int docEntry, CancellationToken ct);
+
+    /// <summary>
+    /// Stock movements into and out of each counted line's bin (OILM joined to OBTL on
+    /// MessageID; OILM alone for a line without a bin), entered on or after
+    /// <paramref name="sinceDate"/>. ActionType 1 is in, 2 is out; quantities are positive.
+    /// </summary>
+    Task<List<CountingLineMovement>> GetCountingMovementsAsync(
+        int docEntry, DateTime sinceDate, CancellationToken ct);
+
     /// <summary>
     /// Default-bin seed candidates (spec §10): the top stocked non-system bin per
     /// item-warehouse, with the current OITW.DftBinAbs for skip/overwrite decisions.
@@ -1419,6 +1436,84 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 prices[reader.GetString(0)] = reader.GetDecimal(1);
         }
         return prices;
+    }
+
+    // ── Posting at current stock ─────────────────────────────────────
+
+    public async Task<DateTime?> GetCountingCountDateAsync(int docEntry, CancellationToken ct)
+    {
+        const string sql = "SELECT CountDate FROM OINC WHERE DocEntry = @doc;";
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@doc", docEntry);
+        var value = await cmd.ExecuteScalarAsync(ct);
+        return value is DateTime date ? date : null;
+    }
+
+    public async Task<Dictionary<int, decimal>> GetCountingStockNowAsync(int docEntry, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT L.LineNum,
+                   CASE WHEN ISNULL(L.BinEntry, 0) > 0 THEN ISNULL(Q.OnHandQty, 0)
+                        ELSE ISNULL(W.OnHand, 0) END AS StockNow
+            FROM INC1 L
+            LEFT JOIN OIBQ Q ON Q.ItemCode = L.ItemCode AND Q.WhsCode = L.WhsCode AND Q.BinAbs = L.BinEntry
+            LEFT JOIN OITW W ON W.ItemCode = L.ItemCode AND W.WhsCode = L.WhsCode
+            WHERE L.DocEntry = @doc;
+            """;
+        var stock = new Dictionary<int, decimal>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@doc", docEntry);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            stock[reader.GetInt32(0)] = reader.IsDBNull(1) ? 0m : reader.GetDecimal(1);
+        return stock;
+    }
+
+    public async Task<List<CountingLineMovement>> GetCountingMovementsAsync(
+        int docEntry, DateTime sinceDate, CancellationToken ct)
+    {
+        // OILM is the inventory log (one row per document line and warehouse); OBTL splits
+        // it per bin. Entry time (CreateDate + CreateTime) is used, not DocDate, so a
+        // back-dated document entered after the count still counts as after it.
+        const string sql = """
+            SELECT L.LineNum, M.TransType, M.BASE_REF, M.CreateDate, M.CreateTime, M.ActionType, T.Quantity
+            FROM INC1 L
+            JOIN OILM M ON M.ItemCode = L.ItemCode AND M.LocCode = L.WhsCode
+            JOIN OBTL T ON T.MessageID = M.MessageID AND T.BinAbs = L.BinEntry
+            WHERE L.DocEntry = @doc AND L.BinEntry > 0
+              AND M.ActionType IN (1, 2) AND M.CreateDate >= @since
+            UNION ALL
+            SELECT L.LineNum, M.TransType, M.BASE_REF, M.CreateDate, M.CreateTime, M.ActionType, M.Quantity
+            FROM INC1 L
+            JOIN OILM M ON M.ItemCode = L.ItemCode AND M.LocCode = L.WhsCode
+            WHERE L.DocEntry = @doc AND ISNULL(L.BinEntry, 0) <= 0
+              AND M.ActionType IN (1, 2) AND M.CreateDate >= @since;
+            """;
+        var list = new List<CountingLineMovement>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@doc", docEntry);
+        cmd.Parameters.AddWithValue("@since", sinceDate.Date);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (reader.IsDBNull(3)) continue;
+            int? createTime = reader.IsDBNull(4) ? null : Convert.ToInt32(reader.GetValue(4));
+            decimal qty = reader.IsDBNull(6) ? 0m : Math.Abs(reader.GetDecimal(6));
+            bool isIn = Convert.ToInt32(reader.GetValue(5)) == 1;
+            list.Add(new CountingLineMovement
+            {
+                LineNum = reader.GetInt32(0),
+                TransType = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
+                BaseRef = reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2)),
+                CreatedAt = CountingRecalculator.EntryMoment(reader.GetDateTime(3), createTime),
+                QtyIn = isIn ? qty : 0m,
+                QtyOut = isIn ? 0m : qty,
+            });
+        }
+        return list;
     }
 
     // ── Default-bin seeding (spec §10) ───────────────────────────────

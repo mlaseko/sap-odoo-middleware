@@ -685,6 +685,53 @@ public class AutohubInventoryController : ControllerBase
     }
 
     /// <summary>
+    /// POST /api/autohub/inv/countings/{docEntry}/recalc
+    /// What each counted, open line would post at current stock
+    /// (AutohubInventory:PostAtCurrentStock): the count carried forward by the stock
+    /// that moved in and out of its bin since it was counted, stock now, and the
+    /// adjustment. <c>enabled: false</c> (and no lines) while the switch is off.
+    /// </summary>
+    [HttpPost("countings/{docEntry:int}/recalc")]
+    [ProducesResponseType(typeof(ApiResponse<CountingRecalcResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<CountingRecalcResult>), StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> RecalculateCounting(
+        int docEntry, [FromBody] CountingRecalcRequest? request, CancellationToken ct)
+    {
+        if (!_settings.PostAtCurrentStock)
+            return Ok(ApiResponse<CountingRecalcResult>.Ok(new CountingRecalcResult { Enabled = false }));
+
+        try
+        {
+            var lines = await _sql.GetCountingLinesAsync(docEntry, ct);
+            if (lines.Count == 0)
+                return NotFound(ApiResponse<CountingRecalcResult>.Fail(
+                    $"Counting document {docEntry} not found (or has no lines)."));
+
+            var open = lines.Where(l => l.LineStatus != "C" && l.Counted).ToList();
+            var (recalc, countDate) = await RecalculateLinesAsync(
+                docEntry, open, request?.LineCounts ?? new List<CountingLineCount>(), ct);
+            // A line that matched the count date can differ now, so the review needs
+            // every line's posting price, not only the count-date differences'.
+            var prices = await _sql.GetItemPricesAsync(
+                open.Select(l => l.ItemCode).ToList(), _settings.PostingPriceList, ct);
+            foreach (var line in recalc.Values)
+                line.UnitPrice = prices.TryGetValue(line.ItemCode, out var price) && price > 0 ? price : null;
+            return Ok(ApiResponse<CountingRecalcResult>.Ok(new CountingRecalcResult
+            {
+                Enabled = true,
+                CountDate = countDate,
+                CalculatedAt = CountingRecalculator.ToMinute(NowInSapZone()),
+                Lines = open.Select(l => recalc[l.LineNum]).ToList(),
+            }));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Counting recalculation failed (doc_entry={DocEntry})", docEntry);
+            return StatusCode(500, ApiResponse<CountingRecalcResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
     /// POST /api/autohub/inv/countings/{docEntry}/close
     /// Closes a counting session WITHOUT posting — for sessions where every line
     /// matched the system quantity (nothing to adjust) or where the reviewer decides
@@ -804,6 +851,9 @@ public class AutohubInventoryController : ControllerBase
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
 
+            if (_settings.PostAtCurrentStock)
+                return await CreatePostingAtCurrentStockAsync(request, lines, postLines, lineNums, ct);
+
             // A line whose count equals the system quantity moves no stock. SAP (with
             // "Close counted rows with zero diff" on) strips such lines from the posting,
             // and a posting left with no lines fails "Specify at least one item"
@@ -859,9 +909,25 @@ public class AutohubInventoryController : ControllerBase
             if (branchError is not null)
                 return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
 
-            var result = await _sap.CreateInventoryPostingAsync(
-                request.CountingDocEntry, differenceLines, request.AppRef,
-                _settings.PostingSeries, _settings.PostingPriceList, bplId, ct);
+            InventoryDocResult result;
+            try
+            {
+                result = await _sap.CreateInventoryPostingAsync(
+                    request.CountingDocEntry, differenceLines, request.AppRef,
+                    _settings.PostingSeries, _settings.PostingPriceList, bplId, ct);
+            }
+            catch (Exception ex) when (IsNegativeStockRefusal(ex))
+            {
+                // SAP names only a posting line number; name the item and bin instead.
+                var detail = await NegativeStockDetailAsync(
+                    request.CountingDocEntry,
+                    differenceLines.Select(p => (byLineNum[p.LineNum], (decimal)p.CountedQty - byLineNum[p.LineNum].SystemQty)),
+                    ct);
+                _logger.LogError(ex,
+                    "Inventory posting failed (app_ref={AppRef}, counting={Counting})",
+                    request.AppRef, request.CountingDocEntry);
+                return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message + detail));
+            }
 
             // The posting closed the difference lines. When the request covered every
             // open line, only matching lines are left open: close the session so it
@@ -2063,6 +2129,269 @@ public class AutohubInventoryController : ControllerBase
     /// zero price, on that list stops the posting: posting it would value the stock
     /// movement at whatever SAP falls back to, not at cost.
     /// </summary>
+    // ── Posting at current stock (AutohubInventory:PostAtCurrentStock) ──────────
+
+    /// <summary>
+    /// The posting with the switch on. Each selected line's count is carried forward by
+    /// the stock that moved in and out of its bin since it was counted; the adjustment
+    /// is that updated count minus stock now. Conflicts (more left than was counted)
+    /// refuse; lines that now match close with the session; the rest update the
+    /// counting's counts and post measured at the posting moment. A failed posting
+    /// writes the original counts back. No other route is tried.
+    /// </summary>
+    private async Task<IActionResult> CreatePostingAtCurrentStockAsync(
+        PostingCreate request, List<CountingLineDetail> lines, List<CountingPostLine> postLines,
+        List<int> lineNums, CancellationToken ct)
+    {
+        var byLineNum = lines.ToDictionary(l => l.LineNum);
+        var selected = postLines.Select(p => byLineNum[p.LineNum]).ToList();
+        var (recalc, _) = await RecalculateLinesAsync(request.CountingDocEntry, selected, request.LineCounts, ct);
+
+        var conflicts = selected
+            .Select(l => recalc[l.LineNum])
+            .Where(r => r.Status == CountingRecalculator.StatusConflict)
+            .ToList();
+        if (conflicts.Count > 0)
+            return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(
+                "More stock left these bins after they were counted than was counted, so the count is doubtful. " +
+                "Untick them and recount: " + string.Join("; ", conflicts.Select(DescribeConflict)) + "."));
+
+        // What the reviewer saw is what posts.
+        var changed = new List<string>();
+        foreach (var seen in request.LineCounts.Where(c => c.ExpectedUpdatedQty.HasValue))
+        {
+            if (recalc.TryGetValue(seen.LineNum, out var r) && r.UpdatedQty != seen.ExpectedUpdatedQty!.Value)
+                changed.Add($"{r.ItemCode}{BinSuffix(r.BinCode)}: {Qty(seen.ExpectedUpdatedQty.Value)} → {Qty(r.UpdatedQty)}");
+        }
+        if (changed.Count > 0)
+            return Conflict(ApiResponse<InventoryDocResult>.Fail(
+                "Stock moved since this review was loaded. Refresh and review again. " + string.Join("; ", changed) + "."));
+
+        var differenceLines = postLines
+            .Where(p => recalc[p.LineNum].Status == CountingRecalculator.StatusPost)
+            .ToList();
+        foreach (var p in differenceLines)
+            p.CountedQty = (double)recalc[p.LineNum].UpdatedQty;
+        int zeroDifferenceLines = postLines.Count - differenceLines.Count;
+        var requested = lineNums.ToHashSet();
+        bool coversEveryOpenLine = lines
+            .Where(l => l.LineStatus != "C")
+            .All(l => requested.Contains(l.LineNum));
+        var recalcLines = selected.Select(l => recalc[l.LineNum]).ToList();
+
+        if (differenceLines.Count == 0)
+        {
+            if (!coversEveryOpenLine)
+                return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(
+                    "Every selected line matches the stock now, so there is nothing to post. " +
+                    "Close the counting session once its other lines are counted."));
+
+            await _sap.CloseInventoryCountingAsync(request.CountingDocEntry, ct);
+            _logger.LogInformation(
+                "Counting {Counting} closed without posting at current stock: all {Lines} line(s) match (app_ref={AppRef})",
+                request.CountingDocEntry, zeroDifferenceLines, request.AppRef);
+            return Ok(ApiResponse<InventoryDocResult>.Ok(
+                new InventoryDocResult { ClosedWithoutPosting = true },
+                new Dictionary<string, object>
+                {
+                    ["posted_lines"] = 0,
+                    ["zero_difference_lines"] = zeroDifferenceLines,
+                    ["counting_closed"] = true,
+                    ["mode"] = "current_stock",
+                    ["recalc_lines"] = recalcLines,
+                }));
+        }
+
+        var priceError = await ApplyPostingPricesAsync(
+            differenceLines.Select(p => byLineNum[p.LineNum].ItemCode).ToList(),
+            (code, price) =>
+            {
+                foreach (var p in differenceLines.Where(p =>
+                             string.Equals(byLineNum[p.LineNum].ItemCode, code, StringComparison.OrdinalIgnoreCase)))
+                    p.Price = price;
+            },
+            ct);
+        if (priceError is not null)
+            return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(priceError));
+        foreach (var p in differenceLines)
+            recalc[p.LineNum].UnitPrice = p.Price is double price ? (decimal)price : null;
+
+        var whsCode = lines[0].WhsCode;
+        var (bplId, branchError) = await ResolveActiveBranchAsync(whsCode, ct);
+        if (branchError is not null)
+            return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
+
+        // The counting carries the updated counts, so SAP's record of the count is what posts.
+        var countUpdates = differenceLines
+            .Where(p => recalc[p.LineNum].NetMovement != 0)
+            .Select(p => new CountingLineUpdate { LineNum = p.LineNum, CountedQty = (double)recalc[p.LineNum].UpdatedQty })
+            .ToList();
+        if (countUpdates.Count > 0)
+            await _sap.UpdateInventoryCountingLinesAsync(
+                request.CountingDocEntry, countUpdates, new List<CountingLineAddition>(), whsCode, ct);
+
+        var countMoment = CountingRecalculator.ToMinute(NowInSapZone());
+        InventoryDocResult result;
+        try
+        {
+            result = await _sap.CreateInventoryPostingAtCurrentStockAsync(
+                request.CountingDocEntry, differenceLines, request.AppRef,
+                _settings.PostingSeries, _settings.PostingPriceList, bplId, countMoment, ct);
+        }
+        catch (Exception ex)
+        {
+            string restoreNote = "";
+            if (countUpdates.Count > 0)
+            {
+                var originals = countUpdates
+                    .Select(u => new CountingLineUpdate { LineNum = u.LineNum, CountedQty = (double)recalc[u.LineNum].CountedQty })
+                    .ToList();
+                try
+                {
+                    await _sap.UpdateInventoryCountingLinesAsync(
+                        request.CountingDocEntry, originals, new List<CountingLineAddition>(), whsCode, CancellationToken.None);
+                }
+                catch (Exception restoreEx)
+                {
+                    _logger.LogError(restoreEx,
+                        "Counting {Counting}: the original counts could not be written back after a failed posting (lines {Lines})",
+                        request.CountingDocEntry, string.Join(",", originals.Select(o => o.LineNum)));
+                    restoreNote = " The counting's original counts could not be written back (" +
+                        string.Join("; ", originals.Select(o => $"{recalc[o.LineNum].ItemCode}{BinSuffix(recalc[o.LineNum].BinCode)} = {Qty((decimal)o.CountedQty)}")) +
+                        "). Correct them in SAP before approving again.";
+                }
+            }
+            var detail = IsNegativeStockRefusal(ex)
+                ? await NegativeStockDetailAsync(
+                    request.CountingDocEntry,
+                    differenceLines.Select(p => (byLineNum[p.LineNum], recalc[p.LineNum].Adjustment ?? 0m)),
+                    CancellationToken.None)
+                : "";
+            _logger.LogError(ex,
+                "Inventory posting at current stock failed (app_ref={AppRef}, counting={Counting}, count_moment={Moment})",
+                request.AppRef, request.CountingDocEntry, countMoment);
+            return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message + detail + restoreNote));
+        }
+
+        bool countingClosed = false;
+        if (zeroDifferenceLines > 0 && coversEveryOpenLine)
+        {
+            try
+            {
+                await _sap.CloseInventoryCountingAsync(request.CountingDocEntry, ct);
+                countingClosed = true;
+            }
+            catch (Exception closeEx)
+            {
+                _logger.LogWarning(closeEx,
+                    "Posting {DocEntry} created but closing counting {Counting} failed",
+                    result.DocEntry, request.CountingDocEntry);
+            }
+        }
+
+        return Ok(ApiResponse<InventoryDocResult>.Ok(
+            result,
+            new Dictionary<string, object>
+            {
+                ["posted_lines"] = differenceLines.Count,
+                ["zero_difference_lines"] = zeroDifferenceLines,
+                ["counting_closed"] = countingClosed,
+                ["mode"] = "current_stock",
+                ["recalc_lines"] = recalcLines,
+            }));
+    }
+
+    /// <summary>Recalculates the given counted lines at the current moment, keyed by LineNum.</summary>
+    private async Task<(Dictionary<int, CountingRecalcLine> Lines, DateTime? CountDate)> RecalculateLinesAsync(
+        int docEntry, IReadOnlyList<CountingLineDetail> lines, IReadOnlyCollection<CountingLineCount> appCounts,
+        CancellationToken ct)
+    {
+        var result = new Dictionary<int, CountingRecalcLine>();
+        var countDate = await _sql.GetCountingCountDateAsync(docEntry, ct);
+        if (lines.Count == 0) return (result, countDate);
+
+        var zone = SapTimeZone();
+        var byLine = appCounts
+            .GroupBy(c => c.LineNum)
+            .ToDictionary(g => g.Key, g => g.Last());
+        var points = lines.ToDictionary(
+            l => l.LineNum,
+            l => CountingRecalculator.MeasurePoint(
+                l, byLine.GetValueOrDefault(l.LineNum), countDate ?? DateTime.Today, zone));
+        var since = points.Values.Min(p => p.From).Date;
+        var movements = await _sql.GetCountingMovementsAsync(docEntry, since, ct);
+        var stockNow = await _sql.GetCountingStockNowAsync(docEntry, ct);
+        foreach (var line in lines)
+        {
+            var point = points[line.LineNum];
+            result[line.LineNum] = CountingRecalculator.Recalculate(
+                line, point.Counted, point.From, point.Known,
+                stockNow.GetValueOrDefault(line.LineNum), movements);
+        }
+        return (result, countDate);
+    }
+
+    /// <summary>AutohubInventory:CountTimeZone, or this server's local zone.</summary>
+    private TimeZoneInfo SapTimeZone()
+    {
+        var id = _settings.CountTimeZone?.Trim();
+        if (string.IsNullOrEmpty(id)) return TimeZoneInfo.Local;
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById(id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "AutohubInventory:CountTimeZone {Zone} is unknown; using the server's local time", id);
+            return TimeZoneInfo.Local;
+        }
+    }
+
+    private DateTime NowInSapZone() =>
+        DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, SapTimeZone()), DateTimeKind.Unspecified);
+
+    private static bool IsNegativeStockRefusal(Exception ex) =>
+        ex.Message.Contains("1470000505", StringComparison.Ordinal);
+
+    /// <summary>
+    /// After SAP refuses a posting for negative stock (1470000505), names the lines that
+    /// would go below zero: stock now + the line's change. Never throws.
+    /// </summary>
+    private async Task<string> NegativeStockDetailAsync(
+        int docEntry, IEnumerable<(CountingLineDetail Line, decimal Change)> posted, CancellationToken ct)
+    {
+        try
+        {
+            var stock = await _sql.GetCountingStockNowAsync(docEntry, ct);
+            var below = posted
+                .Select(p => (p.Line, p.Change, Now: stock.GetValueOrDefault(p.Line.LineNum)))
+                .Where(x => x.Now + x.Change < 0)
+                .ToList();
+            if (below.Count == 0) return "";
+            return " Lines that would go below zero: " + string.Join("; ", below.Select(x =>
+                $"{x.Line.ItemCode}{BinSuffix(x.Line.BinCode)} (stock now {Qty(x.Now)}, change {Qty(x.Change)})")) + ".";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not name the negative-stock lines of counting {Counting}", docEntry);
+            return "";
+        }
+    }
+
+    private static string DescribeConflict(CountingRecalcLine r)
+    {
+        var when = r.CountTimeKnown
+            ? $"counted {Qty(r.CountedQty)} on {r.MeasuredFrom:dd MMM HH:mm}"
+            : $"counted {Qty(r.CountedQty)} (count date {r.MeasuredFrom:dd MMM})";
+        return $"{r.ItemCode}{BinSuffix(r.BinCode)} {when}, then {Qty(r.MovedOut)} out and {Qty(r.MovedIn)} in";
+    }
+
+    private static string BinSuffix(string? binCode) =>
+        string.IsNullOrWhiteSpace(binCode) ? "" : $" in {binCode}";
+
+    private static string Qty(decimal value) =>
+        value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
     private async Task<string?> ApplyPostingPricesAsync(
         IReadOnlyCollection<string> itemCodes, Action<string, double> apply, CancellationToken ct)
     {

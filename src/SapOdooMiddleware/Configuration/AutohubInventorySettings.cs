@@ -30,6 +30,23 @@ public class AutohubInventorySettings
     /// variance values shown for review. Price list 01 holds the company's cost.</summary>
     public int PostingPriceList { get; set; } = 1;
 
+    /// <summary>
+    /// Off (default): a counting posting measures every line against stock on the
+    /// counting's count date, as before. On: each count is carried forward by the stock
+    /// that moved in and out of its bin since it was counted, and the posting measures
+    /// every line against stock now (count date and time = the posting moment), so
+    /// movements SAP already booked are not deducted twice. Read at start-up: restart
+    /// the service after changing it.
+    /// </summary>
+    public bool PostAtCurrentStock { get; set; } = false;
+
+    /// <summary>
+    /// Time zone of SAP's entry times (OILM.CreateDate/CreateTime), used to compare them
+    /// with app capture times. Empty = this server's local time zone. Windows id (e.g.
+    /// "E. Africa Standard Time") or IANA id ("Africa/Dar_es_Salaam").
+    /// </summary>
+    public string CountTimeZone { get; set; } = "";
+
     /// <summary>Series for Goods Receipt POs (object 20, OPDN). 0 = let SAP use the
     /// default series (discovery found a single series for all objects except transfers).</summary>
     public int GrpoSeries { get; set; } = 0;

@@ -6197,9 +6197,26 @@ ORDER BY PostingDate, DocumentNumber";
     }
 
     /// <inheritdoc/>
-    public async Task<InventoryDocResult> CreateInventoryPostingAsync(
+    public Task<InventoryDocResult> CreateInventoryPostingAsync(
         int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
-        int priceList, int? bplId, CancellationToken ct)
+        int priceList, int? bplId, CancellationToken ct) =>
+        CreateCountingPostingAsync(countingDocEntry, lines, appRef, series, priceList, bplId, null, ct);
+
+    /// <inheritdoc/>
+    public Task<InventoryDocResult> CreateInventoryPostingAtCurrentStockAsync(
+        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
+        int priceList, int? bplId, DateTime countMoment, CancellationToken ct) =>
+        CreateCountingPostingAsync(countingDocEntry, lines, appRef, series, priceList, bplId, countMoment, ct);
+
+    /// <summary>
+    /// Builds and adds the counting Inventory Posting. <paramref name="countMoment"/> null:
+    /// the counting's own count date and time go on the header and every line (as SAP's
+    /// Copy From does). Set: that moment goes on the header and every line instead, so
+    /// SAP measures each line against stock at the posting moment. Nothing else differs.
+    /// </summary>
+    private async Task<InventoryDocResult> CreateCountingPostingAsync(
+        int countingDocEntry, List<CountingPostLine> lines, string appRef, int series,
+        int priceList, int? bplId, DateTime? countMoment, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
@@ -6265,13 +6282,21 @@ ORDER BY PostingDate, DocumentNumber";
                 // empty (1899-12-30) are what SAP still refused with 10001484 [line: n]
                 // after the header carried the count date.
                 var (countDate, countTime) = ReadCountingCountDate(countingDocEntry);
+                if (countMoment is DateTime moment)
+                {
+                    // Posting at current stock: the same fields, set to the posting moment,
+                    // in the same type the counting returns its count time in.
+                    countTime = CountTimeAt(countTime, moment);
+                    countDate = moment.Date;
+                }
                 ApplyCountDate(posting, countDate, countTime, "header");
                 foreach (var pl in postingLines)
                     ApplyCountDate(pl, countDate, countTime, "line");
                 _logger.LogInformation(
-                    "Inventory posting for counting {Counting}: Series={Series}, PriceSource={PriceSource}, PriceList={PriceList}, PostingDate={PostingDate}, " +
+                    "Inventory posting for counting {Counting}: Mode={Mode}, Series={Series}, PriceSource={PriceSource}, PriceList={PriceList}, PostingDate={PostingDate}, " +
                     "CountDate={CountDate}, CountTime={CountTime}, Line0CountDate={LineCountDate}, Line0CountTime={LineCountTime}, Lines={Lines}",
-                    countingDocEntry, ReadLateBound(posting, "Series"), ReadLateBound(posting, "PriceSource"),
+                    countingDocEntry, countMoment is null ? "count-date" : "current-stock",
+                    ReadLateBound(posting, "Series"), ReadLateBound(posting, "PriceSource"),
                     ReadLateBound(posting, "PriceList"), ReadLateBound(posting, "PostingDate"),
                     ReadLateBound(posting, "CountDate"), ReadLateBound(posting, "CountTime"),
                     postingLines.Count > 0 ? ReadLateBound(postingLines[0], "CountDate") : "n/a",
@@ -6361,6 +6386,26 @@ ORDER BY PostingDate, DocumentNumber";
         if (priceList <= 0) return;
         TrySetLoggedLateBound(posting, "PriceSource", 1);
         TrySetLoggedLateBound(posting, "PriceList", priceList);
+    }
+
+    /// <summary>
+    /// A count time for <paramref name="moment"/> (to the minute) in the type the
+    /// counting returned its own count time in, so COM receives the type it already
+    /// accepts: a DI API time (date part 1899-12-30), an HHMM number, or "HH:mm".
+    /// </summary>
+    private static object CountTimeAt(object? template, DateTime moment)
+    {
+        var time = new TimeSpan(moment.Hour, moment.Minute, 0);
+        int hhmm = moment.Hour * 100 + moment.Minute;
+        return template switch
+        {
+            DateTime t when t.Year <= 1900 => t.Date + time,
+            DateTime => moment.Date + time,
+            short => (short)hhmm,
+            int => hhmm,
+            string => moment.ToString("HH:mm"),
+            _ => new DateTime(1899, 12, 30) + time,
+        };
     }
 
     /// <summary>Sets CountDate / CountTime on the posting header or one of its lines.</summary>
