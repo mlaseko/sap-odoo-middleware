@@ -206,10 +206,15 @@ public sealed class SapMonthEndSqlReader : IMonthEndReader
         await ProbeColumnsAsync(conn, ct);
 
         string odooRef = _oipfHasOdooShipmentId == true ? "H.U_OdooShipmentId" : "CAST(NULL AS NVARCHAR(50))";
+        // OIPF has no TransId column (SQL error 207 "Invalid column name 'TransId'" on 10.00): the document's journal
+        // entry is found from its own side instead, OJDT.TransType = '69' (landed costs) with OJDT.CreatedBy = the
+        // landed cost document's DocEntry, as SAP links every document's journal entry to its source.
         string sql = $"""
             SELECT H.DocEntry, H.DocNum, H.DocDate, {odooRef} AS OdooShipmentId,
                    ISNULL((SELECT SUM(J.Credit - J.Debit) FROM dbo.JDT1 J
-                           WHERE J.TransId = H.TransId AND J.Account IN (SELECT A.AcctCode FROM dbo.OALC A)), 0) AS TotalLc
+                           JOIN dbo.OJDT O ON O.TransId = J.TransId
+                           WHERE O.TransType = '69' AND O.CreatedBy = H.DocEntry
+                             AND J.Account IN (SELECT A.AcctCode FROM dbo.OALC A)), 0) AS TotalLc
             FROM dbo.OIPF H
             WHERE H.DocDate >= @From AND H.DocDate <= @To
             ORDER BY H.DocEntry
