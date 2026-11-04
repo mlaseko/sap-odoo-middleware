@@ -7640,7 +7640,6 @@ ORDER BY PostingDate, DocumentNumber";
         ["equally"] = new[] { "asEqually", "asEqual", "asEquality" },
     };
 
-    private static readonly string[] CostAmountCandidates = { "Amount", "LandedCostAmount", "CostAmount", "Price", "Total", "TotalAmount" };
     private static readonly string[] LandedCostBaseTypeCandidates = { "asLandedCost", "asLandedCosts", "asLandedCostDocument" };
 
     // The SAPbobsCOM interop declares each document as an empty interface (e.g. LandedCost_CostLine) that inherits
@@ -7651,10 +7650,6 @@ ORDER BY PostingDate, DocumentNumber";
 
     private static System.Reflection.PropertyInfo? FindInteropProperty(Type interopType, string name) =>
         InteropTypeAndBases(interopType).Select(t => t.GetProperty(name)).FirstOrDefault(p => p is not null);
-
-    private static string InteropMembers(Type interopType) =>
-        string.Join(", ", InteropTypeAndBases(interopType).SelectMany(t => t.GetProperties())
-            .Select(p => p.Name).Distinct().OrderBy(n => n));
 
     private static string EnumMembers(Type enumType) => string.Join(", ", Enum.GetNames(enumType));
 
@@ -7798,6 +7793,10 @@ ORDER BY PostingDate, DocumentNumber";
                     lc.Reference = ClipForSap(request.ShipRef.Trim(), 100);
                 lc.Remarks = ClipForSap(
                     string.IsNullOrWhiteSpace(request.Remarks) ? $"Odoo landed costs {key}" : request.Remarks.Trim(), 254);
+                // The amounts are in the company currency (TZS). Without this the document takes the currency of its
+                // base GRPO (EUR for Liqui Moly) and SAP reads the empty AmountFC: "Both expenditure and custom
+                // expenses are missing" (-5002).
+                lc.DocumentCurrency = GetLocalCurrencyCode();
                 lc.JournalRemarks = ClipForSap($"Landed costs {reference}" + (request.PushSequence > 1 ? $" (delta {request.PushSequence})" : string.Empty), 50);
                 lc.UserFields.Item("U_OdooShipmentId").Value = key;
                 if (!string.IsNullOrWhiteSpace(request.ShipRef))
@@ -7819,13 +7818,14 @@ ORDER BY PostingDate, DocumentNumber";
                 {
                     var line = lc.LandedCost_CostLines.Add();
                     line.LandedCostCode = cost.LcCode;
-                    if (TrySetInteropProperty(line, typeof(LandedCost_CostLine), cost.Amount, CostAmountCandidates) is null)
-                    {
+                    // ILandedCost_CostLine.amount (lower-case in the DI API typelib) is the local-currency amount.
+                    line.amount = cost.Amount;
+                    double amountRead = line.amount;
+                    if (Math.Abs(amountRead - cost.Amount) > 0.005)
                         throw new InvalidOperationException(
-                            "This DI API build has no amount property on LandedCost_CostLine among " +
-                            $"{string.Join(", ", CostAmountCandidates)} (tried through the interop and late-bound). " +
-                            $"Members embedded in this build: {InteropMembers(typeof(LandedCost_CostLine))}.");
-                    }
+                            $"Landed cost code {cost.LcCode}: SAP kept amount {amountRead} after it was set to {cost.Amount}.");
+                    _logger.LogInformation("Landed cost line {Code}: amount {Amount} {Currency}",
+                        cost.LcCode, amountRead, lc.DocumentCurrency);
                     var candidates = AllocationEnumCandidates.TryGetValue(cost.AllocationBy, out var names) ? names : Array.Empty<string>();
                     if (TrySetInteropEnum(line, typeof(LandedCost_CostLine), "AllocationBy", typeof(LandedCostAllocationByEnum), candidates) is null
                         && allocationWarned.Add(cost.AllocationBy))
