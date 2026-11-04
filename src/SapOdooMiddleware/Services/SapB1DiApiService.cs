@@ -7643,8 +7643,18 @@ ORDER BY PostingDate, DocumentNumber";
     private static readonly string[] CostAmountCandidates = { "Amount", "LandedCostAmount", "CostAmount", "Price", "Total", "TotalAmount" };
     private static readonly string[] LandedCostBaseTypeCandidates = { "asLandedCost", "asLandedCosts", "asLandedCostDocument" };
 
+    // The SAPbobsCOM interop declares each document as an empty interface (e.g. LandedCost_CostLine) that inherits
+    // its members from another (ILandedCost_CostLine). Type.GetProperty / GetProperties on an interface do not
+    // return inherited interface members, so the lookups below walk the interface and every interface it inherits.
+    private static IEnumerable<Type> InteropTypeAndBases(Type interopType) =>
+        new[] { interopType }.Concat(interopType.GetInterfaces());
+
+    private static System.Reflection.PropertyInfo? FindInteropProperty(Type interopType, string name) =>
+        InteropTypeAndBases(interopType).Select(t => t.GetProperty(name)).FirstOrDefault(p => p is not null);
+
     private static string InteropMembers(Type interopType) =>
-        string.Join(", ", interopType.GetProperties().Select(p => p.Name).OrderBy(n => n));
+        string.Join(", ", InteropTypeAndBases(interopType).SelectMany(t => t.GetProperties())
+            .Select(p => p.Name).Distinct().OrderBy(n => n));
 
     private static string EnumMembers(Type enumType) => string.Join(", ", Enum.GetNames(enumType));
 
@@ -7657,7 +7667,7 @@ ORDER BY PostingDate, DocumentNumber";
     {
         foreach (var name in candidates)
         {
-            var prop = interopType.GetProperty(name);
+            var prop = FindInteropProperty(interopType, name);
             if (prop is null || !prop.CanWrite) continue;
             prop.SetValue(target, Convert.ChangeType(value, prop.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
             return name;
@@ -7671,7 +7681,7 @@ ORDER BY PostingDate, DocumentNumber";
     /// </summary>
     private static string? TrySetInteropEnum(object target, Type interopType, string propertyName, params string[] memberCandidates)
     {
-        var prop = interopType.GetProperty(propertyName);
+        var prop = FindInteropProperty(interopType, propertyName);
         if (prop is null || !prop.CanWrite || !prop.PropertyType.IsEnum) return null;
         foreach (var member in memberCandidates)
         {
