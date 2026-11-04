@@ -492,6 +492,16 @@ public interface ISapB1Service
     Task<LandedCostPushResult> CreateLandedCostAsync(LandedCostPushRequest request);
 
     /// <summary>
+    /// Creates a SAP A/P invoice <b>draft</b> (ODRF, object 18) for a container from the supplier invoice Odoo holds:
+    /// item lines based on the container's GRPO and priced as on the invoice, freight and display/marketing items as
+    /// additional expenses, posted today with the invoice date as document date and that date's exchange rate. Returns
+    /// the existing A/P invoice or open draft with the same supplier invoice number instead of creating another, and
+    /// removes the draft again when SAP's total differs from the invoice. <see cref="ApInvoiceGuardException"/> when
+    /// the lines or totals do not match.
+    /// </summary>
+    Task<ApInvoiceDraftResult> CreateApInvoiceDraftAsync(ApInvoiceDraftRequest request);
+
+    /// <summary>
     /// Finds the Incoming Payments applied to an AR Invoice via the RCT2 allocation
     /// lines (InvType 13). Returns every matching payment (DocEntry, DocNum, whether
     /// it is already cancelled), newest first.
