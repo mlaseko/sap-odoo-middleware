@@ -7658,36 +7658,75 @@ ORDER BY PostingDate, DocumentNumber";
 
     private static string EnumMembers(Type enumType) => string.Join(", ", Enum.GetNames(enumType));
 
+    // The project embeds the interop types (EmbedInteropTypes=true): the build holds only the SAPbobsCOM members the
+    // code names directly, so a member reached only by name (LandedCost_CostLine.Amount, AllocationBy) is absent
+    // from reflection even when the installed DI API has it. Those are set late-bound through IDispatch, as the
+    // inventory posting already does; DISP_E_UNKNOWNNAME means this DI API build really lacks the member.
+    private const int DispUnknownName = unchecked((int)0x80020006);
+
+    private static bool TrySetLateBound(object target, string name, object value)
+    {
+        try
+        {
+            target.GetType().InvokeMember(
+                name,
+                System.Reflection.BindingFlags.SetProperty,
+                binder: null,
+                target: target,
+                args: new[] { value is decimal d ? (double)d : value });
+            return true;
+        }
+        catch (COMException ex) when (ex.HResult == DispUnknownName)
+        {
+            return false;
+        }
+        catch (MissingMemberException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>
-    /// Sets the first property of <paramref name="interopType"/> found among <paramref name="candidates"/> on the
-    /// COM object (the RCW implements the interop interface, so reflection on that interface reaches the property).
-    /// Returns the name used, or null when none exists.
+    /// Sets the first of <paramref name="candidates"/> that the COM object has: through the interop type when the
+    /// build embeds the member, else late-bound. Returns the name used, or null when the DI API has none of them.
     /// </summary>
     private static string? TrySetInteropProperty(object target, Type interopType, object value, params string[] candidates)
     {
         foreach (var name in candidates)
         {
             var prop = FindInteropProperty(interopType, name);
-            if (prop is null || !prop.CanWrite) continue;
-            prop.SetValue(target, Convert.ChangeType(value, prop.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
-            return name;
+            if (prop is not null && prop.CanWrite)
+            {
+                prop.SetValue(target, Convert.ChangeType(value, prop.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
+                return name;
+            }
+            if (TrySetLateBound(target, name, value))
+                return name;
         }
         return null;
     }
 
     /// <summary>
-    /// Sets an enum-typed property to the first of <paramref name="memberCandidates"/> the enum defines. Returns the
-    /// member used, or null when the enum has none of them.
+    /// Sets an enum-typed property to the first of <paramref name="memberCandidates"/> that <paramref name="enumType"/>
+    /// defines: through the interop type when embedded, else late-bound with the member's number. Returns the member
+    /// used, or null when none applies.
     /// </summary>
-    private static string? TrySetInteropEnum(object target, Type interopType, string propertyName, params string[] memberCandidates)
+    private static string? TrySetInteropEnum(object target, Type interopType, string propertyName, Type enumType,
+        params string[] memberCandidates)
     {
         var prop = FindInteropProperty(interopType, propertyName);
-        if (prop is null || !prop.CanWrite || !prop.PropertyType.IsEnum) return null;
+        var targetEnum = prop is not null && prop.CanWrite && prop.PropertyType.IsEnum ? prop.PropertyType : enumType;
         foreach (var member in memberCandidates)
         {
-            if (!Enum.TryParse(prop.PropertyType, member, ignoreCase: true, out var parsed) || parsed is null) continue;
-            prop.SetValue(target, parsed);
-            return member;
+            if (!Enum.TryParse(targetEnum, member, ignoreCase: true, out var parsed) || parsed is null) continue;
+            if (prop is not null && prop.CanWrite && prop.PropertyType.IsEnum)
+            {
+                prop.SetValue(target, parsed);
+                return member;
+            }
+            if (TrySetLateBound(target, propertyName, Convert.ToInt32(parsed, System.Globalization.CultureInfo.InvariantCulture)))
+                return member;
+            return null;   // the property itself is missing: no other member name would help
         }
         return null;
     }
@@ -7784,10 +7823,11 @@ ORDER BY PostingDate, DocumentNumber";
                     {
                         throw new InvalidOperationException(
                             "This DI API build has no amount property on LandedCost_CostLine among " +
-                            $"{string.Join(", ", CostAmountCandidates)}. Its members: {InteropMembers(typeof(LandedCost_CostLine))}.");
+                            $"{string.Join(", ", CostAmountCandidates)} (tried through the interop and late-bound). " +
+                            $"Members embedded in this build: {InteropMembers(typeof(LandedCost_CostLine))}.");
                     }
                     var candidates = AllocationEnumCandidates.TryGetValue(cost.AllocationBy, out var names) ? names : Array.Empty<string>();
-                    if (TrySetInteropEnum(line, typeof(LandedCost_CostLine), "AllocationBy", candidates) is null
+                    if (TrySetInteropEnum(line, typeof(LandedCost_CostLine), "AllocationBy", typeof(LandedCostAllocationByEnum), candidates) is null
                         && allocationWarned.Add(cost.AllocationBy))
                     {
                         // SAP then applies the code's own allocation method (OALC); the document is still valid.
