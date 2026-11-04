@@ -7664,7 +7664,7 @@ ORDER BY PostingDate, DocumentNumber";
     // inventory posting already does; DISP_E_UNKNOWNNAME means this DI API build really lacks the member.
     private const int DispUnknownName = unchecked((int)0x80020006);
 
-    private static bool TrySetLateBound(object target, string name, object value)
+    private static bool TrySetComMember(object target, string name, object value)
     {
         try
         {
@@ -7700,7 +7700,7 @@ ORDER BY PostingDate, DocumentNumber";
                 prop.SetValue(target, Convert.ChangeType(value, prop.PropertyType, System.Globalization.CultureInfo.InvariantCulture));
                 return name;
             }
-            if (TrySetLateBound(target, name, value))
+            if (TrySetComMember(target, name, value))
                 return name;
         }
         return null;
@@ -7724,7 +7724,7 @@ ORDER BY PostingDate, DocumentNumber";
                 prop.SetValue(target, parsed);
                 return member;
             }
-            if (TrySetLateBound(target, propertyName, Convert.ToInt32(parsed, System.Globalization.CultureInfo.InvariantCulture)))
+            if (TrySetComMember(target, propertyName, Convert.ToInt32(parsed, System.Globalization.CultureInfo.InvariantCulture)))
                 return member;
             return null;   // the property itself is missing: no other member name would help
         }
