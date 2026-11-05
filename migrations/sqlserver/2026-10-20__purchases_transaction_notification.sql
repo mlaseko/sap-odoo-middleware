@@ -20,6 +20,14 @@
 --      U_ShipRef, the key that links it to its container order in Odoo. Adding one without it is
 --      refused with error 42100. Updates of existing receipts and cancellation documents are not checked.
 --      OPDN.U_ShipRef must exist before this script runs (POST /api/admin/setup-sap-udfs).
+--   h. (2026-11-05) Liqui Moly (CardCode S00001) Goods Receipt POs (20) and item A/P Invoices (18): a new
+--      document with an item line priced 0 is refused (error 42101) unless that line has a 100% discount,
+--      the way a free item is entered. Stops the zero-priced receipts of June 2026 (GRPO 54/56/58).
+--   i. (2026-11-05) Liqui Moly A/P Invoices (18): a new invoice without the supplier invoice number in
+--      Vendor Ref. No. (NumAtCard) is refused (error 42102).
+--
+-- BEFORE RE-RUNNING: this script ALTERs the whole procedure. If the live procedure was changed in SAP since
+-- the last run, copy those changes in here first (script it in SSMS: Modify on SBO_SP_TransactionNotification).
 --
 -- The object-15 delivery block is reproduced VERBATIM from the procedure as exported on 2026-10-20
 -- and is not modified. Run in SSMS against Molas_Lubes_LTD. Safe to re-run.
@@ -250,6 +258,58 @@ BEGIN
         BEGIN
             SET @error = 42100
             SET @error_message = N'Enter the container number in the ShipRef field before adding the goods receipt.'
+        END
+    END
+
+    --------------------------------------------------------------------------------------------------
+    --  Liqui Moly GRPO (20) / item A/P Invoice (18) — A: no zero price unless 100% discount (rule h)
+    --------------------------------------------------------------------------------------------------
+    IF @object_type = '20' AND @transaction_type = 'A' AND @error = 0
+    BEGIN
+        DECLARE @h20_line NVARCHAR(200) = NULL;
+        SELECT TOP 1 @h20_line = CAST(T1.[LineNum] + 1 AS NVARCHAR(10)) + N' (' + T1.[ItemCode] + N')'
+        FROM [dbo].[OPDN] T0 INNER JOIN [dbo].[PDN1] T1 ON T1.[DocEntry] = T0.[DocEntry]
+        WHERE T0.[DocEntry] = CAST(@list_of_cols_val_tab_del AS INT)
+          AND T0.[CardCode] = N'S00001' AND ISNULL(T0.[CANCELED], 'N') <> 'C'
+          AND ISNULL(T1.[PriceBefDi], 0) = 0 AND ISNULL(T1.[DiscPrcnt], 0) < 100
+        ORDER BY T1.[LineNum];
+        IF @h20_line IS NOT NULL
+        BEGIN
+            SET @error = 42101
+            SET @error_message = N'Line ' + @h20_line + N' has no price. Enter the invoice price, or a 100% discount for a free item.'
+        END
+    END
+
+    IF @object_type = '18' AND @transaction_type = 'A' AND @error = 0
+    BEGIN
+        DECLARE @h18_line NVARCHAR(200) = NULL;
+        SELECT TOP 1 @h18_line = CAST(T1.[LineNum] + 1 AS NVARCHAR(10)) + N' (' + T1.[ItemCode] + N')'
+        FROM [dbo].[OPCH] T0 INNER JOIN [dbo].[PCH1] T1 ON T1.[DocEntry] = T0.[DocEntry]
+        WHERE T0.[DocEntry] = CAST(@list_of_cols_val_tab_del AS INT)
+          AND T0.[CardCode] = N'S00001' AND T0.[DocType] = 'I' AND ISNULL(T0.[CANCELED], 'N') <> 'C'
+          AND ISNULL(T1.[PriceBefDi], 0) = 0 AND ISNULL(T1.[DiscPrcnt], 0) < 100
+        ORDER BY T1.[LineNum];
+        IF @h18_line IS NOT NULL
+        BEGIN
+            SET @error = 42101
+            SET @error_message = N'Line ' + @h18_line + N' has no price. Enter the invoice price, or a 100% discount for a free item.'
+        END
+    END
+
+    --------------------------------------------------------------------------------------------------
+    --  Liqui Moly A/P Invoice (18) — A: the supplier invoice number is required (rule i)
+    --------------------------------------------------------------------------------------------------
+    IF @object_type = '18' AND @transaction_type = 'A' AND @error = 0
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM [dbo].[OPCH] T0
+            WHERE T0.[DocEntry] = CAST(@list_of_cols_val_tab_del AS INT)
+              AND T0.[CardCode] = N'S00001' AND ISNULL(T0.[CANCELED], 'N') <> 'C'
+              AND LTRIM(RTRIM(ISNULL(T0.[NumAtCard], N''))) = N''
+        )
+        BEGIN
+            SET @error = 42102
+            SET @error_message = N'Enter the Liqui Moly invoice number in Vendor Ref. No. before adding the A/P invoice.'
         END
     END
 

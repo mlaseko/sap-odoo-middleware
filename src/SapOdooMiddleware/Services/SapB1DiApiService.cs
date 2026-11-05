@@ -7740,6 +7740,181 @@ ORDER BY PostingDate, DocumentNumber";
             $"a delta push cannot be based on the previous document. Members: {EnumMembers(enumType)}.");
     }
 
+    // ── A/P invoice draft from the Odoo container (phase A) ─────────────────────────────────────────────────────
+    // Members used (all named directly, so they are embedded): see docs/sap-di-api-interop-members.md.
+
+    private static string SqlText(string value) => (value ?? string.Empty).Trim().Replace("'", "''");
+
+    /// <summary>Open A/P invoice (OPCH) or open A/P invoice draft (ODRF, ObjType 18) with this supplier invoice number.</summary>
+    private (int DocEntry, int DocNum, double TotalFc, string Kind)? FindApInvoiceByNumber(string cardCode, string numAtCard)
+    {
+        string where = $"\"CardCode\" = '{SqlText(cardCode)}' AND \"NumAtCard\" = '{SqlText(numAtCard)}'";
+        var posted = QueryRows(
+            $"SELECT TOP 1 \"DocEntry\", \"DocNum\", \"DocTotalFC\" FROM OPCH WHERE {where} AND \"CANCELED\" = 'N' ORDER BY \"DocEntry\" DESC",
+            f => (Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value),
+                  Convert.ToDouble(f.Item("DocTotalFC").Value), "invoice"));
+        if (posted.Count > 0) return posted[0];
+        var draft = QueryRows(
+            $"SELECT TOP 1 \"DocEntry\", \"DocNum\", \"DocTotalFC\" FROM ODRF WHERE {where} AND \"ObjType\" = '18' AND \"DocStatus\" = 'O' ORDER BY \"DocEntry\" DESC",
+            f => (Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value),
+                  Convert.ToDouble(f.Item("DocTotalFC").Value), "draft"));
+        return draft.Count > 0 ? draft[0] : null;
+    }
+
+    private List<ApGrpoLine> ReadApGrpoLines(int docEntry) =>
+        QueryRows(
+            "SELECT \"LineNum\", \"ItemCode\", \"Quantity\", \"OpenQty\", \"Price\", \"DiscPrcnt\", \"LineStatus\" " +
+            $"FROM PDN1 WHERE \"DocEntry\" = {docEntry} ORDER BY \"LineNum\"",
+            f => new ApGrpoLine(
+                Convert.ToInt32(f.Item("LineNum").Value), FieldString(f, "ItemCode"),
+                Convert.ToDouble(f.Item("Quantity").Value), Convert.ToDouble(f.Item("OpenQty").Value),
+                Convert.ToDouble(f.Item("Price").Value), Convert.ToDouble(f.Item("DiscPrcnt").Value),
+                FieldString(f, "LineStatus")));
+
+    /// <summary>SAP's exchange rate (ORTT) of a currency on a date; null when none is entered for that date.</summary>
+    private double? ReadExchangeRate(string currency, DateTime date)
+    {
+        var rows = QueryRows(
+            $"SELECT \"Rate\" FROM ORTT WHERE \"Currency\" = '{SqlText(currency)}' AND \"RateDate\" = '{date:yyyyMMdd}'",
+            f => Convert.ToDouble(f.Item("Rate").Value));
+        return rows.Count > 0 && rows[0] > 0 ? rows[0] : null;
+    }
+
+    /// <inheritdoc/>
+    public async Task<ApInvoiceDraftResult> CreateApInvoiceDraftAsync(ApInvoiceDraftRequest request)
+    {
+        await _lock.WaitAsync();
+        try
+        {
+            EnsureConnected();
+            string cardCode = request.CardCode.Trim();
+            string numAtCard = request.InvoiceNumber.Trim();
+
+            // ── One A/P invoice per supplier invoice: an existing invoice or open draft is returned, never doubled ──
+            var existing = FindApInvoiceByNumber(cardCode, numAtCard);
+            if (existing is { } found)
+            {
+                _logger.LogInformation("A/P {Kind} for {CardCode} / {NumAtCard} already exists (DocEntry={DocEntry}) — returning it.",
+                    found.Kind, cardCode, numAtCard, found.DocEntry);
+                return new ApInvoiceDraftResult
+                {
+                    DocEntry = found.DocEntry, DocNum = found.DocNum, Kind = found.Kind, AlreadyExisted = true,
+                    DocTotalFc = found.TotalFc,
+                };
+            }
+
+            var grpo = ReadGrpoHeader(request.GrpoDocentry)
+                ?? throw new ApInvoiceGuardException("GRPO_NOT_FOUND", $"GRPO DocEntry {request.GrpoDocentry} does not exist in SAP.");
+            if (grpo.Cancelled)
+                throw new ApInvoiceGuardException("GRPO_CANCELLED", $"GRPO {grpo.DocNum} is cancelled.");
+            if (!string.Equals(grpo.CardCode, cardCode, StringComparison.OrdinalIgnoreCase))
+                throw new ApInvoiceGuardException("GRPO_SUPPLIER",
+                    $"GRPO {grpo.DocNum} belongs to {grpo.CardCode}, not {cardCode}.");
+
+            var plan = ApInvoiceDraftPlanning.Build(request, ReadApGrpoLines(request.GrpoDocentry));
+
+            // ── The exchange rate of the invoice date (decision of 5 Nov 2026) ──
+            string currency = request.Currency.Trim().ToUpperInvariant();
+            bool foreign = !string.Equals(currency, GetLocalCurrencyCode(), StringComparison.OrdinalIgnoreCase);
+            double rate = 1;
+            if (foreign)
+                rate = ReadExchangeRate(currency, request.InvoiceDate.Date)
+                    ?? throw new ApInvoiceGuardException("RATE_MISSING",
+                        $"SAP has no {currency} exchange rate for the invoice date {request.InvoiceDate:dd.MM.yyyy}. " +
+                        "Enter it in Administration ▸ Exchange Rates and Indexes, then press the button again.");
+
+            var postingDate = (request.PostingDate ?? DateTime.Today).Date;
+            var doc = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDrafts);
+            try
+            {
+                doc.DocObjectCode = BoObjectTypes.oPurchaseInvoices;
+                doc.CardCode = cardCode;
+                doc.DocCurrency = currency;
+                if (foreign) doc.DocRate = rate;
+                doc.NumAtCard = ClipForSap(numAtCard, 100);
+                doc.DocDate = postingDate;
+                doc.TaxDate = request.InvoiceDate.Date;
+                doc.DocDueDate = (request.DueDate ?? postingDate).Date;
+                doc.Comments = ClipForSap(
+                    string.IsNullOrWhiteSpace(request.Remarks)
+                        ? $"Odoo {request.OdooShipmentId}: supplier invoice {numAtCard} of {request.InvoiceDate:dd.MM.yyyy}"
+                        : request.Remarks.Trim(), 254);
+
+                for (int i = 0; i < plan.ItemLines.Count; i++)
+                {
+                    if (i > 0) doc.Lines.Add();
+                    var line = plan.ItemLines[i];
+                    doc.Lines.BaseType = (int)BoObjectTypes.oPurchaseDeliveryNotes;   // 20, the GRPO
+                    doc.Lines.BaseEntry = request.GrpoDocentry;
+                    doc.Lines.BaseLine = line.BaseLine;
+                    doc.Lines.UnitPrice = line.UnitPrice;
+                    doc.Lines.DiscountPercent = line.DiscountPercent;
+                }
+
+                int expenseRows = 0;
+                if (plan.Freight > 0)
+                {
+                    doc.Expenses.ExpenseCode = request.FreightExpenseCode!.Value;
+                    doc.Expenses.LineTotalFC = (double)plan.Freight;
+                    expenseRows++;
+                }
+                if (plan.MarketingTotal > 0)
+                {
+                    if (expenseRows > 0) doc.Expenses.Add();
+                    doc.Expenses.ExpenseCode = request.MarketingExpenseCode!.Value;
+                    doc.Expenses.LineTotalFC = (double)plan.MarketingTotal;
+                }
+
+                if (doc.Add() != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException($"SAP DI API error {errCode} adding the A/P invoice draft: {errMsg}");
+                }
+                int draftEntry = int.Parse(_company.GetNewObjectKey());
+
+                var saved = QueryRows(
+                    $"SELECT \"DocNum\", \"DocTotalFC\", \"DocTotal\" FROM ODRF WHERE \"DocEntry\" = {draftEntry}",
+                    f => (Convert.ToInt32(f.Item("DocNum").Value), Convert.ToDouble(f.Item("DocTotalFC").Value),
+                          Convert.ToDouble(f.Item("DocTotal").Value))).Single();
+                double sapTotal = foreign ? saved.Item2 : saved.Item3;
+
+                // ── The draft must equal the supplier invoice; otherwise it is removed and nothing stays in SAP ──
+                if (Math.Abs(sapTotal - (double)plan.ExpectedTotal) > request.Tolerance)
+                {
+                    string removed = doc.GetByKey(draftEntry) && doc.Remove() == 0 ? "removed" : "NOT removed (delete it in SAP)";
+                    throw new ApInvoiceGuardException("DRAFT_TOTAL_MISMATCH",
+                        $"SAP computed {sapTotal:0.00} {currency} for the draft but the invoice is {plan.ExpectedTotal:0.00} " +
+                        $"(VAT or a price on the GRPO lines?); draft {draftEntry} {removed}.");
+                }
+
+                _logger.LogInformation(
+                    "A/P invoice draft created: DocEntry={DocEntry}, {CardCode}/{NumAtCard}, GRPO {Grpo}, {Lines} lines, freight {Freight}, " +
+                    "display {Marketing}, total {Total} {Currency} at rate {Rate}",
+                    draftEntry, cardCode, numAtCard, request.GrpoDocentry, plan.ItemLines.Count, plan.Freight, plan.MarketingTotal,
+                    sapTotal, currency, rate);
+
+                return new ApInvoiceDraftResult
+                {
+                    DocEntry = draftEntry, DocNum = saved.Item1, Kind = "draft", DocTotalFc = sapTotal,
+                    ExpectedTotalFc = (double)plan.ExpectedTotal, DocRate = rate, ItemLines = plan.ItemLines.Count,
+                    FreightFc = (double)plan.Freight, MarketingFc = (double)plan.MarketingTotal, Notes = plan.Notes.ToList(),
+                };
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException($"SAP DI API error adding the A/P invoice draft: {ex.Message}", ex);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(doc);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async Task<LandedCostPushResult> CreateLandedCostAsync(LandedCostPushRequest request)
     {
         await _lock.WaitAsync();
