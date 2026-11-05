@@ -18,6 +18,12 @@ public class SapInvoiceResponse
     public string ExternalInvoiceId { get; set; } = string.Empty;
 
     /// <summary>
+    /// SAP invoice total including VAT (OINV.DocTotal, local currency) as SAP computed it. Odoo compares it with
+    /// its own invoice total and flags a difference (Nov 2026). Null when not read.
+    /// </summary>
+    public double? DocTotal { get; set; }
+
+    /// <summary>
     /// SAP Delivery Note DocEntry that this invoice was copied from (if applicable).
     /// </summary>
     public int? BaseDeliveryDocEntry { get; set; }
