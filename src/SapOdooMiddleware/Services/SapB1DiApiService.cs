@@ -1739,6 +1739,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         // Retrieve the created invoice to get DocNum and line-level data
         invoice.GetByKey(invoiceDocEntry);
         int invoiceDocNum = invoice.DocNum;
+        double invoiceDocTotal = invoice.DocTotal;   // total check in Odoo (Nov 2026)
 
         var lineResponses = ReadInvoiceLines(invoice);
 
@@ -1762,6 +1763,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             ExternalInvoiceId = request.ExternalInvoiceId,
             BaseDeliveryDocEntry = deliveryDocEntry,
             BaseSalesOrderDocEntry = baseSoDocEntry,
+            DocTotal = invoiceDocTotal,
             Lines = lineResponses
         };
     }
@@ -2037,6 +2039,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
 
         invoice.GetByKey(invoiceDocEntry);
         int invoiceDocNum = invoice.DocNum;
+        double invoiceDocTotal = invoice.DocTotal;   // total check in Odoo (Nov 2026)
 
         var lineResponses = ReadInvoiceLines(invoice);
 
@@ -2056,6 +2059,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             DocNum = invoiceDocNum,
             ExternalInvoiceId = request.ExternalInvoiceId,
             BaseSalesOrderDocEntry = request.SapSalesOrderDocEntry,
+            DocTotal = invoiceDocTotal,
             Lines = lineResponses,
             Warnings = warnings,
         };
@@ -2495,6 +2499,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
             }
 
             int docNum = invoice.DocNum;
+            double docTotal = invoice.DocTotal;
 
             // Refresh UDFs
             TrySetUserField(invoice.UserFields, "U_Odoo_Invoice_ID", request.ExternalInvoiceId, "Invoice update");
@@ -2528,6 +2533,7 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 DocEntry = docEntry,
                 DocNum = docNum,
                 ExternalInvoiceId = request.ExternalInvoiceId,
+                DocTotal = docTotal,
                 Lines = lineResponses
             };
         }
