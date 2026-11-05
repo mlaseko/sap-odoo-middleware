@@ -142,8 +142,8 @@ Only the members relevant to purchasing were listed.
 | Member | Type |
 |---|---|
 | **ExpenseCode** | Int32 — OEXD.ExpnsCode |
-| LineTotal | Double — local currency |
-| **LineTotalFC** | Double — document currency |
+| **LineTotal** | Double — local currency; the one to set (amount FC × DocRate) |
+| LineTotalFC | Double — document currency, **read-only** on our build (CS0200, 5 Nov 2026): set `LineTotal` in local currency instead |
 | LineTotalSys | Double |
 | DistributionMethod | BoAdEpnsDistribMethods |
 | VatGroup / TaxCode | String |

@@ -7743,6 +7743,11 @@ ORDER BY PostingDate, DocumentNumber";
     // ── A/P invoice draft from the Odoo container (phase A) ─────────────────────────────────────────────────────
     // Members used (all named directly, so they are embedded): see docs/sap-di-api-interop-members.md.
 
+    // DocumentsAdditionalExpenses.LineTotalFC is read-only on our DI API build (CS0200): the expense is set in local
+    // currency (invoice amount x the document rate) and SAP derives the FC amount. The DocTotalFC check after Add
+    // removes the draft if SAP's FC total differs from the invoice.
+    private static double ExpenseInLocal(decimal amountFc, double rate) => Math.Round((double)amountFc * rate, 2);
+
     private static string SqlText(string value) => (value ?? string.Empty).Trim().Replace("'", "''");
 
     /// <summary>Open A/P invoice (OPCH) or open A/P invoice draft (ODRF, ObjType 18) with this supplier invoice number.</summary>
@@ -7751,15 +7756,18 @@ ORDER BY PostingDate, DocumentNumber";
         string where = $"\"CardCode\" = '{SqlText(cardCode)}' AND \"NumAtCard\" = '{SqlText(numAtCard)}'";
         var posted = QueryRows(
             $"SELECT TOP 1 \"DocEntry\", \"DocNum\", \"DocTotalFC\" FROM OPCH WHERE {where} AND \"CANCELED\" = 'N' ORDER BY \"DocEntry\" DESC",
-            f => (Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value),
-                  Convert.ToDouble(f.Item("DocTotalFC").Value), "invoice"));
+            f => ApInvoiceRow(f, "invoice"));
         if (posted.Count > 0) return posted[0];
         var draft = QueryRows(
             $"SELECT TOP 1 \"DocEntry\", \"DocNum\", \"DocTotalFC\" FROM ODRF WHERE {where} AND \"ObjType\" = '18' AND \"DocStatus\" = 'O' ORDER BY \"DocEntry\" DESC",
-            f => (Convert.ToInt32(f.Item("DocEntry").Value), Convert.ToInt32(f.Item("DocNum").Value),
-                  Convert.ToDouble(f.Item("DocTotalFC").Value), "draft"));
+            f => ApInvoiceRow(f, "draft"));
         return draft.Count > 0 ? draft[0] : null;
     }
+
+    // Fields.Item(..).Value is dynamic; cast through object so the tuple is statically typed (CS0266 otherwise).
+    private static (int DocEntry, int DocNum, double TotalFc, string Kind) ApInvoiceRow(Fields f, string kind) =>
+        (Convert.ToInt32((object)f.Item("DocEntry").Value), Convert.ToInt32((object)f.Item("DocNum").Value),
+         Convert.ToDouble((object)f.Item("DocTotalFC").Value), kind);
 
     private List<ApGrpoLine> ReadApGrpoLines(int docEntry) =>
         QueryRows(
@@ -7855,14 +7863,14 @@ ORDER BY PostingDate, DocumentNumber";
                 if (plan.Freight > 0)
                 {
                     doc.Expenses.ExpenseCode = request.FreightExpenseCode!.Value;
-                    doc.Expenses.LineTotalFC = (double)plan.Freight;
+                    doc.Expenses.LineTotal = ExpenseInLocal(plan.Freight, rate);
                     expenseRows++;
                 }
                 if (plan.MarketingTotal > 0)
                 {
                     if (expenseRows > 0) doc.Expenses.Add();
                     doc.Expenses.ExpenseCode = request.MarketingExpenseCode!.Value;
-                    doc.Expenses.LineTotalFC = (double)plan.MarketingTotal;
+                    doc.Expenses.LineTotal = ExpenseInLocal(plan.MarketingTotal, rate);
                 }
 
                 if (doc.Add() != 0)
