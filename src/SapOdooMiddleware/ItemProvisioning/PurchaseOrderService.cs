@@ -34,6 +34,7 @@ public class PurchaseOrderService
     private readonly IStagingDocumentRepository _docs;
     private readonly IStagingDocumentLineRepository _lines;
     private readonly ISapB1Service _sap;
+    private readonly IOdooFinalInvoiceGateway _odoo;
     private readonly PurchaseOrderSettings _settings;
     private readonly ILogger<PurchaseOrderService> _logger;
 
@@ -41,12 +42,14 @@ public class PurchaseOrderService
         IStagingDocumentRepository docs,
         IStagingDocumentLineRepository lines,
         ISapB1Service sap,
+        IOdooFinalInvoiceGateway odoo,
         IOptions<PurchaseOrderSettings> settings,
         ILogger<PurchaseOrderService> logger)
     {
         _docs = docs;
         _lines = lines;
         _sap = sap;
+        _odoo = odoo;
         _settings = settings.Value;
         _logger = logger;
     }
@@ -144,13 +147,22 @@ public class PurchaseOrderService
                     AlreadyExists: true);
         }
 
+        // Phase B: the final invoice goes into its Odoo container order first; the PO carries the link it returns.
+        var link = await WriteFinalInvoiceToOdooAsync(doc, ct);
+        if (link is { Ok: false })
+            return new PoPostResult(false, null, null, $"Odoo did not take the invoice: {link.Error}");
+
         var req = new SapPurchaseOrderRequest
         {
             CardCode = vendor.CardCode,
             Currency = doc.Currency,
             NumAtCard = numAtCard,
-            Comments = BuildComments(doc),
+            Comments = BuildComments(doc, link?.OrderName, link?.ContainerNo),
             DocDate = DateTime.Today,
+            TaxDate = doc.InvoiceDate?.Date,
+            UseTaxDateRate = doc.InvoiceDate.HasValue,
+            ShipRef = link?.ContainerNo,
+            OdooShipmentId = link?.OrderName,
             Lines = clean.Select(l => new SapPurchaseOrderLineRequest
             {
                 ItemCode = l.ItemCode.Trim(),
@@ -176,6 +188,59 @@ public class PurchaseOrderService
         }
     }
 
-    private static string? BuildComments(StagingDocumentRow doc) =>
-        string.IsNullOrWhiteSpace(doc.SalesOrder) ? null : $"SO: {doc.SalesOrder}";
+    /// <summary>
+    /// <c>supplier.order.dgx_apply_final_invoice</c> for the invoice's sales order. Null when switched off or the
+    /// invoice names no sales order (nothing to link); otherwise Odoo's answer, refusals included.
+    /// </summary>
+    private async Task<OdooFinalInvoiceResult?> WriteFinalInvoiceToOdooAsync(StagingDocumentRow doc, CancellationToken ct)
+    {
+        if (!_settings.WriteFinalInvoiceToOdoo || string.IsNullOrWhiteSpace(doc.SalesOrder))
+            return null;
+        var lines = await _lines.ListByDocumentAsync(doc.Id, ct);
+        var payload = OdooFinalInvoiceGateway.BuildPayload(doc, lines, ReadPdf(doc));
+        try
+        {
+            var res = await _odoo.ApplyAsync(payload);
+            _logger.LogInformation(
+                "Final invoice {Invoice} of document {DocId} → Odoo order {Order}: ok={Ok}, container={Container}, changes={Changes}, error={Error}",
+                doc.InvoiceNumber, doc.Id, res.OrderName, res.Ok, res.ContainerNo, res.Changes.Count, res.Error);
+            return res;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Writing the final invoice of document {DocId} to Odoo failed.", doc.Id);
+            return new OdooFinalInvoiceResult(false, $"Odoo could not be reached ({ex.Message}). Try again.", null, null,
+                null, [], false);
+        }
+    }
+
+    private string? ReadPdf(StagingDocumentRow doc)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(doc.FilePath) || !File.Exists(doc.FilePath))
+                return null;
+            var info = new FileInfo(doc.FilePath);
+            if (info.Length > _settings.MaxPdfBytesToOdoo)
+                return null;
+            return Convert.ToBase64String(File.ReadAllBytes(doc.FilePath));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Invoice PDF of document {DocId} not sent to Odoo.", doc.Id);
+            return null;
+        }
+    }
+
+    /// <summary>OPOR.Comments: "Odoo A12423202 · container CMAU0247119 · SO: A12423202" (SAP allows 254 characters).</summary>
+    public static string? BuildComments(StagingDocumentRow doc, string? odooOrder = null, string? containerNo = null)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(odooOrder)) parts.Add($"Odoo {odooOrder.Trim()}");
+        if (!string.IsNullOrWhiteSpace(containerNo)) parts.Add($"container {containerNo.Trim()}");
+        if (!string.IsNullOrWhiteSpace(doc.SalesOrder)) parts.Add($"SO: {doc.SalesOrder.Trim()}");
+        if (parts.Count == 0) return null;
+        var text = string.Join(" · ", parts);
+        return text.Length <= 254 ? text : text[..254];
+    }
 }

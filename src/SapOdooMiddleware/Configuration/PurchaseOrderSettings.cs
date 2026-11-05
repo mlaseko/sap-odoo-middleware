@@ -12,6 +12,15 @@ public class PurchaseOrderSettings
     public string DefaultWarehouse { get; set; } = "MainWHSE";
 
     /// <summary>
+    /// Phase B (5 Nov 2026): before the PO is posted, write the final invoice into its Odoo container order
+    /// (<c>supplier.order.dgx_apply_final_invoice</c>). A refusal stops the PO.
+    /// </summary>
+    public bool WriteFinalInvoiceToOdoo { get; set; } = true;
+
+    /// <summary>Invoice PDFs larger than this are not attached to the Odoo order.</summary>
+    public long MaxPdfBytesToOdoo { get; set; } = 15 * 1024 * 1024;
+
+    /// <summary>
     /// Invoice-supplier → SAP vendor BP mappings. The invoice's <c>Supplier</c> is matched
     /// case-insensitively against <see cref="VendorMapping.Match"/> (substring). For Lubes there is a
     /// single vendor (Liqui Moly → S00001); Meguin products invoice under the same vendor.

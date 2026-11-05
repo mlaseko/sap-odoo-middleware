@@ -202,6 +202,7 @@ builder.Services.AddHostedService<InvoiceExtractionWorker>();
 builder.Services.AddScoped<InvoiceAutoMatchJob>();
 builder.Services.AddScoped<InvoiceItemCreationService>();
 builder.Services.Configure<PurchaseOrderSettings>(builder.Configuration.GetSection(PurchaseOrderSettings.SectionName));
+builder.Services.AddScoped<IOdooFinalInvoiceGateway, OdooFinalInvoiceGateway>();
 builder.Services.AddScoped<PurchaseOrderService>();
 builder.Services.AddSingleton<IDocumentAutoMatchQueue, DocumentAutoMatchQueue>();
 builder.Services.AddHostedService<InvoiceAutoMatchWorker>();
