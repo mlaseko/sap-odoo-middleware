@@ -210,6 +210,8 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
         ("OITM", "Odoo_Product_ID", "Odoo Product ID", 0, 20),
 
         // Purchases sync (docs/molas_purchases_integration_spec.md §4.1)
+        ("OPOR", "ShipRef", "Container number (copied to the GRPO)", 0, 50),
+        ("OPOR", "OdooShipmentId", "Odoo container order reference", 0, 30),
         ("OPDN", "ShipRef", "Container number (links GRPO to container order)", 0, 50),
         ("OPDN", "OdooShipmentId", "Odoo container order reference", 0, 30),
         ("OIPF", "OdooShipmentId", "Odoo container order reference (idempotency)", 0, 30),
@@ -4818,6 +4820,20 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
     // ================================
 
     /// <inheritdoc/>
+    /// <summary>Sets an OPOR UDF when a value is given; a missing UDF is logged, never blocks the PO.</summary>
+    private void SetPoUdf(Documents po, string udf, string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        try
+        {
+            po.UserFields.Fields.Item(udf).Value = ClipForSap(value.Trim(), maxLength);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "OPOR.{Udf} not set (run POST /api/admin/setup-sap-udfs): {Value}", udf, value);
+        }
+    }
+
     public async Task<SapPurchaseOrderResponse> CreatePurchaseOrderAsync(SapPurchaseOrderRequest request)
     {
         await _lock.WaitAsync();
@@ -4837,6 +4853,23 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                     po.Comments = request.Comments;
                 po.DocDate    = request.DocDate ?? DateTime.Today;
                 po.DocDueDate = request.DocDate ?? DateTime.Today;
+                if (request.TaxDate.HasValue)
+                    po.TaxDate = request.TaxDate.Value.Date;
+
+                // Phase B (5 Nov 2026): the PO, like the A/P invoice, uses SAP's rate of the invoice date.
+                if (request.UseTaxDateRate && request.TaxDate.HasValue && !string.IsNullOrWhiteSpace(request.Currency)
+                    && !string.Equals(request.Currency.Trim(), GetLocalCurrencyCode(), StringComparison.OrdinalIgnoreCase))
+                {
+                    var rate = ReadExchangeRate(request.Currency.Trim().ToUpperInvariant(), request.TaxDate.Value.Date)
+                        ?? throw new InvalidOperationException(
+                            $"SAP has no {request.Currency} exchange rate for the invoice date {request.TaxDate.Value:dd.MM.yyyy}. " +
+                            "Enter it in Administration ▸ Exchange Rates and Indexes, then post the PO again.");
+                    po.DocRate = rate;
+                }
+
+                // Container link (OPOR UDFs from POST /api/admin/setup-sap-udfs); Copy To brings them to the GRPO.
+                SetPoUdf(po, "U_ShipRef", request.ShipRef, 50);
+                SetPoUdf(po, "U_OdooShipmentId", request.OdooShipmentId, 30);
 
                 for (int i = 0; i < request.Lines.Count; i++)
                 {

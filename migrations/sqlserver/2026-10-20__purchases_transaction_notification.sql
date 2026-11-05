@@ -25,6 +25,9 @@
 --      the way a free item is entered. Stops the zero-priced receipts of June 2026 (GRPO 54/56/58).
 --   i. (2026-11-05) Liqui Moly A/P Invoices (18): a new invoice without the supplier invoice number in
 --      Vendor Ref. No. (NumAtCard) is refused (error 42102).
+--   j. (2026-11-05, phase B) Liqui Moly Goods Receipt POs (20): a new receipt with an item line that is not copied
+--      from a purchase order (PDN1.BaseType <> 22) is refused (error 42103). Copy To from the PO brings the invoice
+--      prices and the container number (OPOR.U_ShipRef) to the GRPO.
 --
 -- BEFORE RE-RUNNING: this script ALTERs the whole procedure. If the live procedure was changed in SAP since
 -- the last run, copy those changes in here first (script it in SSMS: Modify on SBO_SP_TransactionNotification).
@@ -258,6 +261,25 @@ BEGIN
         BEGIN
             SET @error = 42100
             SET @error_message = N'Enter the container number in the ShipRef field before adding the goods receipt.'
+        END
+    END
+
+    --------------------------------------------------------------------------------------------------
+    --  Liqui Moly GRPO (20) — A: every item line copied from a purchase order (rule j)
+    --------------------------------------------------------------------------------------------------
+    IF @object_type = '20' AND @transaction_type = 'A' AND @error = 0
+    BEGIN
+        DECLARE @j20_line NVARCHAR(200) = NULL;
+        SELECT TOP 1 @j20_line = CAST(T1.[LineNum] + 1 AS NVARCHAR(10)) + N' (' + T1.[ItemCode] + N')'
+        FROM [dbo].[OPDN] T0 INNER JOIN [dbo].[PDN1] T1 ON T1.[DocEntry] = T0.[DocEntry]
+        WHERE T0.[DocEntry] = CAST(@list_of_cols_val_tab_del AS INT)
+          AND T0.[CardCode] = N'S00001' AND T0.[DocType] = 'I' AND ISNULL(T0.[CANCELED], 'N') <> 'C'
+          AND ISNULL(T1.[BaseType], -1) <> 22
+        ORDER BY T1.[LineNum];
+        IF @j20_line IS NOT NULL
+        BEGIN
+            SET @error = 42103
+            SET @error_message = N'Line ' + @j20_line + N' is not from the purchase order. Create the goods receipt with Copy To from the PO.'
         END
     END
 

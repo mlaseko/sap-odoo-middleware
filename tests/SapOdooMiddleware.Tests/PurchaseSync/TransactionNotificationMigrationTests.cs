@@ -30,16 +30,32 @@ public class TransactionNotificationMigrationTests
     }
 
     [Fact]
-    public void Migration_SetsErrorOnlyInTheLegacyBlockAndTheGrpoShipRefCheck()
+    public void Migration_SetsErrorOnlyInTheLegacyBlockAndThePurchaseChecks()
     {
         var sql = LoadMigration();
         var matches = Regex.Matches(sql, @"SET\s+@error\s*=\s*(\d+)", RegexOptions.IgnoreCase);
-        // the legacy 42090 one inside /* ... */, and the container-number check on a new GRPO (rule g)
-        Assert.Equal(2, matches.Count);
         int commentStart = sql.IndexOf("/*", StringComparison.Ordinal);
         int commentEnd = sql.IndexOf("*/", StringComparison.Ordinal);
+        // the legacy 42090 one inside /* ... */ ...
         Assert.InRange(matches[0].Index, commentStart, commentEnd);
-        Assert.Equal("42100", matches[1].Groups[1].Value);
+        // ... then only the purchase checks: g container number (42100), j GRPO copied from a PO (42103),
+        // h zero price unless free on GRPO and A/P invoice (42101 twice), i vendor reference (42102)
+        var codes = matches.Skip(1).Select(m => m.Groups[1].Value).ToList();
+        Assert.Equal(new[] { "42100", "42103", "42101", "42101", "42102" }, codes);
+        // the queue blocks never set @error: every check comes before the first queue block
+        int firstQueue = sql.IndexOf("IF @object_type = '20' AND @transaction_type IN ('A', 'U') AND @error = 0", StringComparison.Ordinal);
+        Assert.All(matches.Skip(1), m => Assert.True(m.Index < firstQueue));
+    }
+
+    [Fact]
+    public void Migration_RefusesALiquiMolyGrpoLineNotCopiedFromAPurchaseOrder()
+    {
+        var sql = LoadMigration();
+        Assert.Contains("ISNULL(T1.[BaseType], -1) <> 22", sql);
+        int rule = sql.IndexOf("SET @error = 42103", StringComparison.Ordinal);
+        int block = sql.LastIndexOf("IF @object_type = '20' AND @transaction_type = 'A' AND @error = 0", rule, StringComparison.Ordinal);
+        Assert.True(block > 0 && block < rule);
+        Assert.Contains("T0.[CardCode] = N'S00001'", sql.Substring(block, rule - block));
     }
 
     [Fact]

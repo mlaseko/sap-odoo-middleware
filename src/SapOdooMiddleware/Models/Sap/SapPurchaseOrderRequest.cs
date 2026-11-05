@@ -25,6 +25,21 @@ public class SapPurchaseOrderRequest
     /// <summary>Posting date; defaults to today when null.</summary>
     public DateTime? DocDate { get; set; }
 
+    /// <summary>Document date (<c>OPOR.TaxDate</c>): the supplier invoice date (phase B, 5 Nov 2026).</summary>
+    public DateTime? TaxDate { get; set; }
+
+    /// <summary>
+    /// When true and the currency is foreign, <c>DocRate</c> is SAP's rate of <see cref="TaxDate"/> (the invoice
+    /// date, decision of 5 Nov 2026); the PO is refused when SAP has no rate for that date.
+    /// </summary>
+    public bool UseTaxDateRate { get; set; }
+
+    /// <summary>Container number → <c>OPOR.U_ShipRef</c>; copied to the GRPO by Copy To.</summary>
+    public string? ShipRef { get; set; }
+
+    /// <summary>Odoo container order reference → <c>OPOR.U_OdooShipmentId</c>.</summary>
+    public string? OdooShipmentId { get; set; }
+
     [Required]
     [MinLength(1)]
     public List<SapPurchaseOrderLineRequest> Lines { get; set; } = [];
