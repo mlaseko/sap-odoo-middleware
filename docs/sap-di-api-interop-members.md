@@ -142,8 +142,8 @@ Only the members relevant to purchasing were listed.
 | Member | Type |
 |---|---|
 | **ExpenseCode** | Int32 — OEXD.ExpnsCode |
-| **LineTotal** | Double — local currency; the one to set (amount FC × DocRate) |
-| LineTotalFC | Double — document currency, **read-only** on our build (CS0200, 5 Nov 2026): set `LineTotal` in local currency instead |
+| **LineTotal** | Double — the one to set. On a foreign-currency document SAP reads it in the **document currency** (pilot 5 Nov 2026), so give the invoice amount as it is |
+| LineTotalFC | Double — document currency, **read-only** on our build (CS0200, 5 Nov 2026): set `LineTotal` instead |
 | LineTotalSys | Double |
 | DistributionMethod | BoAdEpnsDistribMethods |
 | VatGroup / TaxCode | String |
