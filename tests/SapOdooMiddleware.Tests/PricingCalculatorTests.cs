@@ -6,6 +6,33 @@ public class PricingCalculatorTests
 {
     private readonly PricingCalculator _calc = new();
 
+    // Live SAP OITB groups (Nov 2026) for LIQUI MOLY products: each must price on an existing band.
+    [Theory]
+    [InlineData(104, "Service")]
+    [InlineData(105, "Engine Oils")]
+    [InlineData(107, "Gear Oils & Transmission Fluids")]
+    [InlineData(109, "Additives")]
+    [InlineData(111, "Vehicle Care")]
+    [InlineData(112, "Workshop Pro-Line")]
+    [InlineData(117, "Greases")]
+    [InlineData(118, "Oils (Industrial/Other Fluids)")]
+    [InlineData(119, "Pastes")]
+    [InlineData(120, "Service")]
+    [InlineData(121, "Adhesives & Sealants")]
+    public void TryPricingBandForSapGroup_LiveGroupsHaveAnExistingBand(int group, string band)
+    {
+        Assert.Equal(band, _calc.TryPricingBandForSapGroup(group));
+        Assert.Equal(band, _calc.ResolvePricingCategory(band));
+        Assert.True(_calc.ComputeNetPrices(10000m, band).Retail > 0m);
+    }
+
+    [Theory]
+    [InlineData(106)]
+    [InlineData(108)]
+    [InlineData(110)]
+    public void TryPricingBandForSapGroup_GroupsWithoutABandFallBack(int group)
+        => Assert.Null(_calc.TryPricingBandForSapGroup(group));
+
     [Fact]
     public void ComputeNetPrices_Additives_12324_matches_reference_spreadsheet_row()
     {

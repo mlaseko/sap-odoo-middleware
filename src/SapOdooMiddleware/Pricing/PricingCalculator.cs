@@ -485,8 +485,14 @@ public class PricingCalculator : IPricingCalculator
         [109] = "Additives",                       // Additives
         [111] = "Vehicle Care",                    // Vehicle Care
         [112] = "Workshop Pro-Line",               // Workshop Pro-Line
-        // 106 Commercial vehicles, 108 Branding Materials, 110 Motor Bike: no dedicated pricing band yet
-        // -> caller falls back to category-based resolution. Add here when their bands are decided.
+        [117] = "Greases",                         // Greases
+        [118] = "Oils (Industrial/Other Fluids)",  // Oils (Industrial/Other Fluids)
+        [119] = "Pastes",                          // Pastes
+        [120] = "Service",                         // Service Products (same band as 104)
+        [121] = "Adhesives & Sealants",            // Adhesives & Sealants
+        // 106 Commercial vehicles/Construction and mining equipment, 108 Branding Materials, 110 Motor Bike:
+        // no dedicated pricing band yet -> caller falls back to category-based resolution. Add here when
+        // their bands are decided. Live OITB (Nov 2026): 104-112, 117-121.
     };
 
     public string? TryPricingBandForSapGroup(int sapGroupCode)

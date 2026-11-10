@@ -78,17 +78,21 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
     // Layer 1: deterministic SAP-family overrides for product patterns we know with certainty and where
     // DGX has shown blind spots (e.g. it confidently calls coolant "Additives"). Matched against the LM
     // product name BEFORE calling DGX; first match wins, DGX is skipped.
-    // NOTE: the group codes below must match the live SAP OITB item-group codes — verify before deploy.
+    // NOTE: the group codes below must match the live SAP OITB item-group codes (checked Nov 2026:
+    // 104-112, 117-121).
     private static readonly (Regex Pattern, int Code, string Name, string Rule)[] FamilyOverrides =
     {
+        // Coolant and brake fluid are LIQUI MOLY "Service Products" (their Odoo category is
+        // lm_cat_service_products__*): SAP group 120 Service Products, priced on the same "Service" band as 104.
         (new Regex(@"\b(coolant|antifreeze|kfs)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
-            104, "Repair aids/service products", "name matches coolant/antifreeze"),
+            120, "Service Products", "name matches coolant/antifreeze"),
         (new Regex(@"\bbrake fluid\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
-            104, "Repair aids/service products", "name matches brake fluid"),
+            120, "Service Products", "name matches brake fluid"),
         (new Regex(@"^\s*pro-?line\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
             112, "Workshop Pro-Line", "name starts with Pro-Line"),
-        (new Regex(@"\b(motorbike|motorcycle|4t bike)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
-            110, "Motor Bike", "name matches motorbike/motorcycle"),
+        // No motorbike -> 110 "Motor Bike" rule: Motorbike is a LIQUI MOLY *area of use*, not a product group.
+        // Motorbike oils / additives / care take their product group's SAP group (105 / 109 / 111) like the
+        // rest of the catalogue, matching the Odoo tree (Engine Oils / Motorbike engine oils, ...).
     };
 
     private static (int Code, string Name, string Rule)? MatchFamilyOverride(string? productName)
@@ -169,6 +173,9 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             ? $"{code}-{lm.Name}."
             : $"{code}-{lm.Name}. {lm.Description}";
         var hint = lm.Category;
+        // The Odoo-category hint adds the scraped sub-category (and Workshop Pro-Line for Pro-Line names):
+        // the bare family ("Additives") steered DGX to the catch-all sub-category.
+        var categoryHint = LubesCategoryRules.BuildCategoryHint(lm.Category, lm.SubCategory, lm.Name);
 
         // 3) Odoo category — precedence: (a) reviewer manual override always wins; (b) Layer 1 deterministic
         //    overrides for 1:1 patterns (coolant, brake fluid) skip DGX; (c) otherwise DGX /classify.
@@ -177,8 +184,13 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         if (!string.IsNullOrWhiteSpace(req.OdooCategoryOverrideExternalId)
             && !string.IsNullOrWhiteSpace(req.OdooCategoryOverrideName))
         {
-            // Manual override is NOT taxonomy-validated by design: the operator picked it from the live UI
-            // dropdown, so re-validating would only add friction. Validation runs on accept-category only.
+            // Manual override is not checked against the taxonomy bundle (the operator picked it from the live
+            // UI dropdown), but it must be a precise LIQUI MOLY sub-category: the dropdown also lists family
+            // nodes and catch-alls, which Odoo would then apply to the product.
+            var overrideProblem = LubesCategoryRules.CategoryProblem(req.OdooCategoryOverrideExternalId);
+            if (overrideProblem is not null)
+                return new LubesProvisioningResult("needs_review", code,
+                    ReviewReason: $"Picked Odoo category not accepted: {overrideProblem}.");
             catResult = new CategoryClassification
             {
                 ExternalId  = req.OdooCategoryOverrideExternalId,
@@ -203,7 +215,7 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         }
         else
         {
-            try { catResult = await _classifier.ClassifyCategoryAsync(description, hint, ct); }
+            try { catResult = await _classifier.ClassifyCategoryAsync(description, categoryHint, ct); }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Classifier (/classify) failed for {Code}", code);
@@ -242,6 +254,21 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                     code, lm.Name, _taxonomy.FullPathFor(catResult.ExternalId) ?? catResult.Name, catResult.ExternalId, catResult.Confidence);
             }
         }
+
+        // 3b) Whatever DGX or a Layer-1 rule returned must be a precise LIQUI MOLY sub-category; a family node
+        //     or catch-all goes to review with DGX's candidates so the reviewer picks the precise one.
+        var categoryIsManual = !string.IsNullOrWhiteSpace(req.OdooCategoryOverrideExternalId)
+                               && !string.IsNullOrWhiteSpace(req.OdooCategoryOverrideName);
+        var categoryProblem = LubesCategoryRules.CategoryProblem(catResult.ExternalId);
+        if (categoryProblem is not null)
+            return new LubesProvisioningResult("needs_review", code,
+                OdooCategoryName: catResult.Name,
+                OdooCategoryExternalId: catResult.ExternalId,
+                ReviewReason: $"Odoo category not accepted: {categoryProblem}. Pick the precise sub-category.",
+                Candidates: catResult.Candidates);
+        _logger.LogInformation("Odoo category for {Code} '{Name}': {Cat} ({Id}) @ {Conf:F2} [{Source}]",
+            code, lm.Name, catResult.Name, catResult.ExternalId, catResult.Confidence,
+            categoryIsManual ? "manual pick" : catOverride is not null ? "layer1 rule" : "dgx");
 
         // 4) SAP family — three layers:
         //    Layer 1: deterministic business-rule overrides for known DGX blind spots (run BEFORE DGX,
@@ -298,6 +325,23 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                     "at confidence {Conf:F2} (>= {Min:F2}). Spot-check this classification.",
                     code, lm.Name, famResult.GroupCode, famResult.GroupName, famResult.Confidence, MinFamilyConfidence);
             }
+        }
+
+        // 4b) The SAP item group and the Odoo category family must agree (e.g. a Pro-Line item forced into
+        //     group 112 must not get an Additives category). DGX / rule results that disagree go to review;
+        //     a reviewer's explicit pick is kept with a WARN, as the review screen cannot change the group.
+        var mismatch = LubesCategoryRules.GroupMismatch(catResult.ExternalId, famResult.GroupCode);
+        if (mismatch is not null)
+        {
+            if (!categoryIsManual)
+                return new LubesProvisioningResult("needs_review", code,
+                    OdooCategoryName: catResult.Name,
+                    OdooCategoryExternalId: catResult.ExternalId,
+                    SapItemGroupCode: famResult.GroupCode,
+                    SapItemGroupName: famResult.GroupName,
+                    ReviewReason: $"{mismatch}. Pick the Odoo category that matches the item group.",
+                    Candidates: catResult.Candidates);
+            _logger.LogWarning("Category/group mismatch ACCEPTED on reviewer pick for {Code}: {Mismatch}", code, mismatch);
         }
 
         // 5) Pricing — keyed off the AUTHORITATIVE SAP/OITB group (famResult.GroupCode), not the noisy
@@ -424,7 +468,11 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
                 SapStatus: "created",
                 FamilyConfidence: (decimal)familyConfidence,
                 FamilyNeedsReview: familyNeedsReview,
-                FamilyOverrideReason: familyOverrideReason
+                FamilyOverrideReason: familyOverrideReason,
+                // Recovery (item already in SAP): keep the category Neon already holds, which may have been
+                // corrected since; a re-classification must not silently replace it. A reviewer's explicit
+                // pick still wins.
+                KeepExistingCategory: status == "recovered" && !categoryIsManual
             ), ct);
 
             await _productRepo.UpsertPricesAsync(
