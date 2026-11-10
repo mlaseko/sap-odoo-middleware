@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using Microsoft.Extensions.Caching.Memory;
 using SapOdooMiddleware.Integrations.Classifier;
+using SapOdooMiddleware.ItemProvisioning;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Pricing;
 using SapOdooMiddleware.Services;
@@ -93,6 +94,22 @@ public class IndexModel : PageModel
                     string.Equals(c.FullPath, path, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(c.Name, path, StringComparison.OrdinalIgnoreCase))?.ExternalId;
 
+            // A typed category must resolve to a precise LIQUI MOLY sub-category before anything is written:
+            // an unresolved path used to leave the OLD external id in Neon (COALESCE), which Odoo's
+            // "Backfill Categories" then re-applied.
+            if (path is not null)
+            {
+                if (extId is null)
+                    throw new InvalidOperationException(
+                        $"Odoo category '{path}' is not in the category list"
+                        + (_taxonomy.IsLoaded ? "" : " (the Odoo taxonomy bundle is not loaded)")
+                        + ". Pick it from the list; nothing was changed.");
+                var problem = LubesCategoryRules.CategoryProblem(extId);
+                if (problem is not null)
+                    throw new InvalidOperationException($"Odoo category not accepted: {problem}. Nothing was changed.");
+            }
+            var mismatch = LubesCategoryRules.GroupMismatch(extId, groupCode);
+
             // 1. SAP (authoritative for the pricing band).
             await _sap.SetItemClassificationAsync(LookedUpItem, groupCode, path, ct);
 
@@ -109,7 +126,8 @@ public class IndexModel : PageModel
 
             Message = $"✅ {LookedUpItem} reclassified to SAP group {groupCode} ({groupName}). "
                       + string.Join(" ", notes)
-                      + " If the pricing band changed, run a reprice preview to update the prices.";
+                      + " If the pricing band changed, run a reprice preview to update the prices."
+                      + (mismatch is null ? "" : $" ⚠ {mismatch}: check the group and the category.");
         }
         catch (Exception ex)
         {

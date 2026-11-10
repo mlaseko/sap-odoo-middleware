@@ -17,7 +17,9 @@ public record NeonProductWrite(
     // Layer 3 SAP-family classification audit trail.
     decimal? FamilyConfidence = null,
     bool?    FamilyNeedsReview = null,
-    string?  FamilyOverrideReason = null);
+    string?  FamilyOverrideReason = null,
+    // Keep a category already stored on the row (recovery of an existing item) instead of overwriting it.
+    bool KeepExistingCategory = false);
 
 public record NeonProductForBackref(string ItemCode, string OdooProductId);
 
@@ -131,8 +133,12 @@ public class NeonProductRepository : INeonProductRepository
                 "ItemName"               = EXCLUDED."ItemName",
                 "ItemGroupCode"          = EXCLUDED."ItemGroupCode",
                 "ItemGroupName"          = EXCLUDED."ItemGroupName",
-                "OdooCategoryExternalId" = EXCLUDED."OdooCategoryExternalId",
-                "OdooCategoryName"       = EXCLUDED."OdooCategoryName",
+                "OdooCategoryExternalId" = CASE WHEN @KeepCategory AND "NeonProducts"."OdooCategoryExternalId" IS NOT NULL
+                                                THEN "NeonProducts"."OdooCategoryExternalId"
+                                                ELSE EXCLUDED."OdooCategoryExternalId" END,
+                "OdooCategoryName"       = CASE WHEN @KeepCategory AND "NeonProducts"."OdooCategoryExternalId" IS NOT NULL
+                                                THEN "NeonProducts"."OdooCategoryName"
+                                                ELSE EXCLUDED."OdooCategoryName" END,
                 "ListPrice"              = EXCLUDED."ListPrice",
                 "SapStatus"              = EXCLUDED."SapStatus",
                 "SapErrorMsg"            = EXCLUDED."SapErrorMsg",
@@ -156,6 +162,7 @@ public class NeonProductRepository : INeonProductRepository
         cmd.Parameters.AddWithValue("FamilyConfidence", (object?)write.FamilyConfidence ?? DBNull.Value);
         cmd.Parameters.AddWithValue("FamilyNeedsReview", (object?)write.FamilyNeedsReview ?? DBNull.Value);
         cmd.Parameters.AddWithValue("FamilyOverrideReason", (object?)write.FamilyOverrideReason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("KeepCategory", write.KeepExistingCategory);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

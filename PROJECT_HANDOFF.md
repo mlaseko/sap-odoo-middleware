@@ -122,10 +122,21 @@ and scrapes product detail.
 1. **Ensure LM/Meguin row** (scrape on demand; warns if `ScrapedAt` > `StaleScrapeWarningDays`).
 2. **Odoo category** (precedence): **(a)** manual override `OdooCategoryOverride*` → **(b)** Layer-1
    deterministic overrides (coolant, brake fluid → fixed Odoo leaf) → **(c)** DGX `/classify` with the
-   `lm.Category` hint. Low confidence → `needs_review` unless `AcceptLowConfidenceCategory`.
+   hint from `LubesCategoryRules.BuildCategoryHint` (scraped family **+ sub-category**; "Workshop Pro-Line"
+   for Pro-Line names). Low confidence → `needs_review` unless `AcceptLowConfidenceCategory`.
+   **Every** category (DGX, Layer-1 or manual pick) must be a precise LIQUI MOLY sub-category
+   (`__import__.lm_cat_<family>__<sub>`; never a family node or the `<family>__<family>` catch-all), else
+   `needs_review` (`LubesCategoryRules.CategoryProblem`). Odoo's internal category is the master: Odoo copies
+   `NeonProducts.OdooCategoryExternalId` onto the product ("Backfill Categories").
 3. **SAP family/group** (precedence): **Layer-1 name overrides** (coolant/antifreeze/KFS→**104**,
    brake fluid→**104**, Pro-Line→**112**, motorbike→**110**) → else DGX `/classify_family`; accept
    `needs_review` at **≥ `MinFamilyConfidence` (0.70)** with a WARN (Layer 2).
+   **Category ↔ group cross-check** (`LubesCategoryRules.AllowedGroupsByFamily`, e.g. Workshop Pro-Line ↔ 112,
+   Additives ↔ 109/110): a DGX/Layer-1 result that disagrees goes to `needs_review`; a reviewer's manual
+   category pick is kept with a WARN. Keep the table in step with the live OITB groups.
+   On **recovery** (item already in SAP) the Neon row keeps the category it already holds (unless the
+   reviewer picked one), so a retry never replaces a corrected category. Pricing **Reclassify** refuses a
+   category it cannot resolve to a precise sub-category instead of leaving the old external id in Neon.
 3. **Pricing** keyed off the **SAP/OITB group** (`PricingCalculator.TryPricingBandForSapGroup`), *not* the
    Odoo category (so siblings price the same). Bands: 104→Service, 105→Engine Oils, 107→Gear Oils, etc.
    (104/107 collapse multiple bands — accepted). EUR→TZS via `Pricing:EurTzsRate`.
