@@ -90,8 +90,9 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
             120, "Service Products", "name matches brake fluid"),
         (new Regex(@"^\s*pro-?line\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
             112, "Workshop Pro-Line", "name starts with Pro-Line"),
-        (new Regex(@"\b(motorbike|motorcycle|4t bike)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
-            110, "Motor Bike", "name matches motorbike/motorcycle"),
+        // No motorbike -> 110 "Motor Bike" rule: Motorbike is a LIQUI MOLY *area of use*, not a product group.
+        // Motorbike oils / additives / care take their product group's SAP group (105 / 109 / 111) like the
+        // rest of the catalogue, matching the Odoo tree (Engine Oils / Motorbike engine oils, ...).
     };
 
     private static (int Code, string Name, string Rule)? MatchFamilyOverride(string? productName)

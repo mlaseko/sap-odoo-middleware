@@ -16,17 +16,17 @@ public static class LubesCategoryRules
 
     /// <summary>
     /// SAP item groups (OITB.ItmsGrpCod) an item of each LIQUI MOLY family may be in. A family not listed
-    /// here (e.g. accessories, marine) is not cross-checked. 110 "Motor Bike" is allowed for the families
-    /// motorbike products live in (engine oils, additives, vehicle care), as the Layer-1 rule assigns it;
-    /// 106 "Commercial vehicles" for engine oils. Keep this in step with the live OITB groups.
+    /// here (e.g. accessories) is not cross-checked. 106 "Commercial vehicles" is allowed for engine oils.
+    /// 110 "Motor Bike" is not allowed anywhere: Motorbike (like Marine) is a LIQUI MOLY area of use, so its
+    /// products take their product group's SAP group. Keep this in step with the live OITB groups.
     /// </summary>
     public static readonly IReadOnlyDictionary<string, int[]> AllowedGroupsByFamily = new Dictionary<string, int[]>
     {
-        ["engine_oils"]                    = new[] { 105, 106, 110 },
+        ["engine_oils"]                    = new[] { 105, 106 },
         ["gear_oils_transmission_fluids"]  = new[] { 107 },
         ["greases"]                        = new[] { 107, 117 },
-        ["additives"]                      = new[] { 109, 110 },
-        ["vehicle_care"]                   = new[] { 111, 110 },
+        ["additives"]                      = new[] { 109 },
+        ["vehicle_care"]                   = new[] { 111 },
         ["workshop_pro_line"]              = new[] { 112 },
         ["oils_industrial_other_fluids"]   = new[] { 118 },
         ["pastes"]                         = new[] { 119 },

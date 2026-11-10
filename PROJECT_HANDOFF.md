@@ -129,10 +129,11 @@ and scrapes product detail.
    `needs_review` (`LubesCategoryRules.CategoryProblem`). Odoo's internal category is the master: Odoo copies
    `NeonProducts.OdooCategoryExternalId` onto the product ("Backfill Categories").
 3. **SAP family/group** (precedence): **Layer-1 name overrides** (coolant/antifreeze/KFS→**120**,
-   brake fluid→**120** "Service Products", Pro-Line→**112**, motorbike→**110**) → else DGX `/classify_family`; accept
+   brake fluid→**120** "Service Products", Pro-Line→**112**; no motorbike→110 rule: Motorbike and Marine are
+   LIQUI MOLY *areas of use*, so their items take their product group's group, 105/109/111) → else DGX `/classify_family`; accept
    `needs_review` at **≥ `MinFamilyConfidence` (0.70)** with a WARN (Layer 2).
    **Category ↔ group cross-check** (`LubesCategoryRules.AllowedGroupsByFamily`, e.g. Workshop Pro-Line ↔ 112,
-   Additives ↔ 109/110): a DGX/Layer-1 result that disagrees goes to `needs_review`; a reviewer's manual
+   Additives ↔ 109; 110 Motor Bike is not accepted): a DGX/Layer-1 result that disagrees goes to `needs_review`; a reviewer's manual
    category pick is kept with a WARN. Keep the table in step with the live OITB groups.
    On **recovery** (item already in SAP) the Neon row keeps the category it already holds (unless the
    reviewer picked one), so a retry never replaces a corrected category. Pricing **Reclassify** refuses a

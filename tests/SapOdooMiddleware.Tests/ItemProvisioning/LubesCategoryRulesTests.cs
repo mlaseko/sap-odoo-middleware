@@ -42,7 +42,8 @@ public class LubesCategoryRulesTests
     [InlineData("__import__.lm_cat_service_products__coolant_antifreeze", 120)]  // Layer-1 coolant rule
     [InlineData("__import__.lm_cat_service_products__coolant_antifreeze", 104)]  // older items in 104
     [InlineData("__import__.lm_cat_service_products__brake_fluid", 120)]
-    [InlineData("__import__.lm_cat_engine_oils__motorbike_engine_oils", 110)]  // Layer-1 motorbike rule
+    [InlineData("__import__.lm_cat_engine_oils__motorbike_engine_oils", 105)]  // motorbike oils: Engine Oils group
+    [InlineData("__import__.lm_cat_engine_oils__marine_engine_oils", 105)]
     [InlineData("__import__.lm_cat_engine_oils__commercial_vehicle_engine_oils", 106)]
     [InlineData("__import__.lm_cat_greases__multi_purpose_grease", 107)]
     [InlineData("__import__.lm_cat_greases__multi_purpose_grease", 117)]
@@ -55,6 +56,8 @@ public class LubesCategoryRulesTests
     [InlineData("__import__.lm_cat_additives__diesel_fuel_additives", 112)]   // Pro-Line item with an Additives category
     [InlineData("__import__.lm_cat_gear_oils_transmission_fluids__gear_oils", 117)]
     [InlineData("__import__.lm_cat_vehicle_care__interior_care", 109)]
+    [InlineData("__import__.lm_cat_engine_oils__motorbike_engine_oils", 110)]  // 110 Motor Bike no longer accepted
+    [InlineData("__import__.lm_cat_vehicle_care__motorbike_care", 110)]
     public void GroupMismatch_ReportedWhenTheyDisagree(string externalId, int group)
     {
         var mismatch = LubesCategoryRules.GroupMismatch(externalId, group);
