@@ -78,13 +78,16 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
     // Layer 1: deterministic SAP-family overrides for product patterns we know with certainty and where
     // DGX has shown blind spots (e.g. it confidently calls coolant "Additives"). Matched against the LM
     // product name BEFORE calling DGX; first match wins, DGX is skipped.
-    // NOTE: the group codes below must match the live SAP OITB item-group codes — verify before deploy.
+    // NOTE: the group codes below must match the live SAP OITB item-group codes (checked Nov 2026:
+    // 104-112, 117-121).
     private static readonly (Regex Pattern, int Code, string Name, string Rule)[] FamilyOverrides =
     {
+        // Coolant and brake fluid are LIQUI MOLY "Service Products" (their Odoo category is
+        // lm_cat_service_products__*): SAP group 120 Service Products, priced on the same "Service" band as 104.
         (new Regex(@"\b(coolant|antifreeze|kfs)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
-            104, "Repair aids/service products", "name matches coolant/antifreeze"),
+            120, "Service Products", "name matches coolant/antifreeze"),
         (new Regex(@"\bbrake fluid\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
-            104, "Repair aids/service products", "name matches brake fluid"),
+            120, "Service Products", "name matches brake fluid"),
         (new Regex(@"^\s*pro-?line\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
             112, "Workshop Pro-Line", "name starts with Pro-Line"),
         (new Regex(@"\b(motorbike|motorcycle|4t bike)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),

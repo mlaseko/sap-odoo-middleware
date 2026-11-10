@@ -39,7 +39,8 @@ public class LubesCategoryRulesTests
 
     [Theory]
     [InlineData("__import__.lm_cat_workshop_pro_line__diesel_fuel_additives", 112)]
-    [InlineData("__import__.lm_cat_service_products__coolant_antifreeze", 104)]  // Layer-1 coolant rule
+    [InlineData("__import__.lm_cat_service_products__coolant_antifreeze", 120)]  // Layer-1 coolant rule
+    [InlineData("__import__.lm_cat_service_products__coolant_antifreeze", 104)]  // older items in 104
     [InlineData("__import__.lm_cat_service_products__brake_fluid", 120)]
     [InlineData("__import__.lm_cat_engine_oils__motorbike_engine_oils", 110)]  // Layer-1 motorbike rule
     [InlineData("__import__.lm_cat_engine_oils__commercial_vehicle_engine_oils", 106)]
