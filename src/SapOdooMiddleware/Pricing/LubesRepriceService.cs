@@ -1,10 +1,16 @@
+using Microsoft.Extensions.Options;
+using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Services;
 
 namespace SapOdooMiddleware.Pricing;
 
-/// <summary>One item in a bulk reprice request (EurCost null = use the stored cost).</summary>
-public record RepriceItemInput(string ItemCode, decimal? EurCost);
+/// <summary>
+/// One item in a bulk reprice request (EurCost null = use the stored cost). <paramref name="ExpectedNet"/>
+/// pins the net prices the reviewer saw in the preview: when set, the item is skipped if the
+/// prices computed at apply time differ (rate or ratios changed in between).
+/// </summary>
+public record RepriceItemInput(string ItemCode, decimal? EurCost, Dictionary<int, decimal>? ExpectedNet = null);
 
 /// <summary>Preview of one item's reprice: current state, inputs, new prices, deltas.</summary>
 public record RepricePreviewLine(
@@ -60,9 +66,14 @@ public interface ILubesRepriceService
     /// input stamps, audit log, and best-effort Odoo push. Follows the existing
     /// pricing workflow exactly — the only caller-supplied change is the EUR cost.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="expectedNet"/> (price list 1-4 → net) are the prices the reviewer approved in
+    /// the preview. When given and the prices computed now differ (the EUR→TZS rate or a ratio was
+    /// changed between preview and confirm), nothing is posted and the caller must re-preview.
+    /// </remarks>
     Task<RepriceApplyResult> ApplyAsync(
         string itemCode, decimal? eurCost, decimal? rateOverride,
-        string mode, string? note, CancellationToken ct);
+        string mode, string? note, IReadOnlyDictionary<int, decimal>? expectedNet, CancellationToken ct);
 }
 
 public class LubesRepriceService : ILubesRepriceService
@@ -76,6 +87,7 @@ public class LubesRepriceService : ILubesRepriceService
     private readonly IPricingCalculator _calc;
     private readonly ISapB1Service _sap;
     private readonly IOdooService _odoo;
+    private readonly PricingSettings _settings;
     private readonly ILogger<LubesRepriceService> _logger;
 
     public LubesRepriceService(
@@ -85,8 +97,10 @@ public class LubesRepriceService : ILubesRepriceService
         IPricingCalculator calc,
         ISapB1Service sap,
         IOdooService odoo,
+        IOptions<PricingSettings> settings,
         ILogger<LubesRepriceService> logger)
     {
+        _settings = settings.Value;
         _neon = neon;
         _pricingRepo = pricingRepo;
         _stagingLines = stagingLines;
@@ -139,30 +153,12 @@ public class LubesRepriceService : ILubesRepriceService
             }
         }
 
-        // Category — same resolution as provisioning: SAP group first, Odoo category fallback.
-        string? category = null, categoryPath;
-        if (snapshot.ItemGroupCode is int grp
-            && _calc.TryPricingBandForSapGroup(grp) is string band)
-        {
-            category = band;
-            categoryPath = $"SAP group {grp} ({snapshot.ItemGroupName ?? "?"}) → band '{band}' (authoritative)";
-        }
-        else if (!string.IsNullOrWhiteSpace(snapshot.OdooCategoryName))
-        {
-            try
-            {
-                category = _calc.ResolvePricingCategory(snapshot.OdooCategoryName);
-                categoryPath = $"Odoo category '{snapshot.OdooCategoryName}' → band '{category}' (fallback)";
-            }
-            catch (InvalidOperationException ex)
-            {
-                categoryPath = ex.Message;
-            }
-        }
-        else
-        {
-            categoryPath = "No SAP group band and no Odoo category — cannot resolve a pricing band.";
-        }
+        // Category — same rule as provisioning: SAP group first (Odoo-category-aware for the shared
+        // group 107), Odoo category fallback.
+        var resolution = _calc.ResolveBandForItem(
+            snapshot.ItemGroupCode, snapshot.ItemGroupName, snapshot.OdooCategoryName, snapshot.OdooCategoryExternalId);
+        string? category = resolution.Band;
+        string categoryPath = resolution.Path;
 
         string? error = null;
         if (eur is null)
@@ -177,7 +173,25 @@ public class LubesRepriceService : ILubesRepriceService
 
         if (error is null)
         {
-            trace = _calc.ComputeNetPricesWithTrace(eur!.Value * rate, category!);
+            var cif = eur!.Value * rate;
+            trace = _calc.ComputeNetPricesWithTrace(cif, category!);
+            if (trace.HasNonPositivePrice)
+            {
+                error = $"The cost {cif:N0} TZS is too small for the pricing formula: it gives a zero or negative "
+                        + "price. Check the EUR cost.";
+            }
+        }
+
+        if (error is null && trace is not null)
+        {
+            var cif = trace.CifCostTzs;
+            if (trace.BandResolution != "converged")
+                warnings.Add($"Band choice: {trace.BandResolution}.");
+            if (trace.MonotonicFloorApplied && trace.FloorNote is not null)
+                warnings.Add(trace.FloorNote);
+            if (trace.CapNote is not null)
+                categoryPath += " · " + trace.CapNote;
+
             newNet = new Dictionary<int, decimal>
             {
                 [1] = Math.Round(trace.Net.Retail, 2),
@@ -207,6 +221,7 @@ public class LubesRepriceService : ILubesRepriceService
                     deltas[pl] = null;   // no stored price to compare against
                 }
             }
+            warnings.AddRange(MarginWarnings(newNet, cif, _settings.MarginWarnPct));
         }
 
         return new RepricePreviewLine(
@@ -215,6 +230,24 @@ public class LubesRepriceService : ILubesRepriceService
             category, categoryPath,
             snapshot.StoredNetPrices, newNet, newInclVat, deltas, warnings,
             includeTrace ? trace : null);
+    }
+
+    private static readonly string[] TierNames = { "", "Retail", "Dealer", "Super Dealer", "Maasai" };
+
+    /// <summary>Warn-only margin check: net price per price list against the TZS cost.</summary>
+    internal static IEnumerable<string> MarginWarnings(
+        IReadOnlyDictionary<int, decimal> net, decimal cifTzs, decimal warnPct)
+    {
+        if (cifTzs <= 0m) yield break;
+        foreach (var (pl, price) in net.OrderBy(kv => kv.Key))
+        {
+            var margin = Math.Round((price - cifTzs) / cifTzs * 100m, 1);
+            if (price < cifTzs)
+                yield return $"PL{pl} {TierNames[pl]} net {price:N0} is BELOW the cost {cifTzs:N0} TZS ({margin:0.#}%).";
+            else if (margin < warnPct)
+                yield return $"PL{pl} {TierNames[pl]} margin is only {margin:0.#}% over the cost {cifTzs:N0} TZS "
+                             + $"(warning threshold {warnPct:0.#}%).";
+        }
     }
 
     public async Task<(decimal? ImpliedEur, RepricePreviewLine Preview)> PreviewFromTargetAsync(
@@ -247,9 +280,10 @@ public class LubesRepriceService : ILubesRepriceService
             };
         }
 
-        // Every tier is a monotonic non-decreasing step function of CIF (ratios < 1
-        // ⇒ price > cif, so the target itself bounds the search from above; widen
-        // defensively in case of exotic ratio overrides).
+        // Every tier is a non-decreasing step function of CIF (the calculator's no-drop floor
+        // guarantees it), so binary search finds the lowest cost that reaches the target. Ratios < 1
+        // ⇒ price > cif, so the target itself bounds the search from above; widen defensively in
+        // case of exotic ratio overrides.
         decimal lo = 0.01m, hi = targetInclVat;
         for (int i = 0; i < 6 && TierOf(hi) < targetInclVat; i++) hi *= 2m;
         if (TierOf(hi) < targetInclVat)
@@ -284,7 +318,7 @@ public class LubesRepriceService : ILubesRepriceService
 
     public async Task<RepriceApplyResult> ApplyAsync(
         string itemCode, decimal? eurCost, decimal? rateOverride,
-        string mode, string? note, CancellationToken ct)
+        string mode, string? note, IReadOnlyDictionary<int, decimal>? expectedNet, CancellationToken ct)
     {
         var preview = await PreviewAsync(itemCode, eurCost, rateOverride, includeTrace: false, ct);
         if (!preview.CanApply)
@@ -292,6 +326,11 @@ public class LubesRepriceService : ILubesRepriceService
                 preview.Error ?? "Preview did not produce prices to apply.");
 
         var n = preview.NewNet!;
+
+        if (PreviewMismatch(expectedNet, n) is string changed)
+            return new RepriceApplyResult(preview, false, new(),
+                $"Prices changed since the preview ({changed}) — the EUR→TZS rate or a pricing ratio was "
+                + "updated in between. Nothing was posted; preview again and confirm the new prices.");
 
         // 1. SAP — all four lists in one Items.Update (0-based indexes).
         await _sap.SetPriceListPricesAsync(itemCode, new Dictionary<int, decimal>
@@ -334,5 +373,19 @@ public class LubesRepriceService : ILubesRepriceService
             itemCode, mode, preview.EurCost, preview.Rate, n[1], n[2], n[3], n[4]);
 
         return new RepriceApplyResult(preview, true, odooNotes, null);
+    }
+
+    /// <summary>Describes how the prices computed now differ from the approved ones, or null if they match.</summary>
+    internal static string? PreviewMismatch(
+        IReadOnlyDictionary<int, decimal>? expectedNet, IReadOnlyDictionary<int, decimal> actualNet)
+    {
+        if (expectedNet is null || expectedNet.Count == 0) return null;
+        var diffs = new List<string>();
+        foreach (var (pl, expected) in expectedNet.OrderBy(kv => kv.Key))
+        {
+            if (!actualNet.TryGetValue(pl, out var actual) || Math.Abs(actual - expected) > 0.01m)
+                diffs.Add($"PL{pl} {expected:N0} → {(actualNet.TryGetValue(pl, out var a) ? a.ToString("N0") : "none")}");
+        }
+        return diffs.Count == 0 ? null : string.Join(", ", diffs);
     }
 }

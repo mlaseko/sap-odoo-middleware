@@ -42,7 +42,9 @@ public record NeonPricingSnapshot(
     decimal? LastEurCost = null,
     /// <summary>The EUR→TZS rate used at the last pricing (null before first stamp).</summary>
     decimal? LastEurTzsRate = null,
-    DateTime? LastPricedAt = null);
+    DateTime? LastPricedAt = null,
+    /// <summary>The Odoo category's LIQUI MOLY external id (lm_cat_...), when stored.</summary>
+    string? OdooCategoryExternalId = null);
 
 public interface INeonProductRepository
 {
@@ -283,7 +285,8 @@ public class NeonProductRepository : INeonProductRepository
             SELECT "ItemName","ItemGroupCode","ItemGroupName","OdooCategoryName","SapStatus","SyncedAt",
                    (to_jsonb(p) ->> 'LastEurCost')::numeric,
                    (to_jsonb(p) ->> 'LastEurTzsRate')::numeric,
-                   (to_jsonb(p) ->> 'LastPricedAt')::timestamptz
+                   (to_jsonb(p) ->> 'LastPricedAt')::timestamptz,
+                   to_jsonb(p) ->> 'OdooCategoryExternalId'
             FROM public."NeonProducts" p
             WHERE "ItemCode" = @ItemCode
             LIMIT 1;
@@ -300,6 +303,7 @@ public class NeonProductRepository : INeonProductRepository
         int? groupCode = null;
         DateTime? syncedAt = null, lastPricedAt = null;
         decimal? lastEurCost = null, lastRate = null;
+        string? odooExtId = null;
         bool found = false;
 
         await using (var cmd = new NpgsqlCommand(productSql, conn))
@@ -318,6 +322,7 @@ public class NeonProductRepository : INeonProductRepository
                 lastEurCost  = r.IsDBNull(6) ? null : r.GetDecimal(6);
                 lastRate     = r.IsDBNull(7) ? null : r.GetDecimal(7);
                 lastPricedAt = r.IsDBNull(8) ? null : r.GetDateTime(8);
+                odooExtId    = r.IsDBNull(9) ? null : r.GetString(9);
             }
         }
         if (!found)
@@ -334,7 +339,7 @@ public class NeonProductRepository : INeonProductRepository
 
         return new NeonPricingSnapshot(
             itemCode, itemName, groupCode, groupName, category, sapStatus, syncedAt, prices,
-            lastEurCost, lastRate, lastPricedAt);
+            lastEurCost, lastRate, lastPricedAt, odooExtId);
     }
 
     public async Task UpdateClassificationAsync(

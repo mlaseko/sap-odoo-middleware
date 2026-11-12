@@ -351,7 +351,9 @@ public class LubesItemProvisioningService : ILubesItemProvisioningService
         string pricingCat;
         try
         {
-            var bandFromGroup = _pricing.TryPricingBandForSapGroup(famResult.GroupCode!.Value);
+            // Odoo-category-aware for shared groups: a grease classified into 107 prices as Greases.
+            var bandFromGroup = _pricing.TryPricingBandForSapGroup(
+                famResult.GroupCode!.Value, catResult.ExternalId ?? catResult.Name);
             if (bandFromGroup is not null)
             {
                 pricingCat = _pricing.ResolvePricingCategory(bandFromGroup);

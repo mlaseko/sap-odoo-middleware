@@ -18,6 +18,13 @@ public record PriceChangeEntry(
 /// <summary>Item eligible for a filter-based bulk reprice (has a stored EUR cost).</summary>
 public record RepriceCandidate(string ItemCode, decimal LastEurCost, int? ItemGroupCode);
 
+/// <summary>One Lubes item's pricing inputs and stored prices, for the formula impact report.</summary>
+public record PricingImpactSource(
+    string ItemCode, string? ItemName, int? ItemGroupCode, string? ItemGroupName,
+    string? OdooCategoryName, string? OdooCategoryExternalId,
+    decimal? LastEurCost, decimal? LastEurTzsRate,
+    Dictionary<int, decimal> StoredNetPrices);
+
 /// <summary>
 /// Lubes pricing operations state in Neon: the runtime-editable EUR→TZS rate,
 /// the price-change audit log, and the per-item pricing-input stamps on NeonProducts
@@ -41,6 +48,13 @@ public interface ILubesPricingRepository
     /// <summary>Items with a stored EUR cost, optionally filtered by SAP group code(s).</summary>
     Task<IReadOnlyList<RepriceCandidate>> GetRepriceCandidatesAsync(
         IReadOnlyCollection<int>? sapGroupCodes, CancellationToken ct);
+
+    /// <summary>
+    /// Every item with a stored EUR cost, plus every item in <paramref name="alsoGroups"/> (even without a
+    /// cost), with its classification and stored prices — one round trip, for the impact report.
+    /// </summary>
+    Task<IReadOnlyList<PricingImpactSource>> GetImpactSourcesAsync(
+        IReadOnlyCollection<int> alsoGroups, CancellationToken ct);
 
     // ── Ratio overrides (the runtime-editable calculator tables) ─────
 
@@ -364,6 +378,56 @@ public class LubesPricingRepository : ILubesPricingRepository
             _logger.LogWarning("Reprice candidates unavailable ({SqlState}). {Hint}", ex.SqlState, MigrationHint);
         }
         return list;
+    }
+
+    public async Task<IReadOnlyList<PricingImpactSource>> GetImpactSourcesAsync(
+        IReadOnlyCollection<int> alsoGroups, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT p."ItemCode", p."ItemName", p."ItemGroupCode", p."ItemGroupName", p."OdooCategoryName",
+                   to_jsonb(p) ->> 'OdooCategoryExternalId',
+                   p."LastEurCost", p."LastEurTzsRate",
+                   pl."PriceList", pl."Price"
+            FROM public."NeonProducts" p
+            LEFT JOIN public."NeonPriceLists" pl ON pl."ItemCode" = p."ItemCode"
+            WHERE COALESCE(p."LastEurCost", 0) > 0 OR p."ItemGroupCode" = ANY(@groups)
+            ORDER BY p."ItemCode", pl."PriceList";
+            """;
+
+        var rows = new List<PricingImpactSource>();
+        try
+        {
+            await using var conn = await OpenAsync(ct);
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("groups", alsoGroups.ToArray());
+            await using var r = await cmd.ExecuteReaderAsync(ct);
+            PricingImpactSource? current = null;
+            while (await r.ReadAsync(ct))
+            {
+                var code = r.GetString(0);
+                if (current is null || current.ItemCode != code)
+                {
+                    current = new PricingImpactSource(
+                        code,
+                        r.IsDBNull(1) ? null : r.GetString(1),
+                        r.IsDBNull(2) ? null : r.GetInt32(2),
+                        r.IsDBNull(3) ? null : r.GetString(3),
+                        r.IsDBNull(4) ? null : r.GetString(4),
+                        r.IsDBNull(5) ? null : r.GetString(5),
+                        r.IsDBNull(6) ? null : r.GetDecimal(6),
+                        r.IsDBNull(7) ? null : r.GetDecimal(7),
+                        new Dictionary<int, decimal>());
+                    rows.Add(current);
+                }
+                if (!r.IsDBNull(8) && !r.IsDBNull(9))
+                    current.StoredNetPrices[r.GetInt32(8)] = r.GetDecimal(9);
+            }
+        }
+        catch (PostgresException ex) when (IsMissingSchemaError(ex))
+        {
+            _logger.LogWarning("Impact report sources unavailable ({SqlState}). {Hint}", ex.SqlState, MigrationHint);
+        }
+        return rows;
     }
 
     // ── Ratio overrides ──────────────────────────────────────────────
