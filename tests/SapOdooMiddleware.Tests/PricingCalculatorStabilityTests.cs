@@ -85,6 +85,29 @@ public class PricingCalculatorStabilityTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(Categories))]
+    public void Band_600k_to_900k_ratios_sit_between_their_neighbours(string category)
+    {
+        var rows = _calc.GetRatioSnapshot().BandRatios.Where(r => r.Category == category).ToList();
+        var lo = rows.Single(r => r.Band == "350k to 600k");
+        var mid = rows.Single(r => r.Band == "600k to 900k");
+        var hi = rows.Single(r => r.Band == "1M and above");
+
+        Assert.InRange(mid.Sp, Math.Min(lo.Sp, hi.Sp), Math.Max(lo.Sp, hi.Sp));
+        Assert.InRange(mid.Dealer, Math.Min(lo.Dealer, hi.Dealer), Math.Max(lo.Dealer, hi.Dealer));
+        Assert.InRange(mid.Retail, Math.Min(lo.Retail, hi.Retail), Math.Max(lo.Retail, hi.Retail));
+    }
+
+    [Fact]
+    public void High_cost_items_are_no_longer_lifted_by_the_old_600k_spike()
+    {
+        // With the old 600k-900k row, Additives at 800,000 was floored up to Retail 2,395,000.
+        var t = _calc.ComputeNetPricesWithTrace(800_000m, "Additives");
+        Assert.False(t.MonotonicFloorApplied);
+        Assert.Equal(1_255_000m, t.RetailInclVat);
+    }
+
     [Fact]
     public void Tiny_cost_is_flagged_non_positive()
     {

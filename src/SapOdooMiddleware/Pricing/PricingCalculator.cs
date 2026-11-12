@@ -163,6 +163,11 @@ public class PricingCalculator : IPricingCalculator
     }
 
     // (sp, d, r) DEFAULT ratios (the ported HTML tool). Cost = price × ratio, so
+    // NOTE: the 600k-900k rows were corrected in Nov 2026. The original rows had far lower ratios
+    // (e.g. Additives SD 0.44 vs 0.69 below and 0.71 above), so prices spiked in that band and a
+    // higher cost could price ~50% lower once it crossed into 1M+. Each row is now the midpoint of
+    // its 350k-600k and 1M+ neighbours; the old values are kept in the comments.
+    //
     // price = cost / ratio. Runtime overrides are applied on top via
     // ApplyRatioOverrides; the effective tables live in _bandRatios/_maasaiRatios.
     private static readonly IReadOnlyDictionary<string,
@@ -178,7 +183,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.442655m, 0.30166m,  0.265692m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.442655m, 0.30166m, 0.265692m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Engine Oils"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -190,7 +195,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.592899m, 0.474121m, 0.443912m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.638425m, 0.546693m, 0.536605m),
-            ["600k to 900k"] = (0.5862m,   0.464878m, 0.428126m),
+            ["600k to 900k"] = (0.673621m, 0.604958m, 0.586544m), // was (0.5862m, 0.464878m, 0.428126m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Gear Oils & Transmission Fluids"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -202,7 +207,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.57413m,  0.426881m, 0.401149m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.57413m, 0.426881m, 0.401149m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Greases"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -214,7 +219,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.593563m, 0.390056m, 0.341299m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.593563m, 0.390056m, 0.341299m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Oils (Industrial/Other Fluids)"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -226,7 +231,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.655489m, 0.501236m, 0.478683m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.655489m, 0.501236m, 0.478683m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Service"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -238,7 +243,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.445547m, 0.304273m, 0.271382m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.445547m, 0.304273m, 0.271382m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Vehicle Care"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -250,7 +255,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.538114m, 0.332442m, 0.31608m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.538114m, 0.332442m, 0.31608m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Workshop Pro-Line"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -262,7 +267,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.452293m, 0.320548m, 0.295704m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.452293m, 0.320548m, 0.295704m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Pastes"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -274,7 +279,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.445547m, 0.304273m, 0.271382m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.445547m, 0.304273m, 0.271382m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Adhesives & Sealants"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -286,7 +291,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.445547m, 0.304273m, 0.271382m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.445547m, 0.304273m, 0.271382m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
         ["Repair Aids"] = new Dictionary<string, (decimal, decimal, decimal)>
@@ -298,7 +303,7 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.445547m, 0.304273m, 0.271382m),
+            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.445547m, 0.304273m, 0.271382m): midpoint of 350k-600k and 1M+ (Nov 2026)
             ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
         },
     };
