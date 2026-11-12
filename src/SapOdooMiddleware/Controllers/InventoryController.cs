@@ -190,7 +190,7 @@ public class InventoryController : ControllerBase
                     string? category = null;
 
                     if (sapGroupCodes.TryGetValue(item.ItemCode, out int sapGrp))
-                        category = _pricing.TryPricingBandForSapGroup(sapGrp);
+                        category = _pricing.TryPricingBandForSapGroup(sapGrp, item.OdooCategoryName);
 
                     if (category == null && !string.IsNullOrWhiteSpace(item.OdooCategoryName))
                     {

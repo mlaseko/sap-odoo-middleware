@@ -23,7 +23,18 @@ public record PricingTrace(
     int MaasaiBandIndex,
     decimal MaasaiRatio,
     decimal MaasaiInclVat,
-    PriceTiers Net);
+    PriceTiers Net,
+    /// <summary>How the band was chosen: "converged", or the oscillation and which band was used.</summary>
+    string BandResolution = "converged",
+    /// <summary>True when a tier was lifted so a higher cost never gives a lower price.</summary>
+    bool MonotonicFloorApplied = false,
+    /// <summary>The prices before the no-drop floor was applied (incl-VAT; null when no floor applied).</summary>
+    string? FloorNote = null,
+    /// <summary>True when any tier came out zero or negative (cost too small for the formula).</summary>
+    bool HasNonPositivePrice = false);
+
+/// <summary>Which pricing band an item uses and why (for display).</summary>
+public record PricingBandResolution(string? Band, string Path);
 
 /// <summary>A runtime override of one category+band's three tier ratios.</summary>
 public record BandRatioOverride(string Category, string Band, decimal Sp, decimal Dealer, decimal Retail);
@@ -87,6 +98,21 @@ public interface IPricingCalculator
     string? TryPricingBandForSapGroup(int sapGroupCode);
 
     /// <summary>
+    /// Like <see cref="TryPricingBandForSapGroup(int)"/>, but aware of the Odoo category for SAP groups
+    /// that are shared between pricing bands: a grease still sitting in 107 ("Gear Oils/ATF/Greases")
+    /// prices as Greases, not Gear Oils. <paramref name="odooCategory"/> may be a full path, a leaf
+    /// name or a LIQUI MOLY external id.
+    /// </summary>
+    string? TryPricingBandForSapGroup(int sapGroupCode, string? odooCategory);
+
+    /// <summary>
+    /// The single band-resolution rule used by reprice, trace and the impact report: SAP group first
+    /// (Odoo-category-aware for shared groups), else the Odoo category. Band is null when unresolvable.
+    /// </summary>
+    PricingBandResolution ResolveBandForItem(
+        int? sapGroupCode, string? sapGroupName, string? odooCategoryName, string? odooCategoryExternalId);
+
+    /// <summary>
     /// Compute the Maasai (PL04) NET price from an existing Super-Dealer (PL03) NET price.
     /// Used by the backfill endpoint to derive PL04 for items that already have PL03.
     /// </summary>
@@ -102,6 +128,14 @@ public interface IPricingCalculator
 ///   recompute band from sp; converge.
 /// Then enforce sp &lt; dealer &lt; retail. Returned values are then divided by 1.18 to
 /// store NET (excl-VAT) prices in SAP/Odoo price lists.
+///
+/// Two deliberate departures from the HTML tool (Nov 2026):
+///   1. When the band walk never settles (two bands point at each other), the HTML tool kept
+///      whichever band pass 5 landed on. Here the walk stops at the first repeated band and the
+///      loop band with the HIGHER price is used, so a cost always gives the same price.
+///   2. No-drop floor: at some band edges the next band's ratios gave a LOWER price for a higher
+///      cost. Each tier (and Maasai) is lifted to the highest price any lower cost produces.
+/// Where the walk settles and no drop exists, prices are identical to the HTML tool.
 /// </summary>
 public class PricingCalculator : IPricingCalculator
 {
@@ -498,11 +532,171 @@ public class PricingCalculator : IPricingCalculator
     public string? TryPricingBandForSapGroup(int sapGroupCode)
         => SapGroupBand.TryGetValue(sapGroupCode, out var band) ? band : null;
 
+    // SAP groups shared by more than one LIQUI MOLY family. 107 "Gear Oils/ATF/Greases" is the old
+    // combined group: greases belong in 117, but a grease still in 107 must not price as a gear oil.
+    private const int SharedGearOilsGreasesGroup = 107;
+
+    public string? TryPricingBandForSapGroup(int sapGroupCode, string? odooCategory)
+    {
+        if (sapGroupCode == SharedGearOilsGreasesGroup && IsGreasesCategory(odooCategory))
+            return "Greases";
+        return TryPricingBandForSapGroup(sapGroupCode);
+    }
+
+    /// <summary>True when an Odoo category (path, leaf name or lm_cat_ external id) is in the Greases family.</summary>
+    internal static bool IsGreasesCategory(string? odooCategory)
+    {
+        if (string.IsNullOrWhiteSpace(odooCategory)) return false;
+        var c = odooCategory.Trim();
+        if (c.Contains("lm_cat_", StringComparison.OrdinalIgnoreCase))
+            return c.Contains("lm_cat_greases", StringComparison.OrdinalIgnoreCase);
+        var top = c.Split('/')[0].Trim();
+        if (string.Equals(top, "Greases", StringComparison.OrdinalIgnoreCase)) return true;
+        // A bare leaf name ("Multi-purpose grease") with no family path.
+        return !c.Contains('/') && c.Contains("grease", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public PricingBandResolution ResolveBandForItem(
+        int? sapGroupCode, string? sapGroupName, string? odooCategoryName, string? odooCategoryExternalId)
+    {
+        var odooHint = !string.IsNullOrWhiteSpace(odooCategoryExternalId) ? odooCategoryExternalId : odooCategoryName;
+        if (sapGroupCode is int grp && TryPricingBandForSapGroup(grp, odooHint) is string band)
+        {
+            var shared = band != TryPricingBandForSapGroup(grp)
+                ? $" — group {grp} is shared, the Odoo category '{odooCategoryName ?? odooCategoryExternalId}' decides"
+                : "";
+            return new PricingBandResolution(band,
+                $"SAP group {grp} ({sapGroupName ?? "?"}) → band '{band}' (authoritative){shared}");
+        }
+        if (!string.IsNullOrWhiteSpace(odooCategoryName))
+        {
+            try
+            {
+                var cat = ResolvePricingCategory(odooCategoryName);
+                return new PricingBandResolution(cat,
+                    $"SAP group {(sapGroupCode?.ToString() ?? "none")} has no band; "
+                    + $"Odoo category '{odooCategoryName}' → band '{cat}' (fallback)");
+            }
+            catch (InvalidOperationException ex)
+            {
+                return new PricingBandResolution(null, ex.Message);
+            }
+        }
+        return new PricingBandResolution(null,
+            "No SAP group band and no Odoo category — cannot resolve a pricing band "
+            + "(Accessories and other unmapped families are held for review).");
+    }
+
     public PriceTiers ComputeNetPrices(decimal cifCostTzs, string pricingCategory)
         => ComputeNetPricesWithTrace(cifCostTzs, pricingCategory).Net;
 
     public PricingTrace ComputeNetPricesWithTrace(decimal cifCostTzs, string pricingCategory)
         => ComputeCore(cifCostTzs, pricingCategory, _bandRatios, _maasaiRatios);
+
+    /// <summary>One band's raw tier output at a given cost (incl-VAT, before the no-drop floor).</summary>
+    private readonly record struct RawTiers(
+        decimal Sp, decimal Dealer, decimal Retail, string Band, bool Adjusted,
+        string Resolution, List<PricingTraceStep> Steps);
+
+    /// <summary>Tier prices for one band, with the sp &lt; dealer &lt; retail ordering enforced.</summary>
+    private static (decimal Sp, decimal Dealer, decimal Retail, bool Adjusted) TiersForBand(
+        decimal cost, (decimal sp, decimal d, decimal r) r)
+    {
+        var sp     = Math.Ceiling(cost / r.sp / 1000m) * 1000m;
+        var dealer = Math.Round  (cost / r.d  / 5000m, MidpointRounding.AwayFromZero) * 5000m;
+        var retail = Math.Floor  (cost / r.r  / 5000m) * 5000m;
+        bool adjusted = false;
+        if (dealer >= retail) { dealer = retail - 5000m; adjusted = true; }
+        if (sp >= dealer)     { sp     = dealer - 1000m; adjusted = true; }
+        return (sp, dealer, retail, adjusted);
+    }
+
+    /// <summary>
+    /// Band selection. Same walk as the HTML tool (seed "25k to 50k", recompute the band from the
+    /// Super-Dealer price until it stops moving), but deterministic when it never settles: the HTML
+    /// tool stopped after 5 passes and kept whichever band it happened to be on, so two bands that
+    /// point at each other gave a price decided by the pass count. Here a repeated band ends the walk
+    /// and, of the bands in the loop, the one giving the HIGHER price is used.
+    /// </summary>
+    private static RawTiers ResolveRaw(
+        decimal cost, IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)> catRatios)
+    {
+        var band = "25k to 50k";   // seed band, matches the HTML tool
+        var visited = new List<string>();
+        var steps = new List<PricingTraceStep>();
+
+        for (int i = 0; i <= BandDefs.Length; i++)
+        {
+            var r = catRatios[band];
+            var t = TiersForBand(cost, r);
+            var rawSp = Math.Ceiling(cost / r.sp / 1000m) * 1000m;
+            steps.Add(new PricingTraceStep(i + 1, band, r.sp, r.d, r.r, t.Sp, t.Dealer, t.Retail));
+            visited.Add(band);
+
+            var next = GetBand(rawSp);
+            if (next == band)
+                return new RawTiers(t.Sp, t.Dealer, t.Retail, band, t.Adjusted, "converged", steps);
+
+            var loopStart = visited.IndexOf(next);
+            if (loopStart >= 0)
+            {
+                // Oscillation: pick the loop band with the highest price (Super Dealer, then Retail).
+                var loop = visited.Skip(loopStart).Distinct().ToList();
+                string best = loop[0];
+                (decimal Sp, decimal Dealer, decimal Retail, bool Adjusted) bestT = TiersForBand(cost, catRatios[best]);
+                foreach (var b in loop.Skip(1))
+                {
+                    var bt = TiersForBand(cost, catRatios[b]);
+                    if (bt.Sp > bestT.Sp || (bt.Sp == bestT.Sp && bt.Retail > bestT.Retail))
+                        (best, bestT) = (b, bt);
+                }
+                var note = $"oscillated between {string.Join(" and ", loop.Select(b => $"'{b}'"))}; "
+                           + $"used '{best}' (the higher price)";
+                return new RawTiers(bestT.Sp, bestT.Dealer, bestT.Retail, best, bestT.Adjusted, note, steps);
+            }
+            band = next;
+        }
+        // Unreachable: there are only BandDefs.Length bands, so a walk this long must repeat one.
+        var last = TiersForBand(cost, catRatios[band]);
+        return new RawTiers(last.Sp, last.Dealer, last.Retail, band, last.Adjusted, "converged", steps);
+    }
+
+    /// <summary>
+    /// Costs at which the chosen band can change: band selection only depends on which band each
+    /// band's Super-Dealer price falls in, and ceil(c / r / 1000) * 1000 reaches edge E exactly when
+    /// c &gt; (E - 1000) * r. Between two of these costs the band is fixed and every tier only rises
+    /// with cost, so the highest price at any lower cost is reached at one of these points.
+    /// </summary>
+    private static IEnumerable<decimal> BandChangeCosts(
+        IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)> catRatios)
+    {
+        foreach (var r in catRatios.Values)
+            foreach (var (lo, _, _) in BandDefs)
+            {
+                if (lo <= 0m) continue;
+                var t = (lo - 1000m) * r.sp;
+                yield return t;
+                yield return t - 0.01m;   // guards decimal division landing a hair either side
+            }
+    }
+
+    /// <summary>Maasai (PL04) incl-VAT from an incl-VAT Super-Dealer price, before the no-drop floor.</summary>
+    private static decimal MaasaiRaw(decimal spInclVat, decimal[] ratios)
+        => Math.Ceiling(spInclVat * ratios[GetMaasaiBand(spInclVat)] / 1000m) * 1000m;
+
+    /// <summary>
+    /// Maasai price that never falls as the Super-Dealer price rises: Maasai bands can have a lower
+    /// ratio above an edge (e.g. Additives B 0.7121 → C 0.6994), so the price just below each edge is
+    /// carried forward. Super-Dealer prices are whole thousands, so "just below" is edge − 1 000.
+    /// </summary>
+    private static decimal MaasaiFloored(decimal spInclVat, decimal[] ratios)
+    {
+        var m = MaasaiRaw(spInclVat, ratios);
+        foreach (var (lo, _) in MaasaiBandDefs)
+            if (lo > 0m && lo - 1000m > 0m && lo - 1000m <= spInclVat)
+                m = Math.Max(m, MaasaiRaw(lo - 1000m, ratios));
+        return m;
+    }
 
     private static PricingTrace ComputeCore(
         decimal cifCostTzs, string pricingCategory,
@@ -514,33 +708,36 @@ public class PricingCalculator : IPricingCalculator
         if (!bandRatios.TryGetValue(pricingCategory, out var catRatios))
             throw new InvalidOperationException($"Unknown pricing category '{pricingCategory}'.");
 
-        var band = "25k to 50k";   // seed band, matches the HTML tool
-        decimal sp = 0, dealer = 0, retail = 0;
-        var steps = new List<PricingTraceStep>();
+        var raw = ResolveRaw(cifCostTzs, catRatios);
+        decimal sp = raw.Sp, dealer = raw.Dealer, retail = raw.Retail;
 
-        for (int i = 0; i < 5; i++)
+        // ── No-drop floor: a higher cost must never give a lower price. Each tier is lifted to the
+        //    highest price any LOWER cost produces (at most a plateau until the formula catches up).
+        //    The ordering sp < dealer < retail survives, as it holds at every point compared.
+        foreach (var c in BandChangeCosts(catRatios))
         {
-            var r = catRatios[band];
-            sp     = Math.Ceiling(cifCostTzs / r.sp / 1000m) * 1000m;
-            dealer = Math.Round  (cifCostTzs / r.d  / 5000m, MidpointRounding.AwayFromZero) * 5000m;
-            retail = Math.Floor  (cifCostTzs / r.r  / 5000m) * 5000m;
-            steps.Add(new PricingTraceStep(i + 1, band, r.sp, r.d, r.r, sp, dealer, retail));
-            var nb = GetBand(sp);
-            if (nb == band) break;
-            band = nb;
+            if (c <= 0m || c >= cifCostTzs) continue;
+            var lower = ResolveRaw(c, catRatios);
+            if (lower.Sp > sp) sp = lower.Sp;
+            if (lower.Dealer > dealer) dealer = lower.Dealer;
+            if (lower.Retail > retail) retail = lower.Retail;
         }
+        bool floored = sp != raw.Sp || dealer != raw.Dealer || retail != raw.Retail;
 
-        bool adjusted = false;
-        if (dealer >= retail) { dealer = retail - 5000m; adjusted = true; }
-        if (sp >= dealer)     { sp     = dealer - 1000m; adjusted = true; }
-
-        // ── PL04 Maasai: derived from the converged PL03 (sp) incl-VAT price. ──
+        // ── PL04 Maasai: derived from the final PL03 (sp) incl-VAT price. ──
         var maasaiCat = pricingCategory;
         if (!maasaiRatios.ContainsKey(maasaiCat))
             maasaiCat = "Service";   // fallback (covers Accessories + unmapped)
         int maasaiBand = GetMaasaiBand(sp);
         var maasaiRatio = maasaiRatios[maasaiCat][maasaiBand];
-        var maasai = Math.Ceiling(sp * maasaiRatio / 1000m) * 1000m;
+        var maasaiRawValue = MaasaiRaw(sp, maasaiRatios[maasaiCat]);
+        var maasai = MaasaiFloored(sp, maasaiRatios[maasaiCat]);
+        floored |= maasai != maasaiRawValue;
+
+        string? floorNote = null;
+        if (floored)
+            floorNote = $"Lifted so a higher cost never prices lower. Formula at this cost gave "
+                        + $"SD {raw.Sp:N0} / Dealer {raw.Dealer:N0} / Retail {raw.Retail:N0} / Maasai {maasaiRawValue:N0} (incl VAT).";
 
         // The HTML tool's rounded values are Incl-VAT (shelf prices).
         // SAP/Odoo price lists store NET (Excl-VAT) prices = Incl / 1.18.
@@ -553,9 +750,9 @@ public class PricingCalculator : IPricingCalculator
         return new PricingTrace(
             CifCostTzs: cifCostTzs,
             PricingCategory: pricingCategory,
-            Iterations: steps,
-            FinalBand: band,
-            OrderingAdjusted: adjusted,
+            Iterations: raw.Steps,
+            FinalBand: raw.Band,
+            OrderingAdjusted: raw.Adjusted,
             RetailInclVat: retail,
             DealerInclVat: dealer,
             SuperDealerInclVat: sp,
@@ -563,7 +760,11 @@ public class PricingCalculator : IPricingCalculator
             MaasaiBandIndex: maasaiBand,
             MaasaiRatio: maasaiRatio,
             MaasaiInclVat: maasai,
-            Net: net);
+            Net: net,
+            BandResolution: raw.Resolution,
+            MonotonicFloorApplied: floored,
+            FloorNote: floorNote,
+            HasNonPositivePrice: sp <= 0m || dealer <= 0m || retail <= 0m || maasai <= 0m);
     }
 
     public decimal ComputeMaasaiNetFromPl03Net(decimal pl03Net, string pricingCategory)
@@ -573,8 +774,9 @@ public class PricingCalculator : IPricingCalculator
         var cat = pricingCategory;
         if (!_maasaiRatios.ContainsKey(cat))
             cat = "Service";
-        var ratio = _maasaiRatios[cat][GetMaasaiBand(sp)];
-        var maasai = Math.Ceiling(sp * ratio / 1000m) * 1000m;
+        // PL03 net × 1.18 can land a few shillings off the whole thousand; snap back first.
+        sp = Math.Round(sp / 1000m, MidpointRounding.AwayFromZero) * 1000m;
+        var maasai = MaasaiFloored(sp, _maasaiRatios[cat]);
         return maasai / VAT;
     }
 }

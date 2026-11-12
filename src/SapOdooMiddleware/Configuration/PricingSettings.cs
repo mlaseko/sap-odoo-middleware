@@ -12,6 +12,12 @@ public class PricingSettings
     public decimal EurTzsRate { get; set; } = 2950m;
 
     /// <summary>
+    /// Lubes reprice preview WARNS (never blocks) when a price list's net (excl-VAT) price is less
+    /// than this percentage above the TZS cost. 0 = warn only when a price is below cost.
+    /// </summary>
+    public decimal MarginWarnPct { get; set; } = 5m;
+
+    /// <summary>
     /// Maps price tiers to Odoo pricelist NAMES so a reprice can update them via
     /// JSON-RPC. Keys: Retail, Dealer, SuperDealer, Maasai. An unmapped tier is
     /// skipped (Retail additionally always updates the product's list_price).

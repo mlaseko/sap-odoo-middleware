@@ -328,13 +328,14 @@ public class IndexModel : PageModel
     }
 
     public async Task<IActionResult> OnPostApplyAsync(
-        string itemCode, decimal eurCost, string? note, string? compareItem, CancellationToken ct)
+        string itemCode, decimal eurCost, string? note, string? compareItem,
+        Dictionary<int, decimal>? expectedNet, CancellationToken ct)
     {
         Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
         LookedUpItem = itemCode.Trim();
         EnteredEurCost = eurCost;
 
-        var result = await _reprice.ApplyAsync(LookedUpItem, eurCost, null, "manual", note, ct);
+        var result = await _reprice.ApplyAsync(LookedUpItem, eurCost, null, "manual", note, expectedNet, ct);
         if (result.Applied)
         {
             Message = $"✅ {LookedUpItem} repriced and posted to SAP + Neon. "
@@ -453,6 +454,72 @@ public class IndexModel : PageModel
         return Page();
     }
 
+    // ── Formula impact report (read only) ───────────────────────────
+
+    public PricingImpactReport? Impact { get; private set; }
+    public string? ImpactRateMode { get; private set; }
+
+    private Task<PricingImpactReport> BuildImpactAsync(string? rateMode, CancellationToken ct)
+    {
+        ImpactRateMode = rateMode == "current" ? "current" : "stored";
+        var svc = HttpContext.RequestServices.GetRequiredService<ILubesPricingImpactService>();
+        return svc.BuildAsync(ImpactRateMode == "stored", ct);
+    }
+
+    public async Task<IActionResult> OnPostImpactAsync(string? rateMode, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        Impact = await BuildImpactAsync(rateMode, ct);
+        Message = $"Impact report: {Impact.Changed} of {Impact.Scanned} items would change. Read only — nothing was posted.";
+        return Page();
+    }
+
+    public async Task<IActionResult> OnGetImpactCsvAsync(string? rateMode, CancellationToken ct)
+    {
+        var rep = await BuildImpactAsync(rateMode, ct);
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        static string Q(string? v) => v is null ? "" : "\"" + v.Replace("\"", "\"\"") + "\"";
+        string N(decimal? v) => v?.ToString("0.##", inv) ?? "";
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("ItemCode,ItemName,SapGroup,OdooCategory,Band,EurCost,Rate,CifTzs,"
+                      + "PL1_Stored_Incl,PL1_New_Incl,PL1_Delta%,PL2_Stored_Incl,PL2_New_Incl,PL2_Delta%,"
+                      + "PL3_Stored_Incl,PL3_New_Incl,PL3_Delta%,PL4_Stored_Incl,PL4_New_Incl,PL4_Delta%,"
+                      + "GreaseInGroup107,Error,Reasons");
+        foreach (var r in rep.Rows)
+        {
+            var cells = new List<string>
+            {
+                Q(r.ItemCode), Q(r.ItemName), r.ItemGroupCode?.ToString(inv) ?? "", Q(r.OdooCategoryName),
+                Q(r.PricingBand), N(r.EurCost), N(r.Rate), N(r.CifTzs),
+            };
+            for (int pl = 1; pl <= 4; pl++)
+            {
+                cells.Add(N(r.StoredNet.TryGetValue(pl, out var o) ? Math.Round(o * 1.18m) : null));
+                cells.Add(N(r.NewInclVat is not null && r.NewInclVat.TryGetValue(pl, out var n) ? n : null));
+                cells.Add(N(r.DeltaPct?.GetValueOrDefault(pl)));
+            }
+            cells.Add(r.GreaseInGroup107 ? "yes" : "");
+            cells.Add(Q(r.Error));
+            cells.Add(Q(string.Join(" | ", r.Reasons)));
+            sb.AppendLine(string.Join(",", cells));
+        }
+        var bytes = System.Text.Encoding.UTF8.GetPreamble().Concat(System.Text.Encoding.UTF8.GetBytes(sb.ToString())).ToArray();
+        return File(bytes, "text/csv", $"lubes-pricing-impact-{DateTime.UtcNow:yyyyMMdd-HHmm}.csv");
+    }
+
+    public async Task<IActionResult> OnPostImpactToBulkAsync(string? rateMode, CancellationToken ct)
+    {
+        Rate = await _pricingRepo.GetEffectiveRateAsync(ct);
+        var rep = await BuildImpactAsync(rateMode, ct);
+        var items = rep.Rows
+            .Where(r => r.Error is null && r.PricesChange && r.EurCost is > 0m)
+            .Select(r => new BulkInput(r.ItemCode, r.EurCost, null, null, null))
+            .ToList();
+        if (items.Count == 0) { Message = "No items with a price change to load."; return Page(); }
+        await BuildBulkPreviewAsync(items, null, ct);
+        return Page();
+    }
+
     private async Task BuildBulkPreviewAsync(
         List<BulkInput> items, decimal? bulkRate, CancellationToken ct)
     {
@@ -498,7 +565,7 @@ public class IndexModel : PageModel
         // Only applicable lines get carried into the apply step, with their FINAL EUR.
         var pending = BulkRows
             .Where(r => r.Preview.CanApply && r.ResolvedEur is > 0m)
-            .Select(r => new RepriceItemInput(r.Preview.ItemCode, r.ResolvedEur))
+            .Select(r => new RepriceItemInput(r.Preview.ItemCode, r.ResolvedEur, r.Preview.NewNet))
             .ToList();
         PendingBulkJson = JsonSerializer.Serialize(pending, JsonOpts);
         Message = $"Preview only — {pending.Count} of {items.Count} lines are ready to apply. Nothing posted yet.";

@@ -148,6 +148,7 @@ builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
 // engine (SAP+Neon+Odoo), and the background bulk-reprice job.
 builder.Services.AddScoped<ILubesPricingRepository, LubesPricingRepository>();
 builder.Services.AddScoped<ILubesRepriceService, LubesRepriceService>();
+builder.Services.AddScoped<ILubesPricingImpactService, LubesPricingImpactService>();
 builder.Services.AddSingleton<LubesBulkRepriceJobService>();
 // Applies UI-approved ratio overrides to the singleton calculator at startup.
 builder.Services.AddHostedService<PricingRatioLoaderHostedService>();

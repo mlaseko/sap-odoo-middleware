@@ -205,6 +205,10 @@
                 <div class="msg-warn">⚠ Beyond ±30%: @moves — double-check the EUR invoice price before posting.</div>
             }
             @if (p.Error is not null && p.Found) { <div class="msg-err">@p.Error</div> }
+            @foreach (var w in p.Warnings.Where(w => !w.Contains("beyond ±")))
+            {
+                <div class="msg-warn">⚠ @w</div>
+            }
 
             <div style="margin-top:12px">
                 <form method="post" asp-page-handler="Preview" class="inline-form" style="display:inline-flex">
@@ -243,6 +247,12 @@
                         <input type="hidden" name="itemCode" value="@p.ItemCode" />
                     <input type="hidden" name="compareItem" value="@Model.CompareItem" />
                         <input type="hidden" name="eurCost" value="@Model.EnteredEurCost" />
+                        @* The prices shown above: posting is refused if they changed since this preview. *@
+                        @foreach (var (pl, net) in p.NewNet!)
+                        {
+                            <input type="hidden" name="expectedNet[@pl]"
+                                   value="@net.ToString(System.Globalization.CultureInfo.InvariantCulture)" />
+                        }
                         <input type="text" name="note" placeholder="reason / note (optional)"
                                value="@(Model.TargetPl is { } tpl && Model.TargetPrice is { } tp ? $"target PL{tpl}={tp:N0}" : "")" />
                         <button class="btn btn-primary" type="submit"
@@ -397,7 +407,7 @@
                             </td>
                             <td style="text-align:left">
                                 @if (!l.CanApply) { <span class="delta-big">@l.Error</span> }
-                                else if (l.Warnings.Count > 0) { <span class="delta-up">⚠ check</span> }
+                                else if (l.Warnings.Count > 0) { <span class="delta-up" title="@string.Join("\n", l.Warnings)">⚠ check (@l.Warnings.Count)</span> }
                                 else { <text>ok</text> }
                             </td>
                         </tr>
@@ -443,6 +453,85 @@
             <details style="margin-top:6px"><summary>@job.Failures.Count failure(s)</summary>
                 <ul>@foreach (var f in job.Failures) { <li><b>@f.ItemCode</b>: @f.Error</li> }</ul>
             </details>
+        }
+    }
+</div>
+
+@* ── Formula impact report (read only) ─────────────────────────── *@
+<div class="card">
+    <div class="card-head">
+        <h3>Formula impact report</h3>
+        @if (Model.Impact is not null)
+        {
+            <a class="btn btn-sm" href="/pricing" title="Close the report (nothing was posted)">✕ Close report</a>
+        }
+    </div>
+    <div class="meta" style="margin:8px 0">
+        Read only. Recomputes every item with a stored EUR cost (plus every item in SAP group 107) and lists
+        the ones whose prices would change, and why: a band that used to flip-flop, the no-drop floor, or a
+        grease still in group 107. Nothing is posted — load the changes into the bulk preview to review and apply.
+    </div>
+    <form method="post" asp-page-handler="Impact" class="inline-form">
+        <label>Rate:</label>
+        <select name="rateMode">
+            <option value="stored" selected="@(Model.ImpactRateMode != "current")">Each item's stored rate (formula changes only)</option>
+            <option value="current" selected="@(Model.ImpactRateMode == "current")">Today's rate (what a reprice would post)</option>
+        </select>
+        <button class="btn" type="submit">Run report</button>
+        <a class="btn" href="/pricing?handler=ImpactCsv&amp;rateMode=@(Model.ImpactRateMode ?? "stored")">Download CSV</a>
+    </form>
+
+    @if (Model.Impact is { } rep)
+    {
+        <div class="meta" style="margin-top:8px">
+            @rep.Scanned items scanned (@rep.RateMode) · <b>@rep.Changed would change</b> ·
+            @rep.Oscillating had a flip-flopping band · @rep.Floored lifted by the no-drop floor ·
+            <b>@rep.GreasesInGroup107 greases in group 107</b> · @rep.Errors could not be priced
+        </div>
+        @if (rep.Rows.Count > 0)
+        {
+            <div style="overflow-x:auto;margin-top:8px">
+                <table class="price-grid">
+                    <tr>
+                        <th style="text-align:left">Item</th><th>Group</th><th style="text-align:left">Band</th>
+                        <th>EUR</th><th>PL1 Retail</th><th>PL2 Dealer</th><th>PL3 Super Dealer</th><th>PL4 Maasai</th>
+                        <th style="text-align:left">Why</th>
+                    </tr>
+                    @foreach (var r in rep.Rows)
+                    {
+                        <tr>
+                            <td style="text-align:left"><b>@r.ItemCode</b><div class="meta">@r.ItemName</div></td>
+                            <td>@(r.ItemGroupCode?.ToString() ?? "—")</td>
+                            <td style="text-align:left">@(r.PricingBand ?? "—")</td>
+                            <td>@(r.EurCost?.ToString("N2") ?? "—")</td>
+                            @for (int pl = 1; pl <= 4; pl++)
+                            {
+                                var d = r.DeltaPct?.GetValueOrDefault(pl);
+                                <td>
+                                    @InclOf(r.StoredNet, pl) → @Money(NetOf(r.NewInclVat, pl))
+                                    @if (r.DeltaPct is not null) { <div class="@DeltaCls(d)">@DeltaTxt(d)</div> }
+                                </td>
+                            }
+                            <td style="text-align:left">
+                                @if (r.Error is not null) { <div class="delta-big">@r.Error</div> }
+                                @foreach (var why in r.Reasons) { <div class="meta">@why</div> }
+                            </td>
+                        </tr>
+                    }
+                </table>
+            </div>
+            <form method="post" asp-page-handler="ImpactToBulk" class="inline-form" style="margin-top:10px">
+                <input type="hidden" name="rateMode" value="@Model.ImpactRateMode" />
+                <button class="btn btn-primary" type="submit">Load the changed items into the bulk preview</button>
+                <span class="meta">The bulk preview reprices at today's rate from each item's stored EUR cost. Nothing posts until you apply it there.</span>
+            </form>
+            @if (rep.GreasesInGroup107 > 0)
+            {
+                <div class="msg-warn" style="margin-top:8px">
+                    ⚠ Greases in group 107 now price as Greases. To move one to group 117, look it up above and use
+                    the classification editor (SAP group 117), then reprice it.
+                </div>
+            }
         }
     }
 </div>

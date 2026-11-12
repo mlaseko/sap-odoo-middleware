@@ -125,7 +125,7 @@ public sealed class LubesBulkRepriceJobService
                     using var scope = _scopeFactory.CreateScope();
                     var svc = scope.ServiceProvider.GetRequiredService<ILubesRepriceService>();
                     var result = await svc.ApplyAsync(
-                        item.ItemCode, item.EurCost, job.RateOverride, "bulk", job.Note, ct);
+                        item.ItemCode, item.EurCost, job.RateOverride, "bulk", job.Note, item.ExpectedNet, ct);
 
                     if (result.Applied)
                     {

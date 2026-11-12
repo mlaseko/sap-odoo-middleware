@@ -105,35 +105,18 @@ public class PricingTraceController : ControllerBase
                 $"Article '{article}' has no NeonProducts row and no extracted invoice line — " +
                 "nothing to trace. Pass eur_cost= to run a what-if computation."));
 
-        // 3. Category resolution — mirrors LubesItemProvisioningService step 5.
-        string? category = null;
-        string resolutionPath;
-        if (snapshot?.ItemGroupCode is int grp
-            && _pricing.TryPricingBandForSapGroup(grp) is string bandFromGroup)
-        {
-            category = bandFromGroup;
-            resolutionPath = $"SAP group {grp} ({snapshot.ItemGroupName ?? "?"}) → band '{bandFromGroup}' (authoritative)";
-        }
-        else if (!string.IsNullOrWhiteSpace(snapshot?.OdooCategoryName))
-        {
-            try
-            {
-                category = _pricing.ResolvePricingCategory(snapshot!.OdooCategoryName);
-                resolutionPath =
-                    $"SAP group {(snapshot.ItemGroupCode?.ToString() ?? "none")} has no band; " +
-                    $"Odoo category '{snapshot.OdooCategoryName}' → band '{category}'";
-            }
-            catch (InvalidOperationException ex)
-            {
-                resolutionPath = $"Unresolvable: {ex.Message}";
-            }
-        }
-        else
-        {
-            resolutionPath = "No SAP group band and no Odoo category on the Neon row.";
-        }
+        // 3. Category resolution — the same rule as provisioning and /pricing.
+        var resolution = _pricing.ResolveBandForItem(
+            snapshot?.ItemGroupCode, snapshot?.ItemGroupName,
+            snapshot?.OdooCategoryName, snapshot?.OdooCategoryExternalId);
+        string? category = resolution.Band;
+        string resolutionPath = snapshot is null
+            ? "No NeonProducts row for this article — cannot resolve a pricing band."
+            : resolution.Path;
 
-        var effectiveRate = rate ?? _pricingSettings.EurTzsRate;
+        // The SAME rate /pricing and provisioning use (UI-set Neon value, else config).
+        var effective = await _pricingRepo.GetEffectiveRateAsync(ct);
+        var effectiveRate = rate ?? effective.Rate;
 
         // 4. Replay the real calculator when we have both inputs.
         PricingTrace? trace = null;
@@ -198,7 +181,7 @@ public class PricingTraceController : ControllerBase
             {
                 eur_cost = eurCost,
                 eur_tzs_rate = effectiveRate,
-                rate_source = rate is null ? "Pricing:EurTzsRate config default" : "query parameter",
+                rate_source = rate is null ? $"effective rate ({effective.Source})" : "query parameter",
                 cif_cost_tzs = eurCost is > 0m ? eurCost.Value * effectiveRate : (decimal?)null,
             },
             category_resolution = new { pricing_category = category, path = resolutionPath },
@@ -244,6 +227,23 @@ public class PricingTraceController : ControllerBase
         return Ok(ApiResponse<EffectiveRate>.Ok(await _pricingRepo.GetEffectiveRateAsync(ct)));
     }
 
+    /// <summary>
+    /// GET /api/pricing/formula-impact?rate=stored|current — READ ONLY. Every Lubes item whose prices
+    /// the current calculator would change, and why (band oscillation, no-drop floor, grease in group
+    /// 107), plus every grease still in group 107. <c>rate=stored</c> (default) prices each item at the
+    /// rate it was last priced with so only formula changes show; <c>rate=current</c> uses today's rate.
+    /// Nothing is written: apply changes through the bulk reprice.
+    /// </summary>
+    [HttpGet("formula-impact")]
+    public async Task<IActionResult> FormulaImpact(
+        [FromServices] ILubesPricingImpactService impact,
+        [FromQuery(Name = "rate")] string? rateMode = "stored",
+        CancellationToken ct = default)
+    {
+        var useStored = !string.Equals(rateMode, "current", StringComparison.OrdinalIgnoreCase);
+        return Ok(ApiResponse<PricingImpactReport>.Ok(await impact.BuildAsync(useStored, ct)));
+    }
+
     /// <summary>GET /api/pricing/ratios — the calculator's effective ratio tables (defaults + overrides).</summary>
     [HttpGet("ratios")]
     public IActionResult GetRatios()
@@ -282,7 +282,8 @@ public class PricingTraceController : ControllerBase
 
             var targetNote = $"target PL{request.TargetPl}={request.TargetInclVat:N0}" +
                              (string.IsNullOrWhiteSpace(request.Note) ? "" : $"; {request.Note}");
-            var applied = await _reprice.ApplyAsync(itemCode, impliedEur, request.Rate, "manual", targetNote, ct);
+            var applied = await _reprice.ApplyAsync(
+                itemCode, impliedEur, request.Rate, "manual", targetNote, request.ExpectedNet, ct);
             return applied.Applied
                 ? Ok(ApiResponse<object>.Ok(new { implied_eur_cost = impliedEur, result = applied }))
                 : BadRequest(ApiResponse<object>.Fail(applied.Error ?? "Reprice failed."));
@@ -296,7 +297,7 @@ public class PricingTraceController : ControllerBase
         }
 
         var result = await _reprice.ApplyAsync(
-            itemCode, request.EurCost, request.Rate, "manual", request.Note, ct);
+            itemCode, request.EurCost, request.Rate, "manual", request.Note, request.ExpectedNet, ct);
         return result.Applied
             ? Ok(ApiResponse<RepriceApplyResult>.Ok(result))
             : BadRequest(ApiResponse<RepriceApplyResult>.Fail(result.Error ?? "Reprice failed."));
@@ -488,6 +489,12 @@ public class RepriceRequest
     public decimal? Rate { get; set; }
     public bool DryRun { get; set; } = true;
     public string? Note { get; set; }
+
+    /// <summary>
+    /// Optional: the net prices (price list 1-4 → net) returned by the dry run being confirmed. When
+    /// given, the apply is refused if the prices computed now differ (rate or ratios changed).
+    /// </summary>
+    public Dictionary<int, decimal>? ExpectedNet { get; set; }
 
     /// <summary>Target-price mode: the price list the target applies to (1=Retail,
     /// 2=Dealer, 3=SuperDealer, 4=Maasai). Mutually exclusive with eur_cost.</summary>
