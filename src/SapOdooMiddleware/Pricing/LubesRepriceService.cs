@@ -189,6 +189,8 @@ public class LubesRepriceService : ILubesRepriceService
                 warnings.Add($"Band choice: {trace.BandResolution}.");
             if (trace.MonotonicFloorApplied && trace.FloorNote is not null)
                 warnings.Add(trace.FloorNote);
+            if (trace.CapNote is not null)
+                categoryPath += " · " + trace.CapNote;
 
             newNet = new Dictionary<int, decimal>
             {

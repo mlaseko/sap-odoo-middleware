@@ -143,7 +143,12 @@ builder.Services.AddHostedService<IndexWarmupHostedService<LiquiMolyProductScrap
 builder.Services.AddHostedService<IndexWarmupHostedService<MeguinProductScraperService, MeguinScraperSettings>>();
 
 // --- Item Provisioning components ---
-builder.Services.AddSingleton<IPricingCalculator, PricingCalculator>();
+builder.Services.AddSingleton<IPricingCalculator>(sp =>
+{
+    var ps = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<PricingSettings>>().Value;
+    return new PricingCalculator(new PricingCap(
+        ps.CapStartCostTzs, ps.CapRetailMultiple, ps.CapDealerMultiple, ps.CapSuperDealerMultiple));
+});
 // Lubes price management: runtime EUR→TZS rate + audit log (Neon), the reprice
 // engine (SAP+Neon+Odoo), and the background bulk-reprice job.
 builder.Services.AddScoped<ILubesPricingRepository, LubesPricingRepository>();

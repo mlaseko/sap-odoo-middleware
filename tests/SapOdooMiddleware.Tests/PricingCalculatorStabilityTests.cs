@@ -47,7 +47,7 @@ public class PricingCalculatorStabilityTests
     }
 
     [Fact]
-    public void Price_drop_at_the_1M_band_edge_is_floored()
+    public void No_drop_at_the_old_1M_band_edge()
     {
         // The HTML tool: 637,000 → Retail 1,485,000 but 637,500 → Retail 1,000,000.
         var below = _calc.ComputeNetPricesWithTrace(637_000m, "Engine Oils");
@@ -57,8 +57,6 @@ public class PricingCalculatorStabilityTests
         Assert.True(above.DealerInclVat >= below.DealerInclVat);
         Assert.True(above.SuperDealerInclVat >= below.SuperDealerInclVat);
         Assert.True(above.MaasaiInclVat >= below.MaasaiInclVat);
-        Assert.True(above.MonotonicFloorApplied);
-        Assert.NotNull(above.FloorNote);
     }
 
     [Theory]
@@ -66,7 +64,7 @@ public class PricingCalculatorStabilityTests
     public void Every_tier_never_drops_as_cost_rises_and_stays_ordered(string category)
     {
         PricingTrace? prev = null;
-        for (var cost = 5_000m; cost <= 1_200_000m; cost += cost < 700_000m ? 500m : 2_500m)
+        for (var cost = 5_000m; cost <= 5_000_000m; cost += cost < 700_000m ? 500m : 5_000m)
         {
             var t = _calc.ComputeNetPricesWithTrace(cost, category);
 
@@ -87,25 +85,55 @@ public class PricingCalculatorStabilityTests
 
     [Theory]
     [MemberData(nameof(Categories))]
-    public void Band_600k_to_900k_ratios_sit_between_their_neighbours(string category)
+    public void Top_bands_use_the_agreed_markups_for_every_category(string category)
     {
         var rows = _calc.GetRatioSnapshot().BandRatios.Where(r => r.Category == category).ToList();
-        var lo = rows.Single(r => r.Band == "350k to 600k");
-        var mid = rows.Single(r => r.Band == "600k to 900k");
-        var hi = rows.Single(r => r.Band == "1M and above");
+        foreach (var band in new[] { "600k to 900k", "1M and above" })
+        {
+            var r = rows.Single(x => x.Band == band);
+            Assert.Equal(1.85m, Math.Round(1m / r.Sp, 4));
+            Assert.Equal(2.00m, Math.Round(1m / r.Dealer, 4));
+            Assert.Equal(2.10m, Math.Round(1m / r.Retail, 4));
+        }
+    }
 
-        Assert.InRange(mid.Sp, Math.Min(lo.Sp, hi.Sp), Math.Max(lo.Sp, hi.Sp));
-        Assert.InRange(mid.Dealer, Math.Min(lo.Dealer, hi.Dealer), Math.Max(lo.Dealer, hi.Dealer));
-        Assert.InRange(mid.Retail, Math.Min(lo.Retail, hi.Retail), Math.Max(lo.Retail, hi.Retail));
+    [Theory]
+    // Engine Oils at 3,150 TZS/EUR: EUR 400 (cap start), EUR 600, EUR 1,000 — option 5b simulation.
+    [InlineData(1_260_000, 2_645_000, 2_520_000, 2_332_000)]
+    [InlineData(1_890_000, 3_525_000, 3_370_000, 3_139_000)]
+    [InlineData(3_150_000, 5_290_000, 5_070_000, 4_752_000)]
+    public void High_cost_cap_matches_the_option_5b_simulation(decimal cost, decimal retail, decimal dealer, decimal sd)
+    {
+        var t = _calc.ComputeNetPricesWithTrace(cost, "Engine Oils");
+        Assert.Equal(retail, t.RetailInclVat);
+        Assert.Equal(dealer, t.DealerInclVat);
+        Assert.Equal(sd, t.SuperDealerInclVat);
+        Assert.Equal(cost > 1_260_000m, t.CapNote is not null);
     }
 
     [Fact]
-    public void High_cost_items_are_no_longer_lifted_by_the_old_600k_spike()
+    public void Cap_keeps_profit_rising_while_the_markup_tapers()
     {
-        // With the old 600k-900k row, Additives at 800,000 was floored up to Retail 2,395,000.
-        var t = _calc.ComputeNetPricesWithTrace(800_000m, "Additives");
-        Assert.False(t.MonotonicFloorApplied);
-        Assert.Equal(1_255_000m, t.RetailInclVat);
+        decimal prevProfit = 0m, prevMultiple = decimal.MaxValue;
+        for (var eur = 400m; eur <= 1_500m; eur += 50m)
+        {
+            var cost = eur * 3_150m;
+            var t = _calc.ComputeNetPricesWithTrace(cost, "Engine Oils");
+            var profit = t.Net.Retail - cost;
+            var multiple = t.RetailInclVat / cost;
+            Assert.True(profit > prevProfit, $"retail profit must rise at EUR {eur}");
+            Assert.True(multiple <= prevMultiple + 0.005m, $"markup must not rise at EUR {eur}");
+            (prevProfit, prevMultiple) = (profit, multiple);
+        }
+    }
+
+    [Fact]
+    public void Cap_can_be_disabled_and_rejects_unordered_multiples()
+    {
+        var noCap = new PricingCalculator(new PricingCap(StartCostTzs: 0m));
+        Assert.Null(noCap.ComputeNetPricesWithTrace(3_150_000m, "Engine Oils").CapNote);
+        Assert.Throws<ArgumentException>(() => new PricingCalculator(new PricingCap(1_000_000m, 1.30m, 1.35m, 1.28m)));
+        Assert.Throws<ArgumentException>(() => new PricingCalculator(new PricingCap(1_000_000m, 1.40m, 1.35m, 1.10m)));
     }
 
     [Fact]

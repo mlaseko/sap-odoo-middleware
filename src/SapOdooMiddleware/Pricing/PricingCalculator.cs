@@ -31,7 +31,24 @@ public record PricingTrace(
     /// <summary>The prices before the no-drop floor was applied (incl-VAT; null when no floor applied).</summary>
     string? FloorNote = null,
     /// <summary>True when any tier came out zero or negative (cost too small for the formula).</summary>
-    bool HasNonPositivePrice = false);
+    bool HasNonPositivePrice = false,
+    /// <summary>How the high-cost cap was applied, or null when the cost is below the cap start.</summary>
+    string? CapNote = null);
+
+/// <summary>
+/// High-cost cap ("option 5b", Nov 2026). Costs up to <see cref="StartCostTzs"/> price through the
+/// bands as usual. Above it, the price at the cap start is kept and only the EXTRA cost is marked up,
+/// at these smaller multiples (VAT incl.). Prices and profit keep rising with cost while the overall
+/// markup tapers (e.g. 2.10x at EUR 400 → ~1.68x at EUR 1,000 → ~1.59x at EUR 1,500).
+/// </summary>
+public sealed record PricingCap(
+    decimal StartCostTzs = 1_260_000m,
+    decimal Retail = 1.40m,
+    decimal Dealer = 1.35m,
+    decimal SuperDealer = 1.28m)
+{
+    public bool Enabled => StartCostTzs > 0m;
+}
 
 /// <summary>Which pricing band an item uses and why (for display).</summary>
 public record PricingBandResolution(string? Band, string Path);
@@ -135,11 +152,32 @@ public interface IPricingCalculator
 ///      loop band with the HIGHER price is used, so a cost always gives the same price.
 ///   2. No-drop floor: at some band edges the next band's ratios gave a LOWER price for a higher
 ///      cost. Each tier (and Maasai) is lifted to the highest price any lower cost produces.
-/// Where the walk settles and no drop exists, prices are identical to the HTML tool.
+///   3. Top bands and high-cost cap ("option 5b"): 600k-900k and 1M+ use Retail 2.10x / Dealer 2.00x
+///      / SD 1.85x cost for every category, and above <see cref="PricingCap.StartCostTzs"/> only the
+///      extra cost is marked up, at the smaller cap multiples (see <see cref="PricingCap"/>).
+/// Below the 600k-900k band, where the walk settles and no drop exists, prices are identical to
+/// the HTML tool.
 /// </summary>
 public class PricingCalculator : IPricingCalculator
 {
     private const decimal VAT = 1.18m;
+
+    private readonly PricingCap _cap;
+
+    /// <summary>Defaults (cap from 1,260,000 TZS ≈ EUR 400 at 3,150).</summary>
+    public PricingCalculator() : this(new PricingCap()) { }
+
+    public PricingCalculator(PricingCap cap)
+    {
+        if (cap.Enabled && !(cap.SuperDealer < cap.Dealer && cap.Dealer < cap.Retail && cap.SuperDealer >= VAT))
+            throw new ArgumentException(
+                "Pricing cap multiples must satisfy VAT (1.18) <= SuperDealer < Dealer < Retail, "
+                + "so tiers stay ordered and the extra cost is never sold below cost.", nameof(cap));
+        _cap = cap;
+    }
+
+    /// <summary>The active high-cost cap (for display).</summary>
+    public PricingCap Cap => _cap;
 
     // Lower bound inclusive, upper bound exclusive.
     private static readonly (decimal Lo, decimal Hi, string Label)[] BandDefs =
@@ -163,13 +201,18 @@ public class PricingCalculator : IPricingCalculator
     }
 
     // (sp, d, r) DEFAULT ratios (the ported HTML tool). Cost = price × ratio, so
-    // NOTE: the 600k-900k rows were corrected in Nov 2026. The original rows had far lower ratios
-    // (e.g. Additives SD 0.44 vs 0.69 below and 0.71 above), so prices spiked in that band and a
-    // higher cost could price ~50% lower once it crossed into 1M+. Each row is now the midpoint of
-    // its 350k-600k and 1M+ neighbours; the old values are kept in the comments.
+    // NOTE (Nov 2026, "option 5b"): the 600k-900k and 1M+ rows are the same for every category:
+    // Retail 2.10x / Dealer 2.00x / Super Dealer 1.85x cost (TopBandRatios). The original rows spiked
+    // to ~3.8x in 600k-900k and fell to 1.57x in 1M+, so a dearer item could sell for less. Above the
+    // cap start (Pricing:CapStartCostTzs) only the part of the cost above it gets the smaller cap
+    // markups — see ApplyCap. The old values are kept in the comments.
     //
     // price = cost / ratio. Runtime overrides are applied on top via
     // ApplyRatioOverrides; the effective tables live in _bandRatios/_maasaiRatios.
+    /// <summary>600k-900k and 1M+ rows for every category: SD 1.85x, Dealer 2.00x, Retail 2.10x cost.</summary>
+    private static readonly (decimal sp, decimal d, decimal r) TopBandRatios =
+        (0.540540540540m, 0.5m, 0.476190476190m);
+
     private static readonly IReadOnlyDictionary<string,
         IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>> DefaultBandRatios
         = new Dictionary<string, IReadOnlyDictionary<string, (decimal, decimal, decimal)>>
@@ -183,8 +226,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.442655m, 0.30166m, 0.265692m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.442655m, 0.30166m, 0.265692m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Engine Oils"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -195,8 +238,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.592899m, 0.474121m, 0.443912m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.638425m, 0.546693m, 0.536605m),
-            ["600k to 900k"] = (0.673621m, 0.604958m, 0.586544m), // was (0.5862m, 0.464878m, 0.428126m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.5862m, 0.464878m, 0.428126m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Gear Oils & Transmission Fluids"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -207,8 +250,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.57413m, 0.426881m, 0.401149m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.57413m, 0.426881m, 0.401149m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Greases"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -219,8 +262,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.593563m, 0.390056m, 0.341299m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.593563m, 0.390056m, 0.341299m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Oils (Industrial/Other Fluids)"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -231,8 +274,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.655489m, 0.501236m, 0.478683m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.655489m, 0.501236m, 0.478683m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Service"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -243,8 +286,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.445547m, 0.304273m, 0.271382m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.445547m, 0.304273m, 0.271382m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Vehicle Care"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -255,8 +298,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.538114m, 0.332442m, 0.31608m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.538114m, 0.332442m, 0.31608m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Workshop Pro-Line"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -267,8 +310,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.452293m, 0.320548m, 0.295704m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.452293m, 0.320548m, 0.295704m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Pastes"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -279,8 +322,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.445547m, 0.304273m, 0.271382m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.445547m, 0.304273m, 0.271382m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Adhesives & Sealants"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -291,8 +334,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.445547m, 0.304273m, 0.271382m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.445547m, 0.304273m, 0.271382m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
         ["Repair Aids"] = new Dictionary<string, (decimal, decimal, decimal)>
         {
@@ -303,8 +346,8 @@ public class PricingCalculator : IPricingCalculator
             ["100k to 200k"] = (0.574126m, 0.453004m, 0.425525m),
             ["200k to 350k"] = (0.655739m, 0.534233m, 0.523511m),
             ["350k to 600k"] = (0.690027m, 0.578948m, 0.562213m),
-            ["600k to 900k"] = (0.699422m, 0.621085m, 0.599348m), // was (0.445547m, 0.304273m, 0.271382m): midpoint of 350k-600k and 1M+ (Nov 2026)
-            ["1M and above"] = (0.708817m, 0.663222m, 0.636483m),
+            ["600k to 900k"] = TopBandRatios, // was (0.445547m, 0.304273m, 0.271382m)
+            ["1M and above"] = TopBandRatios, // was (0.708817m, 0.663222m, 0.636483m)
         },
     };
 
@@ -451,7 +494,7 @@ public class PricingCalculator : IPricingCalculator
             maasaiTable = merged;
         }
 
-        return ComputeCore(cifCostTzs, pricingCategory, bandTable, maasaiTable);
+        return ComputeCapped(cifCostTzs, pricingCategory, bandTable, maasaiTable);
     }
 
     private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>>
@@ -596,7 +639,7 @@ public class PricingCalculator : IPricingCalculator
         => ComputeNetPricesWithTrace(cifCostTzs, pricingCategory).Net;
 
     public PricingTrace ComputeNetPricesWithTrace(decimal cifCostTzs, string pricingCategory)
-        => ComputeCore(cifCostTzs, pricingCategory, _bandRatios, _maasaiRatios);
+        => ComputeCapped(cifCostTzs, pricingCategory, _bandRatios, _maasaiRatios);
 
     /// <summary>One band's raw tier output at a given cost (incl-VAT, before the no-drop floor).</summary>
     private readonly record struct RawTiers(
@@ -703,13 +746,58 @@ public class PricingCalculator : IPricingCalculator
         return m;
     }
 
-    private static PricingTrace ComputeCore(
+    /// <summary>
+    /// Band pricing up to the cap start; above it, the price at the cap start plus the extra cost
+    /// marked up at the cap multiples (same rounding as the bands: SD up to 1 000, Dealer to the
+    /// nearest 5 000, Retail down to 5 000). Maasai follows from the final Super Dealer price.
+    /// </summary>
+    private PricingTrace ComputeCapped(
         decimal cifCostTzs, string pricingCategory,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>> bandRatios,
         IReadOnlyDictionary<string, decimal[]> maasaiRatios)
     {
         if (cifCostTzs <= 0m)
             throw new ArgumentOutOfRangeException(nameof(cifCostTzs), "CIF cost must be > 0.");
+        if (!_cap.Enabled || cifCostTzs <= _cap.StartCostTzs)
+            return ComputeCore(cifCostTzs, pricingCategory, bandRatios, maasaiRatios);
+
+        var atStart = ComputeCore(_cap.StartCostTzs, pricingCategory, bandRatios, maasaiRatios);
+        var extra = cifCostTzs - _cap.StartCostTzs;
+        var sp     = Math.Ceiling((atStart.SuperDealerInclVat + extra * _cap.SuperDealer) / 1000m) * 1000m;
+        var dealer = Math.Round  ((atStart.DealerInclVat      + extra * _cap.Dealer) / 5000m, MidpointRounding.AwayFromZero) * 5000m;
+        var retail = Math.Floor  ((atStart.RetailInclVat      + extra * _cap.Retail) / 5000m) * 5000m;
+        if (dealer >= retail) dealer = retail - 5000m;
+        if (sp >= dealer)     sp     = dealer - 1000m;
+
+        var maasaiCat = maasaiRatios.ContainsKey(pricingCategory) ? pricingCategory : "Service";
+        var maasaiBand = GetMaasaiBand(sp);
+        var maasai = MaasaiFloored(sp, maasaiRatios[maasaiCat]);
+
+        var note = $"High-cost cap: the first {_cap.StartCostTzs:N0} TZS of cost is priced by the bands "
+                   + $"(SD {atStart.SuperDealerInclVat:N0} / Dealer {atStart.DealerInclVat:N0} / Retail {atStart.RetailInclVat:N0}); "
+                   + $"the remaining {extra:N0} TZS at SD {_cap.SuperDealer}x / Dealer {_cap.Dealer}x / Retail {_cap.Retail}x.";
+
+        return atStart with
+        {
+            CifCostTzs = cifCostTzs,
+            RetailInclVat = retail,
+            DealerInclVat = dealer,
+            SuperDealerInclVat = sp,
+            MaasaiCategory = maasaiCat,
+            MaasaiBandIndex = maasaiBand,
+            MaasaiRatio = maasaiRatios[maasaiCat][maasaiBand],
+            MaasaiInclVat = maasai,
+            Net = new PriceTiers(retail / VAT, dealer / VAT, sp / VAT, maasai / VAT),
+            HasNonPositivePrice = sp <= 0m || dealer <= 0m || retail <= 0m || maasai <= 0m,
+            CapNote = note,
+        };
+    }
+
+    private static PricingTrace ComputeCore(
+        decimal cifCostTzs, string pricingCategory,
+        IReadOnlyDictionary<string, IReadOnlyDictionary<string, (decimal sp, decimal d, decimal r)>> bandRatios,
+        IReadOnlyDictionary<string, decimal[]> maasaiRatios)
+    {
         if (!bandRatios.TryGetValue(pricingCategory, out var catRatios))
             throw new InvalidOperationException($"Unknown pricing category '{pricingCategory}'.");
 

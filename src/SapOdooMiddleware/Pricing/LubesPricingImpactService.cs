@@ -116,6 +116,10 @@ public sealed class LubesPricingImpactService : ILubesPricingImpactService
             reasons.Add($"Band choice: {trace.BandResolution}.");
         if (trace.MonotonicFloorApplied)
             reasons.Add("No-drop floor: " + trace.FloorNote);
+        if (trace.CapNote is not null)
+            reasons.Add("High-cost cap: only the cost above the cap start gets the smaller cap markup.");
+        else if (trace.FinalBand is "600k to 900k" or "1M and above")
+            reasons.Add("Top-band markup: Retail 2.10x / Dealer 2.00x / Super Dealer 1.85x cost (was category-specific).");
 
         var newNet = new Dictionary<int, decimal>
         {
