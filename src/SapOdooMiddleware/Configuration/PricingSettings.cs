@@ -18,6 +18,11 @@ public class PricingSettings
     public decimal MarginWarnPct { get; set; } = 5m;
 
     /// <summary>
+    /// Maasai (PL04) floor: its net price is never below cost × (1 + this %). Negative disables it.
+    /// </summary>
+    public decimal MaasaiMinMarginPct { get; set; } = 5m;
+
+    /// <summary>
     /// High-cost cap (Lubes): costs above this many TZS price as "the price at this cost + the extra cost
     /// × the Cap* multiples". Default 1,260,000 ≈ EUR 400 at 3,150. 0 disables the cap.
     /// </summary>
