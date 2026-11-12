@@ -66,7 +66,10 @@
         <h2>Price Management</h2>
         <div class="sub">Lubes price lists — reprice from EUR cost through the standard workflow (SAP + Neon + Odoo)</div>
     </div>
-    <a class="btn" href="/pricing/ratios">⚙ Pricing Ratios</a>
+    <div style="display:flex;gap:8px">
+        <a class="btn" href="/pricing/simulator">🧮 Price simulator</a>
+        <a class="btn" href="/pricing/ratios">⚙ Pricing Ratios</a>
+    </div>
 </div>
 
 @if (Model.Message is not null) { <div class="msg-ok">@Model.Message</div> }

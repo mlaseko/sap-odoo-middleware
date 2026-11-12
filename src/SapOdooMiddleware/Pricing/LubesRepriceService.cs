@@ -191,6 +191,8 @@ public class LubesRepriceService : ILubesRepriceService
                 warnings.Add(trace.FloorNote);
             if (trace.CapNote is not null)
                 categoryPath += " · " + trace.CapNote;
+            if (trace.MaasaiFloorNote is not null)
+                warnings.Add(trace.MaasaiFloorNote);
 
             newNet = new Dictionary<int, decimal>
             {

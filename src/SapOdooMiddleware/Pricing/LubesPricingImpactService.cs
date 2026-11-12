@@ -116,6 +116,8 @@ public sealed class LubesPricingImpactService : ILubesPricingImpactService
             reasons.Add($"Band choice: {trace.BandResolution}.");
         if (trace.MonotonicFloorApplied)
             reasons.Add("No-drop floor: " + trace.FloorNote);
+        if (trace.MaasaiFloorNote is not null)
+            reasons.Add("Maasai cost floor: " + trace.MaasaiFloorNote);
         if (trace.CapNote is not null)
             reasons.Add("High-cost cap: only the cost above the cap start gets the smaller cap markup.");
         else if (trace.FinalBand is "600k to 900k" or "1M and above")

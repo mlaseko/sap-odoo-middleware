@@ -244,6 +244,31 @@ public class PricingTraceController : ControllerBase
         return Ok(ApiResponse<PricingImpactReport>.Ok(await impact.BuildAsync(useStored, ct)));
     }
 
+    /// <summary>
+    /// POST /api/pricing/simulate — READ ONLY. Prices items that need not exist in SAP/Odoo with the
+    /// live calculator. Body: { "rate": optional, "items": [ { "reference", "description", "cost",
+    /// "currency": "EUR"|"TZS", "band" | "sap_group" (+ "odoo_category"), "benchmark" } ] }.
+    /// Nothing is saved or posted.
+    /// </summary>
+    [HttpPost("simulate")]
+    public async Task<IActionResult> Simulate(
+        [FromServices] ILubesPriceSimulator simulator, [FromBody] SimulateRequest request, CancellationToken ct)
+    {
+        if (request.Items is not { Count: > 0 })
+            return BadRequest(ApiResponse<object>.Fail("items is required (at least one)."));
+        if (request.Items.Count > LubesPriceSimulator.MaxItems)
+            return BadRequest(ApiResponse<object>.Fail($"At most {LubesPriceSimulator.MaxItems} items per call."));
+        var results = await simulator.SimulateAsync(request.Items, request.Rate, ct);
+        return Ok(ApiResponse<object>.Ok(results.Select(r => new
+        {
+            r.Input, r.Rate, cost_tzs = r.CostTzs, r.Band, band_path = r.BandPath,
+            incl_vat = r.InclVat, net = r.Net, margin_pct = r.MarginPct,
+            r.Notes, r.Warnings, r.Error,
+            benchmark = r.Benchmark is { Found: true } b
+                ? new { b.ItemCode, b.ItemName, stored_net = b.OldNet } : null,
+        })));
+    }
+
     /// <summary>GET /api/pricing/ratios — the calculator's effective ratio tables (defaults + overrides).</summary>
     [HttpGet("ratios")]
     public IActionResult GetRatios()
@@ -478,6 +503,14 @@ public class PricingTraceController : ControllerBase
 
 /// <summary>PUT /api/pricing/rate body.</summary>
 public record RateUpdateRequest(decimal Rate);
+
+/// <summary>Body of POST /api/pricing/simulate.</summary>
+public class SimulateRequest
+{
+    /// <summary>EUR→TZS rate override; omitted = the effective rate.</summary>
+    public decimal? Rate { get; set; }
+    public List<SimulationInput> Items { get; set; } = new();
+}
 
 /// <summary>POST /api/pricing/reprice body.</summary>
 public class RepriceRequest

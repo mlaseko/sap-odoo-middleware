@@ -33,7 +33,9 @@ public record PricingTrace(
     /// <summary>True when any tier came out zero or negative (cost too small for the formula).</summary>
     bool HasNonPositivePrice = false,
     /// <summary>How the high-cost cap was applied, or null when the cost is below the cap start.</summary>
-    string? CapNote = null);
+    string? CapNote = null,
+    /// <summary>Set when Maasai was raised to the cost floor (cost + MaasaiMinMarginPct, excl. VAT).</summary>
+    string? MaasaiFloorNote = null);
 
 /// <summary>
 /// High-cost cap ("option 5b", Nov 2026). Costs up to <see cref="StartCostTzs"/> price through the
@@ -163,12 +165,20 @@ public class PricingCalculator : IPricingCalculator
     private const decimal VAT = 1.18m;
 
     private readonly PricingCap _cap;
+    private readonly decimal _maasaiMinMarginPct;
 
-    /// <summary>Defaults (cap from 1,260,000 TZS ≈ EUR 400 at 3,150).</summary>
+    /// <summary>Defaults (cap from 1,260,000 TZS ≈ EUR 400 at 3,150; Maasai ≥ cost + 5%).</summary>
     public PricingCalculator() : this(new PricingCap()) { }
 
-    public PricingCalculator(PricingCap cap)
+    /// <param name="cap">High-cost cap.</param>
+    /// <param name="maasaiMinMarginPct">
+    /// Maasai (PL04) floor: its net (excl-VAT) price is never below cost × (1 + this %). Maasai follows
+    /// Super Dealer × a ratio, so on capped (expensive) items it could otherwise fall to or below cost.
+    /// Negative disables the floor.
+    /// </param>
+    public PricingCalculator(PricingCap cap, decimal maasaiMinMarginPct = 5m)
     {
+        _maasaiMinMarginPct = maasaiMinMarginPct;
         if (cap.Enabled && !(cap.SuperDealer < cap.Dealer && cap.Dealer < cap.Retail && cap.SuperDealer >= VAT))
             throw new ArgumentException(
                 "Pricing cap multiples must satisfy VAT (1.18) <= SuperDealer < Dealer < Retail, "
@@ -178,6 +188,29 @@ public class PricingCalculator : IPricingCalculator
 
     /// <summary>The active high-cost cap (for display).</summary>
     public PricingCap Cap => _cap;
+
+    /// <summary>The Maasai cost floor in percent over cost (negative = off).</summary>
+    public decimal MaasaiMinMarginPct => _maasaiMinMarginPct;
+
+    /// <summary>
+    /// Raises Maasai to cost × (1 + floor%) incl. VAT, rounded up to 1 000, but always at least 1 000
+    /// below Super Dealer. Both inputs rise with cost, so the no-drop guarantee still holds.
+    /// </summary>
+    private PricingTrace ApplyMaasaiFloor(PricingTrace t)
+    {
+        if (_maasaiMinMarginPct < 0m || t.SuperDealerInclVat <= 0m) return t;
+        var floorIncl = Math.Ceiling(t.CifCostTzs * (1m + _maasaiMinMarginPct / 100m) * VAT / 1000m) * 1000m;
+        var target = Math.Min(floorIncl, t.SuperDealerInclVat - 1000m);
+        if (target <= t.MaasaiInclVat) return t;
+        return t with
+        {
+            MaasaiInclVat = target,
+            Net = t.Net with { Maasai = target / VAT },
+            MaasaiFloorNote = $"Maasai raised from {t.MaasaiInclVat:N0} to {target:N0} (incl VAT) so it stays at least "
+                              + $"{_maasaiMinMarginPct:0.#}% over the cost"
+                              + (target < floorIncl ? " — capped just below Super Dealer" : "") + ".",
+        };
+    }
 
     // Lower bound inclusive, upper bound exclusive.
     private static readonly (decimal Lo, decimal Hi, string Label)[] BandDefs =
@@ -759,7 +792,7 @@ public class PricingCalculator : IPricingCalculator
         if (cifCostTzs <= 0m)
             throw new ArgumentOutOfRangeException(nameof(cifCostTzs), "CIF cost must be > 0.");
         if (!_cap.Enabled || cifCostTzs <= _cap.StartCostTzs)
-            return ComputeCore(cifCostTzs, pricingCategory, bandRatios, maasaiRatios);
+            return ApplyMaasaiFloor(ComputeCore(cifCostTzs, pricingCategory, bandRatios, maasaiRatios));
 
         var atStart = ComputeCore(_cap.StartCostTzs, pricingCategory, bandRatios, maasaiRatios);
         var extra = cifCostTzs - _cap.StartCostTzs;
@@ -777,7 +810,7 @@ public class PricingCalculator : IPricingCalculator
                    + $"(SD {atStart.SuperDealerInclVat:N0} / Dealer {atStart.DealerInclVat:N0} / Retail {atStart.RetailInclVat:N0}); "
                    + $"the remaining {extra:N0} TZS at SD {_cap.SuperDealer}x / Dealer {_cap.Dealer}x / Retail {_cap.Retail}x.";
 
-        return atStart with
+        return ApplyMaasaiFloor(atStart with
         {
             CifCostTzs = cifCostTzs,
             RetailInclVat = retail,
@@ -790,7 +823,7 @@ public class PricingCalculator : IPricingCalculator
             Net = new PriceTiers(retail / VAT, dealer / VAT, sp / VAT, maasai / VAT),
             HasNonPositivePrice = sp <= 0m || dealer <= 0m || retail <= 0m || maasai <= 0m,
             CapNote = note,
-        };
+        });
     }
 
     private static PricingTrace ComputeCore(

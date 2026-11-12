@@ -1,0 +1,211 @@
+@page "/pricing/simulator"
+@model SapOdooMiddleware.Pages.Pricing.SimulatorModel
+@functions {
+    static string Money(decimal? v) => v is null ? "—" : v.Value.ToString("N0");
+    static string Pct(decimal? v) => v is null ? "—" : $"{v:+0.#;-0.#}%";
+    static string MarginCls(decimal? m) => m is null ? "" : m < 0m ? "delta-big" : m < 5m ? "delta-up" : "";
+}
+
+<style>
+    .inline-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .inline-form input, .inline-form select {
+        padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+        background: var(--surface-2); color: var(--text);
+    }
+    .inline-form input:focus, .inline-form select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .inline-form label { color: var(--muted); font-size: 13px; }
+    .msg-ok   { background: rgba(52,211,153,.12);  border: 1px solid rgba(52,211,153,.35);  color: #6ee7b7; padding: 8px 12px; border-radius: var(--radius-sm); margin: 10px 0; }
+    .msg-err  { background: rgba(248,113,113,.12); border: 1px solid rgba(248,113,113,.35); color: #fca5a5; padding: 8px 12px; border-radius: var(--radius-sm); margin: 10px 0; }
+    .msg-warn { background: rgba(251,191,36,.12);  border: 1px solid rgba(251,191,36,.35);  color: #fcd34d; padding: 8px 12px; border-radius: var(--radius-sm); margin: 10px 0; }
+    .meta { color: var(--muted); font-size: 12px; }
+    .price-grid { border-collapse: collapse; font-size: 13px; }
+    .price-grid th, .price-grid td { border: 1px solid var(--border-soft); padding: 5px 9px; text-align: right; color: var(--text); vertical-align: top; }
+    .price-grid th { background: var(--surface-2); color: var(--muted); }
+    .delta-up { color: var(--warning); } .delta-big { color: #f87171; font-weight: 600; }
+    .grid-form { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 8px 12px; }
+    .grid-form label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+    .grid-form input, .grid-form select { width: 100%; padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text); }
+</style>
+
+<div class="page-head">
+    <div>
+        <h2>Price simulator</h2>
+        <div class="sub">Price items that are not in SAP or Odoo yet — same formula as item creation. Nothing is saved or posted.</div>
+    </div>
+    <div style="display:flex;gap:8px">
+        <a class="btn" href="/pricing">← Price Management</a>
+        <a class="btn" href="/pricing/ratios">⚙ Pricing Ratios</a>
+    </div>
+</div>
+
+@if (Model.Message is not null) { <div class="msg-ok">@Model.Message</div> }
+@if (Model.Error is not null) { <div class="msg-err">@Model.Error</div> }
+@foreach (var e in Model.ParseErrors) { <div class="msg-warn">@e</div> }
+
+<div class="card">
+    <h3>Add an item</h3>
+    <div class="meta" style="margin-bottom:8px">
+        EUR costs convert at <b>@((Model.RateOverride ?? Model.Rate.Rate).ToString("N0"))</b> TZS/€
+        @(Model.RateOverride is null ? $"(current rate, {Model.Rate.Source})" : "(override)").
+        Cost = supplier price only, as in item creation. Pick a pricing band, or a SAP group
+        (for group 107 add the Odoo category so greases price as Greases).
+    </div>
+    <form method="post" asp-page-handler="Add">
+        <input type="hidden" name="inputsJson" value="@Model.InputsJson" />
+        <input type="hidden" name="rateOverride" value="@Model.RateOverride" />
+        <div class="grid-form">
+            <div><label>Reference</label><input asp-for="Form.Reference" placeholder="e.g. 20855 or NEW-1" /></div>
+            <div style="grid-column: span 3"><label>Description</label><input asp-for="Form.Description" placeholder="e.g. Top Tec 4200 5W-30 60 L" /></div>
+            <div><label>Cost</label><input asp-for="Form.Cost" type="number" step="0.01" min="0.01" required /></div>
+            <div><label>Currency</label>
+                <select asp-for="Form.Currency"><option>EUR</option><option>TZS</option></select></div>
+            <div><label>Pricing band</label>
+                <select asp-for="Form.Band">
+                    <option value="">— or use SAP group —</option>
+                    @foreach (var c in SapOdooMiddleware.Pages.Pricing.IndexModel.CategoryOptions) { <option value="@c">@c</option> }
+                </select></div>
+            <div><label>SAP group</label>
+                <select asp-for="Form.SapGroup">
+                    <option value="">—</option>
+                    @foreach (var g in SapOdooMiddleware.Pages.Pricing.SimulatorModel.SapGroups) { <option value="@g.Code">@g.Code @g.Name</option> }
+                </select></div>
+            <div style="grid-column: span 2"><label>Odoo category (optional)</label>
+                <input asp-for="Form.OdooCategory" placeholder="e.g. Greases / Multi-purpose grease" /></div>
+            <div style="grid-column: span 2"><label>Compare with an existing item (optional)</label>
+                <input asp-for="Form.Benchmark" list="itemSearch" data-itemsearch placeholder="item code or name" /></div>
+        </div>
+        <div class="inline-form" style="margin-top:10px">
+            <button class="btn btn-primary" type="submit">Add &amp; price</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h3>Or upload a list</h3>
+    <div class="meta" style="margin-bottom:8px">
+        Header row with: <b>Cost</b> and <b>Band</b> (or <b>SapGroup</b>); optional Reference, Description,
+        Currency (EUR/TZS, default EUR), OdooCategory, Benchmark. Up to 500 items.
+        <a href="/pricing/simulator?handler=Template">Download a template</a>.
+    </div>
+    <form method="post" asp-page-handler="Upload" enctype="multipart/form-data" class="inline-form">
+        <input type="hidden" name="inputsJson" value="@Model.InputsJson" />
+        <input type="file" name="file" accept=".xlsx" required />
+        <label><input type="checkbox" name="append" value="true" /> add to the current list</label>
+        <label>Rate override (optional):</label>
+        <input type="number" name="rateOverride" step="0.01" min="1" value="@(Model.RateOverride?.ToString("0.##"))" />
+        <button class="btn" type="submit">Upload &amp; price</button>
+    </form>
+</div>
+
+@if (Model.Results.Count > 0)
+{
+    <div class="card">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <h3 style="margin:0">Simulated prices (@Model.Results.Count)</h3>
+            <a class="btn btn-sm" href="/pricing/simulator" title="Start over (nothing was saved)">✕ Clear list</a>
+        </div>
+        <div class="meta" style="margin:6px 0">
+            Prices incl VAT; net (excl VAT) and margin over cost underneath. Margin is the net price over the TZS cost.
+        </div>
+        <div style="overflow-x:auto">
+            <table class="price-grid">
+                <tr>
+                    <th style="text-align:left">Item</th><th>Cost</th><th>Cost TZS</th><th style="text-align:left">Band</th>
+                    <th>PL1 Retail</th><th>PL2 Dealer</th><th>PL3 Super Dealer</th><th>PL4 Maasai</th>
+                    <th>Retail ÷ cost</th><th style="text-align:left">Notes</th><th></th>
+                </tr>
+                @for (int i = 0; i < Model.Results.Count; i++)
+                {
+                    var r = Model.Results[i];
+                    var bench = r.Benchmark is { Found: true } b ? b : null;
+                    <tr>
+                        <td style="text-align:left"><b>@(r.Input.Reference ?? "—")</b><div class="meta">@r.Input.Description</div></td>
+                        <td>@r.Input.Cost.ToString("N2") @r.Input.Currency</td>
+                        <td>@Money(r.CostTzs)</td>
+                        <td style="text-align:left">@(r.Band ?? "—")</td>
+                        @for (int pl = 1; pl <= 4; pl++)
+                        {
+                            var m = r.MarginPct?.GetValueOrDefault(pl);
+                            <td>
+                                <b>@Money(r.InclVat?.GetValueOrDefault(pl))</b>
+                                @if (r.Ok)
+                                {
+                                    <div class="meta">net @Money(r.Net![pl])</div>
+                                    <div class="@MarginCls(m)">@Pct(m)</div>
+                                }
+                                @if (bench is not null && bench.OldNet.TryGetValue(pl, out var bn) && bn > 0m)
+                                {
+                                    var bIncl = Math.Round(bn * 1.18m);
+                                    var vs = r.InclVat is not null ? Math.Round((r.InclVat[pl] - bIncl) / bIncl * 100m, 1) : (decimal?)null;
+                                    <div class="meta" style="color:var(--teal)" title="@bench.ItemCode — @bench.ItemName">b: @Money(bIncl) (@Pct(vs))</div>
+                                }
+                            </td>
+                        }
+                        <td>@(r.Ok && r.CostTzs is > 0m ? (r.InclVat![1] / r.CostTzs.Value).ToString("0.00") + "×" : "—")</td>
+                        <td style="text-align:left;max-width:420px">
+                            @if (r.Error is not null) { <div class="delta-big">@r.Error</div> }
+                            @foreach (var w in r.Warnings) { <div class="delta-up">⚠ @w</div> }
+                            @foreach (var n in r.Notes) { <div class="meta">@n</div> }
+                            <div class="meta">@r.BandPath</div>
+                            @if (bench is not null) { <div class="meta" style="color:var(--teal)">b = @bench.ItemCode @bench.ItemName (stored prices)</div> }
+                        </td>
+                        <td>
+                            <form method="post" asp-page-handler="Remove" style="display:inline">
+                                <input type="hidden" name="inputsJson" value="@Model.InputsJson" />
+                                <input type="hidden" name="rateOverride" value="@Model.RateOverride" />
+                                <input type="hidden" name="index" value="@i" />
+                                <button class="btn btn-sm" type="submit" title="Remove this item">✕</button>
+                            </form>
+                        </td>
+                    </tr>
+                }
+            </table>
+        </div>
+        <div class="inline-form" style="margin-top:10px">
+            <form method="post" asp-page-handler="Recalculate" class="inline-form">
+                <input type="hidden" name="inputsJson" value="@Model.InputsJson" />
+                <label>Rate:</label>
+                <input type="number" name="rateOverride" step="0.01" min="1" placeholder="@Model.Rate.Rate.ToString("0")"
+                       value="@(Model.RateOverride?.ToString("0.##"))" />
+                <button class="btn" type="submit">Recalculate</button>
+            </form>
+            <form method="post" asp-page-handler="Download">
+                <input type="hidden" name="inputsJson" value="@Model.InputsJson" />
+                <input type="hidden" name="rateOverride" value="@Model.RateOverride" />
+                <button class="btn btn-primary" type="submit">Download results (.xlsx)</button>
+            </form>
+        </div>
+    </div>
+}
+
+<datalist id="itemSearch"></datalist>
+<script>
+    (function () {
+        const dl = document.getElementById("itemSearch");
+        let timer = null, lastTerm = "";
+        function search(term) {
+            if (term === lastTerm) return;
+            lastTerm = term;
+            fetch(`/pricing?handler=ItemSearch&term=${encodeURIComponent(term)}`)
+                .then(r => r.ok ? r.json() : [])
+                .then(rows => {
+                    dl.innerHTML = "";
+                    for (const row of rows) {
+                        const opt = document.createElement("option");
+                        opt.value = row.code;
+                        opt.label = row.name ? `${row.code} — ${row.name}` : row.code;
+                        dl.appendChild(opt);
+                    }
+                })
+                .catch(() => { });
+        }
+        document.querySelectorAll("input[data-itemsearch]").forEach(el => {
+            el.addEventListener("input", () => {
+                const term = el.value.trim();
+                clearTimeout(timer);
+                if (term.length < 2) return;
+                timer = setTimeout(() => search(term), 250);
+            });
+        });
+    })();
+</script>
