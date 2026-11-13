@@ -20,6 +20,10 @@ public interface ILubesItemProvisioningService
     /// See LubesItemProvisioningService.Preview.cs.
     /// </summary>
     Task<LubesItemPreviewResult> PreviewAsync(LubesItemPreviewRequest request, CancellationToken ct);
+
+    /// <summary>The same, reporting each step as it runs (the inquiry preview job's live progress).</summary>
+    Task<LubesItemPreviewResult> PreviewAsync(
+        LubesItemPreviewRequest request, IItemPreviewProgress progress, CancellationToken ct);
 }
 
 /// <summary>

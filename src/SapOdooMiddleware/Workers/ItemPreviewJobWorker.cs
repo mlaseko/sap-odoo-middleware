@@ -51,7 +51,7 @@ public class ItemPreviewJobWorker : BackgroundService
         {
             using var scope = _sp.CreateScope();
             var service = scope.ServiceProvider.GetRequiredService<ILubesItemProvisioningService>();
-            var result = await service.PreviewAsync(request, ct);
+            var result = await service.PreviewAsync(request, _store.ProgressFor(jobId), ct);
             _store.Complete(jobId, result);
             _logger.LogInformation("Preview job {JobId} for {Article}: {Status}.", jobId, request.ArticleNumber, result.Status);
         }
