@@ -164,6 +164,13 @@ no pricing and no SAP / `NeonProducts` write (the `NeonLiquiMolyProducts` scrape
   - The same request returns the running job. A complete result is reused for 24 h; not found or classifier down
     is reused for 10 min.
 - A slow first fetch after a middleware restart is the product list being rebuilt (step "Liqui Moly product list").
+- **Pictures** (`ProductImageGallery.Clean`) are cleaned for the inquiry gallery. A product page lists each picture
+  in many sizes (100–800 px, CDN and direct) and the pictures of every pack (21130 1 l next to 21131 5 l…). The
+  gallery keeps this article's pictures (file names `{sku}_…`) once each, at the original file
+  (`/media/catalog/product/x/y/file.png`), at most 6, front first. The PIM article image is kept only when the page
+  has none: it repeats the front at ~3 MB. The scraper's ranking now breaks ties by page order instead of by URL, so
+  the front of the pack leads (`ImageUrl` too). `refresh=true` reads the page again instead of the cache (Odoo's
+  "Predict again"), which fixes rows cached with the old order.
 - Caller: Odoo `molas_supplier_orders` customer inquiries (Sales ▸ Products, a code with no product ▸ "Fetch").
 
 **OITB / SAP item groups (live, Nov 2026):** 104 Repair aids/service products · 105 Engine Oils ·

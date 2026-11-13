@@ -9,7 +9,8 @@ namespace SapOdooMiddleware.ItemProvisioning;
 /// PDFs), seconds once the product list is warm. Odoo asks again with classify=true once the inquiry is saved, so the
 /// predicted Odoo category and SAP item group are ready for the approver (the scrape then comes from the cache).
 /// </summary>
-public record LubesItemPreviewRequest(string ArticleNumber, string? Brand = null, bool Classify = true);
+/// refresh=true reads the page again instead of the Neon cache (and updates the cache), e.g. pictures changed.
+public record LubesItemPreviewRequest(string ArticleNumber, string? Brand = null, bool Classify = true, bool Refresh = false);
 
 /// <summary>
 /// What a sales user and the approver see before an item exists: the scraped product and the Odoo category /

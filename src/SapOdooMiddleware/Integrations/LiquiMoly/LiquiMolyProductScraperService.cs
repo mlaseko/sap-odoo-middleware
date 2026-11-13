@@ -1092,9 +1092,10 @@ public class LiquiMolyProductScraperService
             requestedSku,
             baseScore: 40);
 
+        // Ties keep the page order (OrderByDescending is a stable sort): the product gallery lists the front of the
+        // pack first, where the URL order put e.g. 21130's back label (…_50c9) before its front (…_e24f).
         return ranked
             .OrderByDescending(x => x.Score)
-            .ThenBy(x => x.Url, StringComparer.OrdinalIgnoreCase)
             .Select(x => x.Url)
             .ToList();
     }

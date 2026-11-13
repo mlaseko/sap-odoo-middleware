@@ -9,7 +9,7 @@ namespace SapOdooMiddleware.Controllers;
 /// would assign. No price, no SAP or NeonProducts write.
 ///
 /// Async like /api/items, because a cold scrape plus the classifier can outlast the Cloudflare ~100s timeout:
-/// POST /api/items/preview          — body { "article_number", "brand?", "classify?" } → 202 { job_id, status, status_url }
+/// POST /api/items/preview          — body { "article_number", "brand?", "classify?", "refresh?" } → 202 { job_id, status, status_url }
 ///                                    (classify=false: the scrape only, for the salesperson; the same request again
 ///                                    returns the running job, or a complete result for 24 h)
 /// GET  /api/items/preview/{jobId}  — poll: status, queue_ahead, the live steps, the item as soon as it is read;
