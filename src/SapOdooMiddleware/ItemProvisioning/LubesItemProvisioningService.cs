@@ -13,6 +13,13 @@ namespace SapOdooMiddleware.ItemProvisioning;
 public interface ILubesItemProvisioningService
 {
     Task<LubesProvisioningResult> ProvisionAsync(LubesProvisioningRequest request, CancellationToken ct);
+
+    /// <summary>
+    /// Read-only look at one article for a sales inquiry: the scraped product (cache first) plus the Odoo
+    /// category and SAP item group it WOULD get. Writes nothing to SAP or NeonProducts and needs no price.
+    /// See LubesItemProvisioningService.Preview.cs.
+    /// </summary>
+    Task<LubesItemPreviewResult> PreviewAsync(LubesItemPreviewRequest request, CancellationToken ct);
 }
 
 /// <summary>
@@ -26,7 +33,7 @@ public interface ILubesItemProvisioningService
 /// same article number is safe and heals any prior half-created state.
 /// SAP is the system of record: nothing is written if pre-flight validation fails.
 /// </summary>
-public class LubesItemProvisioningService : ILubesItemProvisioningService
+public partial class LubesItemProvisioningService : ILubesItemProvisioningService
 {
     private readonly ICategoryClassifier            _classifier;
     private readonly IPricingCalculator             _pricing;
