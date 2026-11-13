@@ -85,7 +85,7 @@ public sealed class ItemPreviewJobStore : IItemPreviewJobStore
     public ChannelReader<string> Reader => _queue.Reader;
 
     internal static string KeyOf(LubesItemPreviewRequest r) =>
-        $"{(r.ArticleNumber ?? "").Trim().ToUpperInvariant()}|{(r.Brand ?? "").Trim().ToLowerInvariant()}|{r.Classify}";
+        $"{(r.ArticleNumber ?? "").Trim().ToUpperInvariant()}|{(r.Brand ?? "").Trim().ToLowerInvariant()}|{r.Classify}|{r.Refresh}";
 
     private static bool Reusable(Entry e, DateTimeOffset now)
     {

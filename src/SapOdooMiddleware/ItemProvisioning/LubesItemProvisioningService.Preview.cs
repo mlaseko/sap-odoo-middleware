@@ -47,7 +47,7 @@ public partial class LubesItemProvisioningService
             progress.Step(StepGroup, LabelGroup, "pending");
         }
 
-        var (lm, brand) = await FindForPreviewAsync(code, req.Brand, progress, ct);
+        var (lm, brand) = await FindForPreviewAsync(code, req.Brand, req.Refresh, progress, ct);
         if (lm is null)
         {
             if (req.Classify)
@@ -57,6 +57,14 @@ public partial class LubesItemProvisioningService
             }
             return new LubesItemPreviewResult("not_found", code, Brand: brand,
                 Message: $"{brand} has no product with article number {code}.");
+        }
+
+        // the gallery people see: this pack's pictures once each, front first (the cache keeps the scraper's list)
+        var pictures = ProductImageGallery.Clean(new[] { lm.ImageUrl }.Concat(lm.AllImageUrls ?? new()), code);
+        if (pictures.Count > 0)
+        {
+            lm.AllImageUrls = pictures;
+            lm.ImageUrl = pictures[0];
         }
 
         var itemName = $"{code}-{lm.Name}";
@@ -202,7 +210,7 @@ public partial class LubesItemProvisioningService
     /// "meguin" asks Meguin only; "liqui_moly" Liqui Moly only; no brand tries Liqui Moly then Meguin.
     /// </summary>
     private async Task<(LiquiMolyProductDto? Product, string Brand)> FindForPreviewAsync(
-        string code, string? brand, IItemPreviewProgress progress, CancellationToken ct)
+        string code, string? brand, bool refresh, IItemPreviewProgress progress, CancellationToken ct)
     {
         var wanted = (brand ?? "").Trim().ToLowerInvariant().Replace(" ", "_").Replace("-", "_");
         var onlyMeguin = wanted == "meguin";
@@ -210,7 +218,7 @@ public partial class LubesItemProvisioningService
         var label = onlyMeguin ? "Meguin" : "Liqui Moly";
 
         progress.Step(StepLookup, LabelLookup, "running");
-        var cached = await _lmRepo.GetByArticleNumberAsync(code, ct);
+        var cached = refresh ? null : await _lmRepo.GetByArticleNumberAsync(code, ct);
         if (cached is not null)
         {
             var age = cached.ScrapedAt is { } at ? $", read {(int)(DateTime.UtcNow - at).TotalDays} day(s) ago" : "";
@@ -218,7 +226,7 @@ public partial class LubesItemProvisioningService
             progress.Step(StepScrape, LabelScrape, "skipped", "already saved");
             return (cached, label);
         }
-        progress.Step(StepLookup, LabelLookup, "done", "not fetched before");
+        progress.Step(StepLookup, LabelLookup, "done", refresh ? "reading the page again" : "not fetched before");
 
         var sources = new List<(LiquiMolyProductScraperService Scraper, string Brand, string Key, string Label)>();
         if (!onlyMeguin) sources.Add((_scraper, "Liqui Moly", StepScrape, LabelScrape));
