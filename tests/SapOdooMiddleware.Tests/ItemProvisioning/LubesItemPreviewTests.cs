@@ -65,6 +65,49 @@ public class LubesItemPreviewTests
         Assert.Null(r.OdooCategoryExternalId);
         Assert.Null(r.SapItemGroupCode);
         Assert.True(r.NeedsReview);
-        Assert.Contains("Classifier unavailable", r.ClassificationNote);
+        Assert.Contains("classifier unavailable", r.ClassificationNote);
+        Assert.False(r.ClassificationComplete);
+    }
+
+    [Fact]
+    public async Task ScrapeOnly_StopsBeforeTheClassifier()
+    {
+        var svc = Service(new LiquiMolyProductDto { ArticleNumber = "23139", Name = "Top Tec 6600 0W-20", PackagingSize = "5 l" });
+        var steps = new List<string>();
+        var progress = new Mock<IItemPreviewProgress>();
+        progress.Setup(p => p.Step(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>()))
+                .Callback<string, string, string, string?>((k, _, st, _) => steps.Add($"{k}:{st}"));
+
+        var r = await svc.PreviewAsync(new LubesItemPreviewRequest("23139", Classify: false), progress.Object, CancellationToken.None);
+
+        Assert.Equal("found", r.Status);
+        Assert.Equal("23139-Top Tec 6600 0W-20-5 l", r.ItemName);
+        Assert.False(r.ClassificationComplete);
+        Assert.DoesNotContain(steps, s => s.StartsWith("category") || s.StartsWith("group"));
+        Assert.Contains("scrape:skipped", steps);   // read from the cache
+        _classifier.VerifyNoOtherCalls();
+        progress.Verify(p => p.Product(It.IsAny<LiquiMolyProductDto>(), "Liqui Moly", r.ItemName!), Times.Once);
+    }
+
+    [Fact]
+    public async Task Classification_AsksBothAtOnce()
+    {
+        var bothStarted = new TaskCompletionSource();
+        var started = 0;
+        async Task Gate() { if (Interlocked.Increment(ref started) == 2) bothStarted.SetResult(); await bothStarted.Task; }
+        _classifier.Setup(c => c.ClassifyCategoryAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+                   .Returns(async () => { await Gate(); return new CategoryClassification
+                       { ExternalId = "__import__.lm_cat_motor_oils__passenger_car", Name = "Passenger car", Confidence = 0.9 }; });
+        _classifier.Setup(c => c.ClassifyFamilyAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+                   .Returns(async () => { await Gate(); return new FamilyClassification
+                       { GroupCode = 105, GroupName = "Engine Oils", Confidence = 0.9 }; });
+        var svc = Service(new LiquiMolyProductDto { ArticleNumber = "23139", Name = "Top Tec 6600 0W-20" });
+
+        // sequential calls would never pass the gate: each waits for the other to start
+        var r = await svc.PreviewAsync(new LubesItemPreviewRequest("23139"), CancellationToken.None)
+                         .WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(105, r.SapItemGroupCode);
+        Assert.True(r.ClassificationComplete);
     }
 }

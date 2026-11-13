@@ -9,9 +9,11 @@ namespace SapOdooMiddleware.Controllers;
 /// would assign. No price, no SAP or NeonProducts write.
 ///
 /// Async like /api/items, because a cold scrape plus the classifier can outlast the Cloudflare ~100s timeout:
-/// POST /api/items/preview          — body { "article_number", "brand?" } → 202 { job_id, status, status_url }
-///                                    (the same code asked again within 10 minutes returns the same job)
-/// GET  /api/items/preview/{jobId}  — poll; "completed" carries the result (status "found" | "not_found")
+/// POST /api/items/preview          — body { "article_number", "brand?", "classify?" } → 202 { job_id, status, status_url }
+///                                    (classify=false: the scrape only, for the salesperson; the same request again
+///                                    returns the running job, or a complete result for 24 h)
+/// GET  /api/items/preview/{jobId}  — poll: status, queue_ahead, the live steps, the item as soon as it is read;
+///                                    "completed" carries the result (status "found" | "not_found")
 /// </summary>
 [ApiController]
 [Route("api/items/preview")]
@@ -34,8 +36,8 @@ public class ItemPreviewController : ControllerBase
 
         var jobId = _jobs.Enqueue(request with { ArticleNumber = request.ArticleNumber.Trim() });
         var statusUrl = $"/api/items/preview/{jobId}";
-        _logger.LogInformation("Preview job {JobId} for article {Article} (brand {Brand}).",
-            jobId, request.ArticleNumber, request.Brand ?? "any");
+        _logger.LogInformation("Preview job {JobId} for article {Article} (brand {Brand}, classify {Classify}).",
+            jobId, request.ArticleNumber, request.Brand ?? "any", request.Classify);
         var snapshot = _jobs.GetSnapshot(jobId);
         return Accepted(statusUrl, new { JobId = jobId, Status = snapshot?.Status ?? "queued", StatusUrl = statusUrl });
     }

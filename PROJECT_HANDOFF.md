@@ -148,11 +148,23 @@ and scrapes product detail.
 **Inquiry preview (read-only front half):** `LubesItemProvisioningService.PreviewAsync`
 (`LubesItemProvisioningService.Preview.cs`) runs steps 1–2 above with the same Layer-1 rules and DGX calls, but
 no pricing and no SAP / `NeonProducts` write (the `NeonLiquiMolyProducts` scrape-cache upsert is the only write).
-A low-confidence / failed classification is reported (`needs_review`, `classification_note`), not an early exit.
-No brand → Liqui Moly, then Meguin. Async like provisioning, on its own queue (`ItemPreviewJobStore`,
-`ItemPreviewJobWorker`, 3 at a time; the same code within 10 min reuses the job):
-`POST /api/items/preview` `{article_number, brand?}` → 202 `{job_id}`; poll `GET /api/items/preview/{jobId}`.
-Caller: Odoo `molas_supplier_orders` customer inquiries (Sales ▸ Products, a code with no product ▸ "Fetch").
+- `classify=false` stops after the scrape. This is the salesperson's fetch: text, pictures, pack and PDFs, in
+  seconds once the product list is warm. Odoo asks again with `classify=true` once the inquiry is saved, so the
+  approver finds the prediction ready; the scrape then comes from the cache.
+- The Odoo category and the SAP item group are asked of DGX **at the same time**, within 120 s together
+  (`PreviewClassifierBudget`; DGX may take up to 180 s per call). A low-confidence, failed or too slow
+  classification is reported (`needs_review`, `classification_complete=false`, `classification_note`), not an
+  early exit.
+- With no brand given, it tries Liqui Moly, then Meguin.
+- It is async like provisioning, on its own queue (`ItemPreviewJobStore`, `ItemPreviewJobWorker`, 3 jobs at a time).
+  - `POST /api/items/preview` `{article_number, brand?, classify?}` returns 202 `{job_id}`.
+  - Poll `GET /api/items/preview/{jobId}`. It returns `status`, `queue_ahead`, the live `steps` (look up the cache →
+    product list → read the page → Meguin → category → group; each pending / running / done / skipped / failed,
+    with its detail and seconds), and `item_name` + `product` as soon as the page is read.
+  - The same request returns the running job. A complete result is reused for 24 h; not found or classifier down
+    is reused for 10 min.
+- A slow first fetch after a middleware restart is the product list being rebuilt (step "Liqui Moly product list").
+- Caller: Odoo `molas_supplier_orders` customer inquiries (Sales ▸ Products, a code with no product ▸ "Fetch").
 
 **OITB / SAP item groups (live, Nov 2026):** 104 Repair aids/service products · 105 Engine Oils ·
 106 Commercial vehicles/Construction and mining equipment · 107 Gear Oils/ATF/Greases · 108 Branding Materials ·
