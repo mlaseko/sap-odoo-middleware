@@ -171,6 +171,11 @@ builder.Services.AddScoped<ILubesItemProvisioningService, LubesItemProvisioningS
 builder.Services.AddSingleton<IProvisioningJobStore, ProvisioningJobStore>();
 builder.Services.AddHostedService<ProvisioningJobWorker>();
 
+// Inquiry previews (Odoo Sales ▸ Products, a code not in Odoo): POST /api/items/preview enqueues a read-only
+// scrape + classify; its own worker so a lookup never waits behind an SAP item creation.
+builder.Services.AddSingleton<IItemPreviewJobStore, ItemPreviewJobStore>();
+builder.Services.AddHostedService<ItemPreviewJobWorker>();
+
 // --- Background worker (Odoo id back-stamp to SAP) ---
 builder.Services.AddHostedService<OdooBackrefWorker>();
 

@@ -145,6 +145,15 @@ and scrapes product detail.
    (104/107 collapse multiple bands — accepted). EUR→TZS via `Pricing:EurTzsRate`.
 4. **Write** SAP item (manual "Unit" UoM) + `NeonProducts` (incl. `ItemGroupName` + audit cols) + prices.
 
+**Inquiry preview (read-only front half):** `LubesItemProvisioningService.PreviewAsync`
+(`LubesItemProvisioningService.Preview.cs`) runs steps 1–2 above with the same Layer-1 rules and DGX calls, but
+no pricing and no SAP / `NeonProducts` write (the `NeonLiquiMolyProducts` scrape-cache upsert is the only write).
+A low-confidence / failed classification is reported (`needs_review`, `classification_note`), not an early exit.
+No brand → Liqui Moly, then Meguin. Async like provisioning, on its own queue (`ItemPreviewJobStore`,
+`ItemPreviewJobWorker`, 3 at a time; the same code within 10 min reuses the job):
+`POST /api/items/preview` `{article_number, brand?}` → 202 `{job_id}`; poll `GET /api/items/preview/{jobId}`.
+Caller: Odoo `molas_supplier_orders` customer inquiries (Sales ▸ Products, a code with no product ▸ "Fetch").
+
 **OITB / SAP item groups (live, Nov 2026):** 104 Repair aids/service products · 105 Engine Oils ·
 106 Commercial vehicles/Construction and mining equipment · 107 Gear Oils/ATF/Greases · 108 Branding Materials ·
 109 Additives · 110 Motor Bike · 111 Vehicle Care · 112 Workshop Pro-Line · 117 Greases ·
