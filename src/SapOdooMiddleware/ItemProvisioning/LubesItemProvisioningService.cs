@@ -124,7 +124,7 @@ public partial class LubesItemProvisioningService : ILubesItemProvisioningServic
     {
         (new Regex(@"\b(coolant|antifreeze|kfs)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
             "__import__.lm_cat_service_products__coolant_antifreeze",
-            "Service Products / Coolant / antifreeze", "name matches coolant/antifreeze"),
+            "Service Products / Coolant & antifreeze", "name matches coolant/antifreeze"),
         (new Regex(@"\bbrake fluid\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
             "__import__.lm_cat_service_products__brake_fluid",
             "Service Products / Brake fluid", "name matches brake fluid"),
