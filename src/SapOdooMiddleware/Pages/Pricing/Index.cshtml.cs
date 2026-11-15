@@ -29,6 +29,7 @@ public class IndexModel : PageModel
     private readonly INeonProductRepository _neon;
     private readonly ICategoryTaxonomy _taxonomy;
     private readonly IMemoryCache _cache;
+    private readonly SupplierPriceHistoryReader _supplierPrices;
     private readonly ILogger<IndexModel> _logger;
 
     public IndexModel(
@@ -40,6 +41,7 @@ public class IndexModel : PageModel
         INeonProductRepository neon,
         ICategoryTaxonomy taxonomy,
         IMemoryCache cache,
+        SupplierPriceHistoryReader supplierPrices,
         ILogger<IndexModel> logger)
     {
         _pricingRepo = pricingRepo;
@@ -50,6 +52,7 @@ public class IndexModel : PageModel
         _neon = neon;
         _taxonomy = taxonomy;
         _cache = cache;
+        _supplierPrices = supplierPrices;
         _logger = logger;
     }
 
@@ -137,6 +140,7 @@ public class IndexModel : PageModel
         Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
         EnteredEurCost = Preview.EurCost;
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        SupplierPrices = await _supplierPrices.ReadAsync(LookedUpItem);
         return Page();
     }
 
@@ -147,6 +151,9 @@ public class IndexModel : PageModel
 
     public RepricePreviewLine? Preview { get; private set; }
     public IReadOnlyList<PriceChangeEntry> History { get; private set; } = Array.Empty<PriceChangeEntry>();
+
+    /// <summary>The item's LIQUI MOLY invoice prices and price list price, from Odoo (empty when unavailable).</summary>
+    public SupplierPriceSummary SupplierPrices { get; private set; } = SupplierPriceSummary.Empty;
     public string? LookedUpItem { get; private set; }
     public decimal? EnteredEurCost { get; private set; }
 
@@ -228,6 +235,7 @@ public class IndexModel : PageModel
         Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
         EnteredEurCost = Preview.EurCost;
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        SupplierPrices = await _supplierPrices.ReadAsync(LookedUpItem);
         await LoadClassificationSourcesAsync(ct);
         await LoadCompareAsync(compareItem, ct);
         return Page();
@@ -308,6 +316,7 @@ public class IndexModel : PageModel
         }
 
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        SupplierPrices = await _supplierPrices.ReadAsync(LookedUpItem);
         await LoadClassificationSourcesAsync(ct);
         await LoadCompareAsync(compareItem, ct);
         return Page();
@@ -321,6 +330,7 @@ public class IndexModel : PageModel
         EnteredEurCost = eurCost;
         Preview = await _reprice.PreviewAsync(LookedUpItem, eurCost, null, includeTrace: false, ct);
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        SupplierPrices = await _supplierPrices.ReadAsync(LookedUpItem);
         await LoadCompareAsync(compareItem, ct);
         if (Preview.CanApply)
             Message = "Preview only — nothing posted yet. Review the diff, then Confirm & Post.";
@@ -348,6 +358,7 @@ public class IndexModel : PageModel
 
         Preview = await _reprice.PreviewAsync(LookedUpItem, null, null, includeTrace: false, ct);
         History = await _pricingRepo.GetHistoryAsync(LookedUpItem, 10, ct);
+        SupplierPrices = await _supplierPrices.ReadAsync(LookedUpItem);
         await LoadCompareAsync(compareItem, ct);
         return Page();
     }

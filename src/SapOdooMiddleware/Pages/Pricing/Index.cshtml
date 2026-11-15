@@ -317,6 +317,39 @@
             }
         </table>
     }
+
+    @if (Model.SupplierPrices is { HasData: true } sp)
+    {
+        <h4 style="margin:16px 0 6px">LIQUI MOLY prices (Odoo · Molas Imports &amp; Finance)</h4>
+        <div class="kv-grid">
+            <div class="kv"><span>Price list</span><b>@(sp.PriceListPrice is { } lp ? "€" + lp.ToString("N2") : "—")</b></div>
+            <div class="kv"><span>First invoice</span><b>@(sp.FirstPrice is { } fp ? "€" + fp.ToString("N2") : "—")@(sp.FirstDate is { } fd ? " (" + fd.ToString("yyyy-MM-dd") + ")" : "")</b></div>
+            <div class="kv"><span>Change since first</span><b class="@DeltaCls(sp.TotalChangePct)">@(sp.TotalChangePct is { } tc ? $"{tc:+0.#;-0.#;0}%" : "—")</b></div>
+            <div class="kv"><span>Per year</span><b>@(sp.YearlyChangePct is { } yc ? $"{yc:+0.#;-0.#;0}%" : "—")</b></div>
+        </div>
+        @if (sp.Invoices.Count > 0)
+        {
+            <table class="price-grid">
+                <tr>
+                    <th style="text-align:left">Invoice date</th><th style="text-align:left">Invoice</th><th>Pieces</th>
+                    <th>List €</th><th>Discount</th><th>Net €</th><th>Change</th>
+                </tr>
+                @foreach (var iv in sp.Invoices)
+                {
+                    <tr>
+                        <td style="text-align:left">@(iv.InvoiceDate?.ToString("yyyy-MM-dd") ?? "—")</td>
+                        <td style="text-align:left">@iv.InvoiceNo</td>
+                        <td>@iv.Quantity.ToString("N0")</td>
+                        <td>@iv.ListPrice.ToString("N2")</td>
+                        <td>@(iv.Discount == 0m ? "—" : iv.Discount.ToString("0.##") + "%")</td>
+                        <td>@iv.NetPrice.ToString("N2")</td>
+                        <td class="@DeltaCls(iv.ChangePct)">@(iv.ChangePct is { } c ? $"{c:+0.#;-0.#;0}%" : "—")</td>
+                    </tr>
+                }
+            </table>
+            <div class="meta">Odoo ▸ Molas Imports &amp; Finance ▸ Purchasing ▸ Price History has every invoice of the item.</div>
+        }
+    }
 </div>
 
 @* ── Bulk ─────────────────────────────────────────────────────── *@
