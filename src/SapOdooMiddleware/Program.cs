@@ -82,6 +82,7 @@ builder.Services.AddHostedService<WebhookQueueProcessor>();
 // writes Odoo over JSON-RPC as the sap-integration user, and reads the control-centre mapping tables.
 builder.Services.Configure<PurchaseSyncSettings>(builder.Configuration.GetSection(PurchaseSyncSettings.SectionName));
 builder.Services.AddHttpClient<IOdooRpc, OdooRpcClient>();
+builder.Services.AddScoped<SupplierPriceHistoryReader>();   // /pricing: LIQUI MOLY invoice prices from Odoo
 builder.Services.AddSingleton<SapSqlConnectionFactory>();
 builder.Services.AddScoped<ISapPurchaseReader, SapPurchaseSqlReader>();
 builder.Services.AddScoped<IIccMappingCache, IccMappingCache>();
