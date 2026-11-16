@@ -25,6 +25,7 @@ public sealed class PartsItemCreationService
     private readonly IPriceReviewService _priceReview;
     private readonly AutohubPricingSettings _pricingSettings;
     private readonly ILogger<PartsItemCreationService> _logger;
+    private readonly IInvoiceActivityLog? _activity;   // per-line outcome in the invoice history
 
     public PartsItemCreationService(
         IPartsItemProvisioningService provisioning,
@@ -32,8 +33,10 @@ public sealed class PartsItemCreationService
         IStagingPartsDocumentRepository docs,
         IPriceReviewService priceReview,
         IOptions<AutohubPricingSettings> pricingSettings,
-        ILogger<PartsItemCreationService> logger)
+        ILogger<PartsItemCreationService> logger,
+        IInvoiceActivityLog? activity = null)
     {
+        _activity = activity;
         _provisioning = provisioning;
         _review = review;
         _docs = docs;
@@ -96,6 +99,7 @@ public sealed class PartsItemCreationService
             }
         }
 
+        var createdLines = new List<ActivityLine>();
         foreach (var (line, priceOverride) in work)
         {
             ct.ThrowIfCancellationRequested();
@@ -107,7 +111,11 @@ public sealed class PartsItemCreationService
                 var outcome = await _provisioning.ProvisionAsync(line, currency, timeoutCts.Token, priceOverride);
                 switch (outcome.Status)
                 {
-                    case "created": created++; break;
+                    case "created":
+                        created++;
+                        createdLines.Add(new ActivityLine(line.Id, $"Created in SAP as {outcome.ItemCode}" +
+                            (priceOverride?.Pl03Override is { } pl03 ? $" at the approved PL03 {pl03:N0}." : ".")));
+                        break;
                     case "needs_confirmation": needsConfirmation++; break;
                     // Holds are waiting on an operator decision, NOT failures — the provisioning service has
                     // already parked the line with its own status/reason; just tally them apart.
@@ -131,6 +139,15 @@ public sealed class PartsItemCreationService
                 await _review.RecordCreateFailedAsync(line.Id, ex.Message, ct);
                 failures.Add(new PartsBulkCreateFailure(line.Id, line.SupplierArticleNumber, ex.Message));
             }
+        }
+
+        if (_activity is not null)
+        {
+            if (createdLines.Count > 0)
+                await _activity.RecordLinesAsync(documentId, "created", "Created in SAP.", "bulk create", createdLines, ct);
+            if (failures.Count > 0)
+                await _activity.RecordLinesAsync(documentId, "create_failed", "Creating the SAP item failed.", "bulk create",
+                    failures.Select(f => new ActivityLine(f.LineId, "Creating the SAP item failed: " + f.Error)).ToList(), ct);
         }
 
         var attempted = selections?.Count ?? work.Count;

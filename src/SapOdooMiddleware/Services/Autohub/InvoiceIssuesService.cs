@@ -182,8 +182,18 @@ public sealed record FinishSummary(
     bool CanComplete, IReadOnlyList<FinishCount> CompleteBlockers,
     Guid? RunningJobId);
 
+/// <summary>
+/// An invoice's progress for the invoice list. Done = created + matched + skipped; Ready = queued with
+/// nothing wrong (prices not considered); Attention = everything else. TopIssue is the most common
+/// open next action.
+/// </summary>
+public sealed record InvoiceProgress(int Total, int Done, int Ready, int Attention, FinishCount? TopIssue);
+
 public interface IInvoiceIssuesService
 {
+    /// <summary>Progress of several invoices in one query (no price review: prices are not considered).</summary>
+    Task<IReadOnlyDictionary<Guid, InvoiceProgress>> GetProgressAsync(IReadOnlyList<Guid> documentIds, CancellationToken ct);
+
     /// <summary>What Bulk Create would do now and what stops Complete Review. Null when the document does not exist.</summary>
     Task<FinishSummary?> GetFinishSummaryAsync(Guid documentId, CancellationToken ct);
 
@@ -312,6 +322,26 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
             };
         }
         return map;
+    }
+
+    // ── Invoice list progress ───────────────────────────────────────────────────
+
+    public async Task<IReadOnlyDictionary<Guid, InvoiceProgress>> GetProgressAsync(
+        IReadOnlyList<Guid> documentIds, CancellationToken ct)
+    {
+        var byDoc = await _lines.ListForDocumentsAsync(documentIds, ct);
+        var result = new Dictionary<Guid, InvoiceProgress>();
+        foreach (var (docId, lines) in byDoc)
+        {
+            var next = lines.Select(l => LineIssueClassifier.Classify(l, null).NextAction).ToList();
+            int done = next.Count(n => n is "created" or "matched" or "skipped"), ready = next.Count(n => n == "ready");
+            var top = next.Where(n => Groups.ContainsKey(n)).GroupBy(n => n)
+                .OrderByDescending(g => g.Count()).ThenBy(g => LineIssueClassifier.Order.ToList().IndexOf(g.Key))
+                .Select(g => new FinishCount(g.Key, Groups[g.Key].Title, g.Count(), g.Key))
+                .FirstOrDefault();
+            result[docId] = new InvoiceProgress(lines.Count, done, ready, lines.Count - done - ready, top);
+        }
+        return result;
     }
 
     // ── Create & finish ─────────────────────────────────────────────────────────

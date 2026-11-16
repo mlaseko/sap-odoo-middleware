@@ -22,8 +22,19 @@
         <h2>Recent documents</h2>
         <div class="sub">Autohub spare-parts invoices — latest @Model.Docs.Count</div>
     </div>
-    <a class="btn btn-primary" href="/autohub/documents/upload">＋ Upload new</a>
+    <div style="display:flex; gap:8px; align-items:center;">
+        <a class="btn btn-sm@(Model.OnlyAttention ? "" : " btn-primary")" href="/autohub/documents">All</a>
+        <a class="btn btn-sm@(Model.OnlyAttention ? " btn-primary" : "")" href="/autohub/documents?show=attention">Needs attention (@Model.AttentionCount)</a>
+        <a class="btn btn-primary" href="/autohub/documents/upload">＋ Upload new</a>
+    </div>
 </div>
+<style>
+    .inv-prog { min-width: 210px; }
+    .inv-prog .bar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
+    .inv-prog .bar > div { height: 100%; background: var(--success); }
+    .inv-prog .txt { font-size: 12px; color: var(--muted); }
+    .inv-prog .txt a { color: #fdba74; }
+</style>
 
 @if (TempData["Notice"] is string notice)
 {
@@ -47,6 +58,7 @@ else
                 <th class="num">Pages</th>
                 <th>Status</th>
                 <th>Validation</th>
+                <th>Progress</th>
                 <th></th>
             </tr>
         </thead>
@@ -67,7 +79,33 @@ else
                         <span class="pill @ValPill(d.ValidationStatus)">@d.ValidationStatus</span>
                     }
                 </td>
+                <td class="inv-prog">
+                    @if (Model.Progress.TryGetValue(d.Id, out var p) && p.Total > 0)
+                    {
+                        var pct = (int)Math.Round(100.0 * p.Done / p.Total);
+                        <div class="bar" title="@p.Done of @p.Total lines created, matched or skipped"><div style="width:@(pct)%"></div></div>
+                        <div class="txt">
+                            @p.Done/@p.Total done
+                            @if (p.Attention > 0)
+                            {
+                                <text> · </text><a href="/autohub/documents/@d.Id/issues">@p.Attention need attention</a>
+                            }
+                            @if (p.Ready > 0)
+                            {
+                                <text> · @p.Ready ready</text>
+                            }
+                            @if (p.TopIssue is { } top && d.Status == "extracted")
+                            {
+                                <div>Most: @top.Title (@top.Count)</div>
+                            }
+                        </div>
+                    }
+                </td>
                 <td class="num" style="white-space:nowrap;">
+                    @if (Model.NeedsWork(d))
+                    {
+                        <a class="btn btn-sm btn-primary" href="@Model.ContinueUrl(d)">Continue →</a>
+                    }
                     <a class="btn btn-sm" href="/autohub/documents/@d.Id">View →</a>
                     <a href="#" class="btn btn-sm btn-danger del-doc" data-doc-id="@d.Id" data-name="@(d.InvoiceNumber ?? d.OriginalFilename)">Delete</a>
                 </td>

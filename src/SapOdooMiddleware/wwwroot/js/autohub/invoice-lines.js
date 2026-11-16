@@ -629,13 +629,30 @@ function reloadKeepingPlace() {
         });
     });
 
+    // The line's last changes (invoice history), under its detail panel. Silent if the history is unavailable.
+    async function appendLineHistory(lineId, box) {
+        let list;
+        try {
+            const r = await fetch(base + '/activity?line_id=' + lineId + '&limit=10', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} });
+            if (!r.ok) return;
+            list = await r.json();
+        } catch (_) { return; }
+        if (!list || !list.length) return;
+        const div = document.createElement('div');
+        div.className = 'ld-history';
+        div.innerHTML = '<h4>History</h4><ul>' + list.map(e =>
+            '<li><span class="dc-dim">' + esc(new Date(e.at).toLocaleString()) + ' · ' + esc(e.actor) + '</span> ' + esc(e.detail) + '</li>').join('') +
+            '</ul><a href="/autohub/documents/' + docId + '/history">Full invoice history →</a>';
+        box.appendChild(div);
+    }
+
     async function loadEnrichment(lineId, detail) {
         const box = detail.querySelector('.ld-enrichment');
         if (!box || box.dataset.loaded === 'true') return;
         box.dataset.loaded = 'true';
         try {
             const r = await fetch(base + '/lines/' + lineId + '/enrichment', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} });
-            if (r.status === 204) { box.innerHTML = '<em>No enrichment data (matched directly or not yet enriched).</em>'; return; }
+            if (r.status === 204) { box.innerHTML = '<em>No enrichment data (matched directly or not yet enriched).</em>'; appendLineHistory(lineId, box); return; }
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const reviewStatus = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]')?.dataset.reviewStatus || '';
             const enr = await r.json();
@@ -645,6 +662,7 @@ function reloadKeepingPlace() {
             wireMarqueOverride(lineId, box);
             wireBorrowConfirm(lineId, box);
             wirePartReview(lineId, box);
+            appendLineHistory(lineId, box);
         } catch (e) {
             box.dataset.loaded = 'false';
             box.innerHTML = '<em class="ld-error">Could not load enrichment: ' + esc(e.message) + '</em>';

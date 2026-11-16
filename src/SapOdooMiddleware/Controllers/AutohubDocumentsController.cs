@@ -17,6 +17,7 @@ namespace SapOdooMiddleware.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/autohub/documents")]
+[ServiceFilter(typeof(AutohubActivityFilter))]   // invoice history
 public class AutohubDocumentsController : ControllerBase
 {
     private readonly IStagingPartsDocumentRepository _docs;

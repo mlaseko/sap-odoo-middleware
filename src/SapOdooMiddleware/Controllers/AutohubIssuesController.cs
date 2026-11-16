@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using SapOdooMiddleware.Persistence;
 using SapOdooMiddleware.Services.Autohub;
 
 namespace SapOdooMiddleware.Controllers;
@@ -9,11 +10,17 @@ namespace SapOdooMiddleware.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/autohub/documents")]
+[ServiceFilter(typeof(AutohubActivityFilter))]   // invoice history
 public sealed class AutohubIssuesController : ControllerBase
 {
     private readonly IInvoiceIssuesService _issues;
+    private readonly IInvoiceActivityLog _activity;
 
-    public AutohubIssuesController(IInvoiceIssuesService issues) => _issues = issues;
+    public AutohubIssuesController(IInvoiceIssuesService issues, IInvoiceActivityLog activity)
+    {
+        _issues = issues;
+        _activity = activity;
+    }
 
     private string CurrentUser => HttpContext.User?.Identity?.Name is { Length: > 0 } n ? n : "operator";
 
@@ -32,6 +39,17 @@ public sealed class AutohubIssuesController : ControllerBase
         var result = await _issues.GetAsync(documentId, ct);
         return result is null ? NotFound() : Ok(result);
     }
+
+    /// <summary>
+    /// GET /api/autohub/documents/{documentId}/activity[?line_id=&amp;limit=]
+    /// The invoice history, newest first: who did what, when, to which line. With line_id, that line only.
+    /// limit defaults to 500 (max 2000).
+    /// </summary>
+    [HttpGet("{documentId:guid}/activity")]
+    [ProducesResponseType(typeof(IReadOnlyList<InvoiceActivityEntry>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> Activity(Guid documentId, [FromQuery(Name = "line_id")] Guid? lineId,
+        [FromQuery] int? limit, CancellationToken ct) =>
+        Ok(await _activity.ListAsync(documentId, lineId, limit ?? 500, ct));
 
     /// <summary>
     /// GET /api/autohub/documents/{documentId}/finish-summary

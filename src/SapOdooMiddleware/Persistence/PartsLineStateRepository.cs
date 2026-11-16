@@ -24,6 +24,9 @@ public interface IPartsLineStateRepository
     /// <summary>Every line of the document with its review / enrichment state, in line order.</summary>
     Task<IReadOnlyList<PartsLineState>> ListAsync(Guid documentId, CancellationToken ct);
 
+    /// <summary>The lines of several documents in one query, keyed by document (the invoice list's progress).</summary>
+    Task<IReadOnlyDictionary<Guid, List<PartsLineState>>> ListForDocumentsAsync(IReadOnlyList<Guid> documentIds, CancellationToken ct);
+
     /// <summary>
     /// Accept the DGX's resolved marque for the given lines only (resolved:true, with a prefix and item data,
     /// not terminal, not promotional): copy manufacturer_resolution.prefix into the SKU prefix and queue the
@@ -44,7 +47,14 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
         return c;
     }
 
-    public async Task<IReadOnlyList<PartsLineState>> ListAsync(Guid documentId, CancellationToken ct)
+    public async Task<IReadOnlyList<PartsLineState>> ListAsync(Guid documentId, CancellationToken ct) =>
+        (await QueryAsync(new[] { documentId }, ct)).GetValueOrDefault(documentId) ?? new List<PartsLineState>();
+
+    public async Task<IReadOnlyDictionary<Guid, List<PartsLineState>>> ListForDocumentsAsync(
+        IReadOnlyList<Guid> documentIds, CancellationToken ct) =>
+        documentIds.Count == 0 ? new Dictionary<Guid, List<PartsLineState>>() : await QueryAsync(documentIds, ct);
+
+    private async Task<Dictionary<Guid, List<PartsLineState>>> QueryAsync(IReadOnlyList<Guid> documentIds, CancellationToken ct)
     {
         // jsonb reads are text compares / text extracts only (shape-tolerant: an off-shape payload must not
         // fail the whole list). The group code is extracted as text and parsed in C#.
@@ -65,20 +75,22 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
                    "EnrichmentPayloadJson"#>>'{item_data,suggested_sku_prefix}',
                    "EnrichmentPayloadJson"#>>'{item_data,suggested_itms_grp_cod}',
                    "SuggestedDonorItemCode", "SuggestedDonorSupplier", "MatchedItemCode", "GeneratedItemCode",
-                   "BorrowedFromArticle", "BorrowedFromSupplier", "OemNumbers"::text
+                   "BorrowedFromArticle", "BorrowedFromSupplier", "OemNumbers"::text, "DocumentId"
             FROM public."staging_document_line"
-            WHERE "DocumentId" = @doc
-            ORDER BY "LineNumber", "Id";
+            WHERE "DocumentId" = ANY(@docs)
+            ORDER BY "DocumentId", "LineNumber", "Id";
             """;
         await using var conn = await OpenAsync(ct);
         await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue("doc", documentId);
-        var list = new List<PartsLineState>();
+        cmd.Parameters.Add(new NpgsqlParameter("docs", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { Value = documentIds.ToArray() });
+        var byDoc = new Dictionary<Guid, List<PartsLineState>>();
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
         {
             string? S(int i) => r.IsDBNull(i) ? null : r.GetString(i);
             decimal? D(int i) => r.IsDBNull(i) ? null : r.GetDecimal(i);
+            var docId = r.GetGuid(30);
+            if (!byDoc.TryGetValue(docId, out var list)) byDoc[docId] = list = new List<PartsLineState>();
             list.Add(new PartsLineState(
                 Id: r.GetGuid(0), LineNumber: r.GetInt32(1), SupplierArticleNumber: S(2), Description: S(3), Brand: S(4),
                 Quantity: D(5), UnitPriceForeign: D(6), IsPromotional: r.GetBoolean(7), ReviewStatus: S(8) ?? "pending",
@@ -90,7 +102,7 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
                 SuggestedDonorItemCode: S(23), SuggestedDonorSupplier: S(24), MatchedItemCode: S(25), GeneratedItemCode: S(26),
                 BorrowedFromArticle: S(27), BorrowedFromSupplier: S(28), OemNumbers: ParseOems(S(29))));
         }
-        return list;
+        return byDoc;
     }
 
     /// <summary>OemNumbers is stored as a JSON array; an unreadable value counts as none.</summary>

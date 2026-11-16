@@ -10,6 +10,7 @@ namespace SapOdooMiddleware.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/autohub/documents")]
+[ServiceFilter(typeof(AutohubActivityFilter))]   // invoice history
 public sealed class AutohubPriceReviewController : ControllerBase
 {
     private readonly IPriceReviewService _review;
