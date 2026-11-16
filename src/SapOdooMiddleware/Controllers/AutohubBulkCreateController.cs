@@ -117,6 +117,8 @@ public sealed class AutohubBulkCreateController : ControllerBase
             needsConfirmation = job.NeedsConfirmation,
             held = job.Held,
             failed = job.Failed,
+            notPriceApproved = job.NotPriceApproved,
+            priceHeld = job.PriceHeld,
             error = job.Error,
             failures = job.Failures.Select(f => new { lineId = f.LineId, articleNumber = f.ArticleNumber, error = f.Error }),
         });

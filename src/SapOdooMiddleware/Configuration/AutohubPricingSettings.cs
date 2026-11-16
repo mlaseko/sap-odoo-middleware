@@ -43,4 +43,12 @@ public sealed class AutohubPricingSettings
     /// is shown as "above" / "below" them. Default 0.25 (25%).
     /// </summary>
     public decimal PriceReviewComparableBand { get; set; } = 0.25m;
+
+    /// <summary>
+    /// When true, Bulk Create creates only lines approved in the price review (at their approved PL03);
+    /// lines with no current approval are left to create. When false (default), approved lines use
+    /// their approved PL03, held lines are skipped, and lines with no decision are created at the
+    /// calculated price, as before the price review existed.
+    /// </summary>
+    public bool RequirePriceReview { get; set; } = false;
 }

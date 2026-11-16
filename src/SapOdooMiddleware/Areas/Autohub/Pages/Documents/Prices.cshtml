@@ -49,6 +49,17 @@
     <div class="note-warn">This invoice's review is completed, so prices are shown read-only.</div>
 }
 
+<div class="hint" style="margin-bottom:10px">
+    @if (Model.RequirePriceReview)
+    {
+        <text>Bulk Create on the invoice creates <strong>only approved lines</strong>, at the PL03 approved here. Unreviewed and held lines stay to create.</text>
+    }
+    else
+    {
+        <text>Bulk Create on the invoice creates approved lines at the PL03 approved here and skips held lines. Lines not yet reviewed are created at the calculated PL03.</text>
+    }
+</div>
+
 <div class="pr-bar" id="pr-bar" data-doc-id="@Model.Doc.Id" data-editable="@Model.IsEditable.ToString().ToLowerInvariant()">
     <span id="pr-counts">Loading…</span>
     <span class="spacer"></span>

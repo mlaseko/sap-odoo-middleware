@@ -9,11 +9,16 @@ public class DetailModel : PageModel
     private readonly IStagingPartsDocumentRepository _docs;
     private readonly IPartsReviewRepository _review;
 
-    public DetailModel(IStagingPartsDocumentRepository docs, IPartsReviewRepository review)
+    public DetailModel(IStagingPartsDocumentRepository docs, IPartsReviewRepository review,
+        Microsoft.Extensions.Options.IOptions<SapOdooMiddleware.Configuration.AutohubPricingSettings> pricing)
     {
         _docs = docs;
         _review = review;
+        RequirePriceReview = pricing.Value.RequirePriceReview;
     }
+
+    /// <summary>AutohubPricing:RequirePriceReview — Bulk Create creates only price-approved lines.</summary>
+    public bool RequirePriceReview { get; }
 
     public StagingPartsDocumentRow Doc { get; private set; } = default!;
     public IReadOnlyList<PartsReviewLineRow> Lines { get; private set; } = Array.Empty<PartsReviewLineRow>();

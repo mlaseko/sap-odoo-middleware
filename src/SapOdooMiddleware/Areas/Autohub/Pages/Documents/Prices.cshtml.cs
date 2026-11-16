@@ -14,7 +14,15 @@ public class PricesModel : PageModel
 {
     private readonly IStagingPartsDocumentRepository _docs;
 
-    public PricesModel(IStagingPartsDocumentRepository docs) => _docs = docs;
+    public PricesModel(IStagingPartsDocumentRepository docs,
+        Microsoft.Extensions.Options.IOptions<SapOdooMiddleware.Configuration.AutohubPricingSettings> pricing)
+    {
+        _docs = docs;
+        RequirePriceReview = pricing.Value.RequirePriceReview;
+    }
+
+    /// <summary>AutohubPricing:RequirePriceReview — Bulk Create creates only approved lines.</summary>
+    public bool RequirePriceReview { get; }
 
     public StagingPartsDocumentRow Doc { get; private set; } = default!;
 
