@@ -21,9 +21,10 @@ public class InvoiceIssuesTests
         bool confirmed = false, bool needsReview = false, string? verdict = null,
         string? marqueResolved = null, string? marquePrefix = null, string? skuPrefix = "MB",
         string? suggested = null, bool promo = false, string? error = null,
-        string? fit = null, string[]? oems = null, string? topCandidate = "BM") =>
-        new(id ?? Guid.NewGuid(), n, $"ART{n}", $"Part {n}", "VIKA", qty, price, promo, status, error,
-            source, itemData, confirmationRequired, confirmed, needsReview, verdict, "Generator", "BOSCH",
+        string? fit = null, string[]? oems = null, string? topCandidate = "BM",
+        string? desc = null, string? partName = "Generator") =>
+        new(id ?? Guid.NewGuid(), n, $"ART{n}", desc ?? $"Part {n}", "VIKA", qty, price, promo, status, error,
+            source, itemData, confirmationRequired, confirmed, needsReview, verdict, partName, "BOSCH",
             marqueResolved, marquePrefix, topCandidate, skuPrefix, 106, suggested, "VIKA", null, null, "1234", "TOPRAN",
             OemNumbers: oems, FitForAuto: fit);
 
@@ -41,6 +42,17 @@ public class InvoiceIssuesTests
         Assert.Equal(expected, r.NextAction);
         Assert.True(r.IsDone);
         Assert.Empty(r.Issues);
+    }
+
+    [Fact]
+    public void Flagged_part_whose_name_only_differs_in_wording_is_not_an_issue()
+    {
+        // Invoice 2026INS0342: the DGX flagged these with its older name rules.
+        Assert.Equal("queue", Next(L("pending", needsReview: true, verdict: "UNCERTAIN", desc: "Lambda sensor; 4 wires", partName: "Oxygen Sensor")));
+        Assert.Equal("queue", Next(L("pending", needsReview: true, verdict: "UNCERTAIN", desc: "Alternator; 12V; 180A; CW", partName: "Generator")));
+        Assert.Equal("check_part", Next(L("pending", needsReview: true, verdict: "UNCERTAIN", desc: "Oil filter", partName: "Air Filter")));
+        var r = LineIssueClassifier.Classify(L("pending", needsReview: true, verdict: "UNCERTAIN", desc: "Brake pad set", partName: "Warning Contact, brake pad wear"), null);
+        Assert.Contains("different kind of part", r.Issues.Single(i => i.Code == "check_part").Text);
     }
 
     [Fact]

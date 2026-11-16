@@ -139,8 +139,11 @@ public static class LineIssueClassifier
                   (string.IsNullOrWhiteSpace(l.SuggestedDonorSupplier) ? "" : $" ({l.SuggestedDonorSupplier})") +
                   ": use it, or create a new item.");
 
-        if (l.NeedsPartReview && !l.Confirmed)
-            Add("check_part", (string.Equals(l.PartVerdict, "DIFFERENT", StringComparison.OrdinalIgnoreCase)
+        // The DGX's flag is re-checked with the current name rules (PartNameMatch): many lines were flagged
+        // only because the names differ in wording ("Lambda sensor; 4 wires" vs "Oxygen Sensor").
+        var partCheck = l.NeedsPartReview && !l.Confirmed ? PartNameMatch.Verdict(l.Description, l.SelectedName) : PartNameMatch.Match;
+        if (partCheck != PartNameMatch.Match)
+            Add("check_part", (partCheck == PartNameMatch.Different
                     ? "The matched part looks like a different kind of part"
                     : "The matched part could not be confirmed as the same kind of part") +
                 (string.IsNullOrWhiteSpace(l.SelectedName) ? "." : $": {l.SelectedName}" +

@@ -226,7 +226,9 @@
             <td class="num">@l.LineNumber</td>
             <td class="col-art">@l.SupplierArticleNumber</td>
             <td class="col-oems" title="@oems">@oems</td>
-            <td class="col-desc">@l.Description</td>
+            <td class="col-desc">@if (l.PictureUrl is { Length: > 0 } pic && l.ReviewStatus is not ("matched" or "created"))
+                {<span class="ln-pic" data-noexpand="1"><img class="ln-thumb" src="@pic" alt="" loading="lazy" data-zoom="@pic"
+                      title="Click to enlarge" onerror="this.parentElement.remove()"></span>}@l.Description</td>
             <td>@l.Brand</td>
             <td class="num">@(l.Quantity?.ToString("0.###")) <span class="unit">@l.Unit</span></td>
             <td class="num">@(l.UnitPriceForeign is { } up ? sym + up.ToString("N2") : "")</td>
@@ -238,7 +240,8 @@
                 {
                     <span class="pill @sb.Css" title="@SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.SourceExplanation(l.MatchStrategy)">@sb.Label</span>
                 }
-                @if (l.NeedsReview && l.EnrichmentConfirmedAt is null && l.ReviewStatus != "created")
+                @if (l.NeedsReview && l.EnrichmentConfirmedAt is null && l.ReviewStatus != "created"
+                     && SapOdooMiddleware.Services.Autohub.PartNameMatch.Verdict(l.Description, l.SelectedName) != SapOdooMiddleware.Services.Autohub.PartNameMatch.Match)
                 {
                     <span class="pill pill-orange"
                           title="@SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.ReviewReason(l.SelectedComponentVerdict, l.SelectedName, l.SelectedSupplier)">⚠ check part</span>
@@ -319,5 +322,6 @@
 }
 
 <script src="~/js/autohub/donor-picker.js" asp-append-version="true"></script>
+<script src="~/js/autohub/pic-zoom.js" asp-append-version="true"></script>
 <script src="~/js/autohub/invoice-lines.js" asp-append-version="true"></script>
 <script src="~/js/autohub/lines-tools.js" asp-append-version="true"></script>

@@ -388,3 +388,18 @@ select.cell-input { appearance: auto; }
 .no-pic { display: inline-flex; align-items: center; justify-content: center; min-width: 120px; min-height: 60px; padding: 6px 10px;
           border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; float: right; margin-left: 8px; }
 .line-detail .no-pic { float: none; }
+
+/* All lines: small picture of the part for lines not in SAP yet; click opens it full size (pic-zoom.js). */
+#lines-table .ln-pic { float: left; margin: 0 8px 0 0; }
+#lines-table .ln-thumb { width: 40px; height: 40px; object-fit: contain; background: #fff; border: 1px solid var(--border);
+                         border-radius: 4px; cursor: zoom-in; display: block; }
+#lines-table .ln-thumb:hover { border-color: var(--primary, #7c6cff); }
+img.ld-img[data-zoom] { cursor: zoom-in; }
+.pic-zoom { position: fixed; inset: 0; z-index: 2000; background: rgba(0,0,0,.82); display: flex; align-items: center;
+            justify-content: center; padding: 48px; }
+.pic-zoom img { max-width: 100%; max-height: 100%; object-fit: contain; background: #fff; border-radius: 6px;
+                box-shadow: 0 8px 40px rgba(0,0,0,.5); }
+.pic-zoom .no-pic { float: none; background: var(--panel, #1e1e24); }
+.pic-zoom-close { position: absolute; top: 14px; right: 18px; width: 38px; height: 38px; border-radius: 50%; border: 1px solid rgba(255,255,255,.4);
+                  background: rgba(0,0,0,.5); color: #fff; font-size: 18px; line-height: 1; cursor: pointer; }
+.pic-zoom-close:hover { background: rgba(255,255,255,.15); }

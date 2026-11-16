@@ -239,7 +239,7 @@
             const fit = splitFitment(d.fit_for_auto);
             const pic = enr.picture_url || d.image_url;
             part = '<div><h4>Matched part</h4>' + (pic
-                    ? '<img src="' + esc(pic) + '" alt="" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'no-pic\',textContent:\'Picture could not be loaded\'}))">'
+                    ? '<img src="' + esc(pic) + '" alt="" data-zoom="' + esc(pic) + '" title="Click to enlarge" style="cursor:zoom-in" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'no-pic\',textContent:\'Picture could not be loaded\'}))">'
                     : '<div class="no-pic">No picture for this part</div>') +
                 '<table class="kv">' +
                 '<tr><th>Name</th><td>' + esc(d.primary_description || (sel && sel.selected_name) || '–') + '</td></tr>' +
