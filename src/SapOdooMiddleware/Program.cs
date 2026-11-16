@@ -297,6 +297,8 @@ builder.Services.AddHostedService<AutoMatchWorker>();
 
 // --- Autohub Phase B: review + SAP item provisioning ---
 builder.Services.AddScoped<IPartsReviewRepository, PartsReviewRepository>();
+builder.Services.AddScoped<IPartsPriceReviewRepository, PartsPriceReviewRepository>();   // price review decisions
+builder.Services.AddScoped<IPriceReviewService, PriceReviewService>();
 builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
 builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();
 builder.Services.AddScoped<PartsItemCreationService>();
