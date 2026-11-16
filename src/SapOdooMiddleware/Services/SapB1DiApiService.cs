@@ -6845,7 +6845,7 @@ ORDER BY PostingDate, DocumentNumber";
 
     /// <inheritdoc/>
     public async Task<InventoryDocResult> CreateGrpoAsync(
-        GrpoCreate request, int series, CancellationToken ct)
+        GrpoCreate request, int series, PurchaseDocCurrency? baseCurrency, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
@@ -6859,8 +6859,21 @@ ORDER BY PostingDate, DocumentNumber";
                 grpo.CardCode = request.CardCode;
                 grpo.DocDate = request.DocDate ?? DateTime.Today;
                 grpo.DocDueDate = request.DocDate ?? DateTime.Today;
+
+                // A foreign-currency PO keeps its own rate on the GRPO; otherwise SAP would
+                // take the posting date's rate and the GRPO values would drift from the PO.
+                // Local currency (TZS): nothing set, as before.
+                if (baseCurrency is { } cur && !string.IsNullOrWhiteSpace(cur.Currency)
+                    && !string.Equals(cur.Currency, GetLocalCurrencyCode(), StringComparison.OrdinalIgnoreCase))
+                {
+                    grpo.DocCurrency = cur.Currency;
+                    grpo.DocRate = cur.Rate;
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.NumAtCard))
+                    grpo.NumAtCard = ClipForSap(request.NumAtCard.Trim(), 100);
                 if (!string.IsNullOrWhiteSpace(request.Comments))
-                    grpo.Comments = request.Comments;
+                    grpo.Comments = ClipForSap(request.Comments.Trim(), 254);
                 grpo.UserFields.Fields.Item("U_AppRef").Value = request.AppRef;
 
                 for (int i = 0; i < request.Lines.Count; i++)
@@ -6906,6 +6919,119 @@ ORDER BY PostingDate, DocumentNumber";
             finally
             {
                 Marshal.ReleaseComObject(grpo);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// A/P invoice draft (ODRF, ObjType 18) from the open lines of several GRPOs — Autohub Receive
+    /// Shipment. Exposed through <see cref="IAutohubSapB1Service"/> only; the controller has already
+    /// checked the GRPOs (supplier, open, one currency and rate) and the supplier invoice number.
+    /// </summary>
+    public async Task<PurchaseInvoiceDraftResult> CreatePurchaseInvoiceDraftAsync(
+        PurchaseInvoiceDraftCreate request,
+        IReadOnlyList<(int GrpoDocEntry, GrpoOpenLine Line)> lines,
+        PurchaseDocCurrency currency,
+        CancellationToken ct)
+    {
+        if (lines.Count == 0)
+            throw new ArgumentException("At least one open GRPO line is required.", nameof(lines));
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            EnsureConnected();
+
+            bool foreign = !string.IsNullOrWhiteSpace(currency.Currency)
+                && !string.Equals(currency.Currency, GetLocalCurrencyCode(), StringComparison.OrdinalIgnoreCase);
+
+            var doc = (Documents)_company!.GetBusinessObject(BoObjectTypes.oDrafts);
+            try
+            {
+                doc.DocObjectCode = BoObjectTypes.oPurchaseInvoices;
+                doc.CardCode = request.CardCode;
+                if (foreign)
+                {
+                    // The GRPOs' (= the PO's) rate, not the invoice date's: finance decision, Nov 2026.
+                    doc.DocCurrency = currency.Currency;
+                    doc.DocRate = currency.Rate;
+                }
+                doc.NumAtCard = ClipForSap(request.NumAtCard.Trim(), 100);
+                doc.DocDate = (request.DocDate ?? DateTime.Today).Date;
+                if (request.TaxDate.HasValue)
+                    doc.TaxDate = request.TaxDate.Value.Date;
+                // DocDueDate is not set: SAP derives it from the supplier's payment terms.
+                if (!string.IsNullOrWhiteSpace(request.Comments))
+                    doc.Comments = ClipForSap(request.Comments.Trim(), 254);
+                doc.UserFields.Fields.Item("U_AppRef").Value = request.AppRef;
+
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    if (i > 0) doc.Lines.Add();
+                    var (grpoEntry, line) = lines[i];
+                    // Copy from GRPO: quantity, price, currency, tax and warehouse come from the base line.
+                    doc.Lines.BaseType = (int)BoObjectTypes.oPurchaseDeliveryNotes;   // 20
+                    doc.Lines.BaseEntry = grpoEntry;
+                    doc.Lines.BaseLine = line.LineNum;
+                    doc.Lines.Quantity = line.OpenQty;
+                }
+
+                if (doc.Add() != 0)
+                {
+                    _company.GetLastError(out int errCode, out string errMsg);
+                    throw new InvalidOperationException(
+                        $"SAP DI API error {errCode} adding the A/P invoice draft: {errMsg}");
+                }
+                int draftEntry = int.Parse(_company.GetNewObjectKey());
+
+                var saved = QueryRows(
+                    "SELECT \"DocNum\", \"DocCur\", \"DocTotal\", \"DocTotalFC\" " +
+                    $"FROM ODRF WHERE \"DocEntry\" = {draftEntry}",
+                    f => (DocNum: Convert.ToInt32((object)f.Item("DocNum").Value),
+                          DocCur: FieldString(f, "DocCur"),
+                          Total: Convert.ToDouble((object)f.Item("DocTotal").Value),
+                          TotalFc: Convert.ToDouble((object)f.Item("DocTotalFC").Value))).Single();
+                double sapTotal = foreign ? saved.TotalFc : saved.Total;
+                string docCurrency = string.IsNullOrWhiteSpace(saved.DocCur) ? currency.Currency : saved.DocCur.Trim();
+
+                if (request.ExpectedTotal is double expected && Math.Abs(sapTotal - expected) > 0.01)
+                {
+                    bool removed = doc.GetByKey(draftEntry) && doc.Remove() == 0;
+                    _logger.LogWarning(
+                        "A/P invoice draft {DocEntry} total {SapTotal} {Currency} differs from the expected {Expected}; {Outcome}.",
+                        draftEntry, sapTotal, docCurrency, expected, removed ? "removed" : "NOT removed");
+                    throw new PurchaseInvoiceDraftTotalMismatchException(
+                        draftEntry, sapTotal, expected, docCurrency, removed);
+                }
+
+                _logger.LogInformation(
+                    "SAP A/P invoice draft created: DocEntry={DocEntry}, {CardCode}/{NumAtCard}, GRPOs {Grpos}, " +
+                    "{Lines} lines, total {Total} {Currency}, AppRef={AppRef}",
+                    draftEntry, request.CardCode, request.NumAtCard,
+                    string.Join(",", lines.Select(l => l.GrpoDocEntry).Distinct()), lines.Count,
+                    sapTotal, docCurrency, request.AppRef);
+
+                return new PurchaseInvoiceDraftResult
+                {
+                    DraftDocEntry = draftEntry,
+                    DraftDocNum = saved.DocNum,
+                    LineCount = lines.Count,
+                    DocTotal = sapTotal,
+                    DocCurrency = docCurrency,
+                };
+            }
+            catch (COMException ex)
+            {
+                throw new InvalidOperationException(
+                    $"SAP DI API error adding the A/P invoice draft: {ex.Message}", ex);
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(doc);
             }
         }
         finally
