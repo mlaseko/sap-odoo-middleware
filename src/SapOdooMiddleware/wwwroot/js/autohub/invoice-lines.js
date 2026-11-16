@@ -1,6 +1,18 @@
 // Autohub invoice page (/autohub/documents/{id}): line review, enrichment panel, marque, donor swap,
 // bulk actions. Moved out of Detail.cshtml; page values come from data attributes on #review-banner.
 // ---- Autohub Phase B review interactions (only active for editable/extracted documents) ----
+// Reload the invoice page but come back to the same scroll position (used after toolbar actions).
+function reloadKeepingPlace() {
+    try { sessionStorage.setItem('autohub-invoice-scroll:' + location.pathname, String(window.scrollY)); } catch (_) { }
+    location.reload();
+}
+(function restorePlace() {
+    try {
+        const k = 'autohub-invoice-scroll:' + location.pathname, y = sessionStorage.getItem(k);
+        if (y !== null) { sessionStorage.removeItem(k); window.addEventListener('load', () => window.scrollTo(0, Number(y))); }
+    } catch (_) { }
+})();
+
 (function () {
     const banner = document.getElementById('review-banner');
     if (!banner || banner.dataset.editable !== 'true') return;
@@ -902,7 +914,7 @@
 
     // ---- banner buttons ----
     let lastAutoMatch = 0;
-    document.getElementById('btn-automatch').addEventListener('click', async (e) => {
+    document.getElementById('btn-automatch')?.addEventListener('click', async (e) => {
         const now = Date.now();
         if (now - lastAutoMatch < 30000) { alert('Please wait a moment before auto-matching again.'); return; }
         lastAutoMatch = now;
@@ -910,12 +922,12 @@
         try {
             const r = await api('POST', '/auto-match');
             alert('Auto-match: ' + r.newly_matched + ' newly matched, ' + r.still_pending + ' still pending. Reloading.');
-            location.reload();
+            reloadKeepingPlace();
         } catch (err) { alert('Auto-match failed: ' + err.message); e.target.disabled = false; }
     });
 
-    document.getElementById('btn-markpending').addEventListener('click', async () => {
-        try { await api('POST', '/bulk-mark-pending-as-create-new'); location.reload(); }
+    document.getElementById('btn-markpending')?.addEventListener('click', async () => {
+        try { await api('POST', '/bulk-mark-pending-as-create-new'); reloadKeepingPlace(); }
         catch (err) { alert('Failed: ' + err.message); }
     });
 
@@ -936,32 +948,17 @@
                             const r = await api('POST', '/confirm-resolved-marques');
                             closeModal();
                             alert('Confirmed ' + (r.confirmed || 0) + ' resolved marque(s) — queued as Create New.');
-                            location.reload();
+                            reloadKeepingPlace();
                         } catch (e) { alert('Failed: ' + e.message); }
                     } }
                 ]);
         });
     })();
 
-    document.getElementById('btn-skip-pending').addEventListener('click', () => {
-        const n = document.getElementById('cnt-skip-pending').textContent;
-        openModal(
-            '<h3>Skip pending lines</h3><p>Skip <strong>' + n + '</strong> pending / needs-manual line(s)? ' +
-            'They will be marked skipped and excluded from this document\'s SAP items. ' +
-            'You can reopen individual lines (Actions → Reopen) before completing review.</p>',
-            [
-                { label: 'Cancel', onClick: closeModal },
-                { label: 'Skip ' + n + ' line(s)', primary: true, onClick: async () => {
-                    try { await api('POST', '/bulk-skip-pending'); location.reload(); }
-                    catch (e) { alert('Skip failed: ' + e.message); }
-                } }
-            ]);
-    });
-
-    document.getElementById('btn-reopen-skipped').addEventListener('click', () => {
+    document.getElementById('btn-reopen-skipped')?.addEventListener('click', () => {
         const n = document.getElementById('cnt-reopen-skipped').textContent;
         const reopen = async (q) => {
-            try { await api('POST', '/bulk-reopen-skipped' + q); location.reload(); }
+            try { await api('POST', '/bulk-reopen-skipped' + q); reloadKeepingPlace(); }
             catch (e) { alert('Reopen failed: ' + e.message); }
         };
         openModal(
@@ -979,128 +976,8 @@
             ]);
     });
 
-    const PRICE_NOTE = '<p class="hint">' + (banner.dataset.requirePriceReview === 'true'
-        ? 'Price review is required: only lines approved in <a href="/autohub/documents/' + docId + '/prices">Price review</a> are created, at their approved PL03. Other lines stay to create.'
-        : 'Lines approved in <a href="/autohub/documents/' + docId + '/prices">Price review</a> are created at their approved PL03; held lines are skipped; lines not yet reviewed use the calculated price.') + '</p>';
-
-    document.getElementById('btn-bulkcreate').addEventListener('click', () => {
-        const n = document.getElementById('cnt-createnew').textContent;
-        openModal(
-            '<h3>Bulk create items</h3><p>You are about to create up to <strong>' + n + '</strong> item(s) in SAP (including any previously failed lines, which will be retried). This is irreversible. Borrowed-enrichment lines that were not confirmed will be flagged for confirmation rather than created. Continue?</p>' + PRICE_NOTE,
-            [
-                { label: 'Cancel', onClick: closeModal },
-                { label: 'Create ' + n + ' item(s)', primary: true, onClick: runBulkCreate }
-            ]);
-    });
-
-    document.getElementById('btn-confirm-create')?.addEventListener('click', () => {
-        openModal(
-            '<h3>Confirm all &amp; create</h3><p>This confirms <strong>every</strong> create-new line — including ' +
-            'any cross-supplier <em>borrowed</em> enrichments — without per-line review, then creates them in SAP. ' +
-            'Review borrowed lines first if unsure. Continue?</p>' + PRICE_NOTE,
-            [
-                { label: 'Cancel', onClick: closeModal },
-                { label: 'Confirm all & create', primary: true, onClick: async () => {
-                    try { await api('POST', '/bulk-confirm-create-new'); }
-                    catch (e) { alert('Confirm failed: ' + e.message); return; }
-                    await runBulkCreate();
-                } }
-            ]);
-    });
-
-    async function runBulkCreate() {
-        mBody.innerHTML = '<h3>Creating items…</h3>' +
-            '<p id="bc-progress">Starting…</p>' +
-            '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden;margin:8px 0;">' +
-            '<div id="bc-bar" style="height:100%;width:0%;background:var(--accent,#11827a);transition:width .3s;"></div></div>' +
-            '<p class="hint">Runs in the background — it continues even if you close this page or the connection drops.</p>';
-        mActions.innerHTML = '';
-
-        // Baseline: how many were already created, and how many this run is attempting.
-        let baseCreated = 0, target = 0;
-        try {
-            const s0 = await api('GET', '/review-summary');
-            const b0 = s0.by_status || {};
-            baseCreated = b0.created || 0;
-            target = (b0.create_new || 0) + (b0.create_failed || 0);
-        } catch (e) { /* progress is best-effort */ }
-
-        const renderProgress = (done) => {
-            const prog = document.getElementById('bc-progress');
-            const bar = document.getElementById('bc-bar');
-            if (prog) prog.textContent = target ? ('Created ' + done + ' of ' + target + '…') : ('Created ' + done + '…');
-            if (bar && target) bar.style.width = Math.min(100, Math.round(done / target * 100)) + '%';
-        };
-        renderProgress(0);
-
-        const finish = (html) => {
-            mBody.innerHTML = html;
-            const close = document.createElement('button'); close.className = 'btn btn-primary'; close.textContent = 'Close';
-            close.onclick = () => location.reload(); mActions.innerHTML = ''; mActions.appendChild(close);
-        };
-
-        // Start a BACKGROUND job (survives the proxy/client timeout), then poll: review-summary for the
-        // live created-count, and the job for the final result. The create keeps running server-side even
-        // if this page is closed.
-        let jobId;
-        try {
-            const r = await api('POST', '/bulk-create-async');
-            jobId = r.job_id;
-        } catch (e) {
-            finish('<h3>Bulk create failed to start</h3><p>' + esc(e.message) + '</p>');
-            return;
-        }
-
-        const poll = setInterval(async () => {
-            try {
-                const s = await api('GET', '/review-summary');
-                const b = s.by_status || {};
-                renderProgress(Math.max(0, (b.created || 0) - baseCreated));
-            } catch (e) { /* ignore transient poll errors */ }
-
-            let job;
-            try { job = await api('GET', '/bulk-create-job/' + jobId); }
-            catch (e) { return; }   // transient — keep polling
-            if (job.status === 'running') return;
-
-            clearInterval(poll);
-            if (job.status === 'failed') {
-                finish('<h3>Bulk create failed</h3><p>' + esc(job.error || 'unknown error') + '</p>');
-                return;
-            }
-            let html = '<h3>Bulk create complete</h3><p>Created ' + job.created + ' of ' + job.attempted + '. Needs confirmation: ' + (job.needs_confirmation || 0) + '. Failed: ' + job.failed + '.</p>';
-            if (job.not_price_approved > 0 || job.price_held > 0)
-                html += '<p>Left to create by <a href="/autohub/documents/' + docId + '/prices">Price review</a>: ' +
-                        (job.not_price_approved || 0) + ' not approved, ' + (job.price_held || 0) + ' held.</p>';
-            if (job.needs_confirmation > 0) html += '<p class="hint">Needs-confirmation lines are cross-supplier borrowed enrichments — review them, or use “Confirm all &amp; Create” to sign off and create them.</p>';
-            if (job.failures && job.failures.length) {
-                html += '<ul class="failure-list">';
-                job.failures.forEach(f => { html += '<li><strong>' + esc(f.article_number || '?') + '</strong>: ' + esc(f.error) + '</li>'; });
-                html += '</ul>';
-            }
-            finish(html);
-        }, 2000);
-    }
-
-    document.getElementById('btn-complete').addEventListener('click', () => {
-        openModal(
-            '<h3>Complete review</h3><p>Mark this invoice as reviewed? All lines must be matched, created, or skipped.</p>',
-            [
-                { label: 'Cancel', onClick: closeModal },
-                { label: 'Mark reviewed', primary: true, onClick: runComplete }
-            ]);
-    });
-
-    async function runComplete() {
-        try {
-            await api('POST', '/complete-review');
-            window.location = '/autohub/documents';
-        } catch (e) {
-            mBody.innerHTML = '<h3>Cannot complete review</h3><p>' + esc(e.message) + '</p>';
-            const close = document.createElement('button'); close.className = 'btn'; close.textContent = 'Close'; close.onclick = closeModal;
-            mActions.innerHTML = ''; mActions.appendChild(close);
-        }
-    }
+    // Bulk Create, Confirm all & Create, Skip All Pending and Complete Review moved to the Create & finish tab
+    // (/autohub/documents/{id}/finish, wwwroot/js/autohub/finish.js).
 
     // Self-managing poll: refreshSummary() arms/disarms this via ensurePolling() based on whether there's
     // live work. Each tick skips the fetch while the tab is hidden (no server load on a backgrounded tab),
@@ -1132,6 +1009,10 @@
     }
     openFromHash();
     window.addEventListener('hashchange', openFromHash);
+
+    // Used by lines-tools.js (search / filters / bulk) to update rows in place after a bulk action.
+    window.invoiceRefreshSummary = refreshSummary;
+    window.invoiceSetRowPill = setRowPill;
 
     refreshSummary();   // initial load; arms the poll iff there's live work
 })();
@@ -1175,7 +1056,7 @@
                 headers: apiKey ? { 'X-Api-Key': apiKey } : {}
             });
             if (!r.ok) { throw new Error((await r.text()) || ('HTTP ' + r.status)); }
-            window.location.reload();
+            reloadKeepingPlace();
         } catch (e) {
             alert('Re-extract failed: ' + e.message);
             btn.disabled = false;

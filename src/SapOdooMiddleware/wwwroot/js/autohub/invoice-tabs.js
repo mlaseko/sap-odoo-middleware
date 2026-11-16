@@ -21,6 +21,7 @@
         set('issues', (summary.with_issues - price) > 0 ? String(summary.with_issues - price) : '');
         set('prices', price > 0 ? String(price) : '');
         set('progress', summary.done + ' of ' + summary.total + ' done · ' + summary.ready + ' ready to create');
+        set('finish', summary.ready > 0 ? String(summary.ready) : '');
     };
 
     if (nav.dataset.active === 'issues') return;   // the Issues page reports its own data

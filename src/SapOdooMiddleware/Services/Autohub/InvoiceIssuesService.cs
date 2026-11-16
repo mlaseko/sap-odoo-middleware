@@ -158,8 +158,35 @@ public sealed record IssueBulkLineResult(Guid LineId, bool Ok, string? Error, st
 /// <summary>JobId is set for retry_create, which runs as a background Bulk Create job.</summary>
 public sealed record IssueBulkResult(string Action, int Succeeded, int Failed, IReadOnlyList<IssueBulkLineResult> Results, Guid? JobId, string? Note);
 
+// ── Create & finish ────────────────────────────────────────────────────────────
+
+/// <summary>A count of lines for one reason, with the Issues group that fixes it (null when none).</summary>
+public sealed record FinishCount(string Code, string Title, int Count, string? IssuesGroup);
+
+/// <summary>
+/// What Bulk Create would do right now, and what still stops Complete Review. Lines queued to create
+/// (create_new / create_failed) are split into WillCreate (by how their PL03 is set) and NotCreated (held
+/// or not approved in the price review, or blocked by an issue Bulk Create would stop on). PartNotChecked
+/// counts lines that will be created although their matched part was never confirmed. StillOpen counts
+/// lines not queued and not finished, by next action; SkippableOpen is how many of them "skip all
+/// undecided" would skip (pending + needs manual). CompleteBlockers lists the line statuses that stop
+/// Complete Review.
+/// </summary>
+public sealed record FinishSummary(
+    Guid DocumentId, string DocumentStatus, bool RequirePriceReview,
+    int Total, int Created, int Matched, int Skipped,
+    int WillCreate, IReadOnlyList<FinishCount> WillCreateBy,
+    int NotCreated, IReadOnlyList<FinishCount> NotCreatedBy,
+    int PartNotChecked,
+    int StillOpen, IReadOnlyList<FinishCount> StillOpenBy, int SkippableOpen,
+    bool CanComplete, IReadOnlyList<FinishCount> CompleteBlockers,
+    Guid? RunningJobId);
+
 public interface IInvoiceIssuesService
 {
+    /// <summary>What Bulk Create would do now and what stops Complete Review. Null when the document does not exist.</summary>
+    Task<FinishSummary?> GetFinishSummaryAsync(Guid documentId, CancellationToken ct);
+
     /// <summary>Every line's next action, with the open lines grouped by it. Null when the document does not exist.</summary>
     Task<InvoiceIssues?> GetAsync(Guid documentId, CancellationToken ct);
 
@@ -285,6 +312,97 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
             };
         }
         return map;
+    }
+
+    // ── Create & finish ─────────────────────────────────────────────────────────
+
+    /// <summary>Issues Bulk Create stops on for a queued line (it holds, parks or fails it instead of creating).</summary>
+    private static readonly string[] CreateBlockers = { "fix_data", "assign_marque", "accept_marque", "sku_range_full", "confirm_borrow" };
+
+    /// <summary>Line statuses that stop Complete Review (AutohubDocumentsController.CompleteReview).</summary>
+    private static readonly (string Status, string Title)[] CompleteBlocking =
+    {
+        ("pending", "Pending"), ("needs_manual", "Needs manual handling"), ("needs_confirmation", "Confirm SAP match"),
+        ("needs_manufacturer", "Waiting for a marque"), ("prefix_exhausted", "SKU range full"),
+        ("create_new", "Queued, not created yet"), ("create_failed", "Creation failed"),
+    };
+
+    public async Task<FinishSummary?> GetFinishSummaryAsync(Guid documentId, CancellationToken ct)
+    {
+        var doc = await _docs.GetByIdAsync(documentId, ct);
+        if (doc is null) return null;
+
+        var lines = await _lines.ListAsync(documentId, ct);
+        var review = await _priceReview.GetReviewAsync(documentId, ct);
+        var reviewed = review?.Lines.ToDictionary(r => r.LineId) ?? new Dictionary<Guid, PriceReviewLine>();
+        var required = _pricing.RequirePriceReview;
+
+        int approvedCustom = 0, approvedCalculated = 0, unreviewed = 0, held = 0, notApproved = 0, partNotChecked = 0;
+        var blocked = new Dictionary<string, int>();
+        var open = new Dictionary<string, int>();
+        foreach (var l in lines)
+        {
+            var next = LineIssueClassifier.Classify(l, null);
+            if (next.IsDone) continue;
+            if (l.ReviewStatus is not ("create_new" or "create_failed"))
+            {
+                open[next.NextAction] = open.GetValueOrDefault(next.NextAction) + 1;
+                continue;
+            }
+            var blocker = next.Issues.FirstOrDefault(i => CreateBlockers.Contains(i.Code));
+            if (blocker is not null)
+            {
+                blocked[blocker.Code] = blocked.GetValueOrDefault(blocker.Code) + 1;
+                continue;
+            }
+            var rl = reviewed.GetValueOrDefault(l.Id);
+            var (gate, priceOverride) = PartsItemCreationService.ApplyPriceReview(rl, required);
+            if (gate == PartsItemCreationService.PriceReviewAction.Held) { held++; continue; }
+            if (gate == PartsItemCreationService.PriceReviewAction.NotApproved) { notApproved++; continue; }
+            if (priceOverride is not null) approvedCustom++;
+            else if (rl?.Decision is { Stale: false, Status: "approved" }) approvedCalculated++;
+            else unreviewed++;
+            if (next.Issues.Any(i => i.Code == "check_part")) partNotChecked++;
+        }
+
+        FinishCount Group(string code, int n) => new(code, Groups.TryGetValue(code, out var g) ? g.Title : code, n,
+            Groups.ContainsKey(code) ? code : null);
+
+        var willBy = new List<FinishCount>
+        {
+            new("approved_custom", "Approved at a PL03 you set", approvedCustom, null),
+            new("approved_calculated", "Approved at the calculated PL03", approvedCalculated, null),
+            new("unreviewed", "Not price-reviewed: calculated PL03", unreviewed, "price"),
+        };
+        var notBy = new List<FinishCount>
+        {
+            new("price_held", "Held in the price review", held, "price"),
+            new("not_price_approved", "Price not approved (review is required)", notApproved, "price"),
+        };
+        notBy.AddRange(CreateBlockers.Where(blocked.ContainsKey).Select(c => Group(c, blocked[c])));
+        var openBy = LineIssueClassifier.Order.Where(open.ContainsKey).Select(c => Group(c, open[c])).ToList();
+
+        var completeBlockers = CompleteBlocking
+            .Select(b => new FinishCount(b.Status, b.Title, lines.Count(l => l.ReviewStatus == b.Status), null))
+            .Where(b => b.Count > 0)
+            .ToList();
+
+        return new FinishSummary(
+            DocumentId: documentId, DocumentStatus: doc.Status, RequirePriceReview: required,
+            Total: lines.Count,
+            Created: lines.Count(l => l.ReviewStatus == "created"),
+            Matched: lines.Count(l => l.ReviewStatus == "matched"),
+            Skipped: lines.Count(l => l.ReviewStatus == "skip"),
+            WillCreate: approvedCustom + approvedCalculated + unreviewed,
+            WillCreateBy: willBy.Where(x => x.Count > 0).ToList(),
+            NotCreated: held + notApproved + blocked.Values.Sum(),
+            NotCreatedBy: notBy.Where(x => x.Count > 0).ToList(),
+            PartNotChecked: partNotChecked,
+            StillOpen: open.Values.Sum(), StillOpenBy: openBy,
+            SkippableOpen: lines.Count(l => l.ReviewStatus is "pending" or "needs_manual"),
+            CanComplete: doc.Status == "extracted" && completeBlockers.Count == 0,
+            CompleteBlockers: completeBlockers,
+            RunningJobId: _jobs.GetRunningForDocument(documentId)?.JobId);
     }
 
     // ── Bulk ───────────────────────────────────────────────────────────────────

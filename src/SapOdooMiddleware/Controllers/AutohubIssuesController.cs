@@ -34,6 +34,21 @@ public sealed class AutohubIssuesController : ControllerBase
     }
 
     /// <summary>
+    /// GET /api/autohub/documents/{documentId}/finish-summary
+    /// What Bulk Create would do right now (lines it will create, split by how their PL03 is set; lines it
+    /// will not, with the reason and the Issues group that fixes it), lines still open, and what stops
+    /// Complete Review. Read-only; the Create &amp; finish tab shows it before anything irreversible.
+    /// </summary>
+    [HttpGet("{documentId:guid}/finish-summary")]
+    [ProducesResponseType(typeof(FinishSummary), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> FinishSummary(Guid documentId, CancellationToken ct)
+    {
+        var result = await _issues.GetFinishSummaryAsync(documentId, ct);
+        return result is null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>
     /// POST /api/autohub/documents/{documentId}/issues/bulk
     /// Apply one action to many lines; each line succeeds or fails on its own.
     /// <code>

@@ -261,6 +261,75 @@ public class InvoiceIssuesTests
         Assert.Contains("reviewed", ex.Message);
     }
 
+    // ── Create & finish summary ───────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Finish_summary_says_exactly_what_Bulk_Create_would_do(bool required)
+    {
+        var rig = new Rig();
+        var custom = L("create_new", n: 4);
+        var calc = L("create_new", n: 5);
+        var unreviewed = L("create_new", n: 6);
+        var held = L("create_new", n: 7);
+        var noMarque = L("create_new", n: 8, skuPrefix: null);                    // Bulk Create holds it
+        var borrow = L("create_failed", n: 9, confirmationRequired: true);        // Bulk Create parks it
+        var partUnchecked = L("create_new", n: 10, needsReview: true);            // created, but flagged
+        rig.State = new()
+        {
+            L("created", n: 1), L("matched", n: 2), L("skip", n: 3),
+            custom, calc, unreviewed, held, noMarque, borrow, partUnchecked,
+            L("pending", n: 11), L("needs_manual", n: 12),
+        };
+        PriceReviewLine P(PartsLineState l, PriceReviewDecisionView? d) => PriceLine(l.Id, d);
+        rig.PriceLines = new()
+        {
+            P(custom, Decision("approved", 120000m)), P(calc, Decision("approved", 100000m)), P(unreviewed, null),
+            P(held, Decision("held", 100000m)), P(partUnchecked, Decision("approved", 100000m)),
+        };
+
+        var s = (await rig.Build(requireReview: required).GetFinishSummaryAsync(DocId, CancellationToken.None))!;
+
+        Assert.Equal((12, 1, 1, 1), (s.Total, s.Created, s.Matched, s.Skipped));
+        var will = s.WillCreateBy.ToDictionary(x => x.Code, x => x.Count);
+        var not = s.NotCreatedBy.ToDictionary(x => x.Code, x => x.Count);
+        Assert.Equal(1, will["approved_custom"]);
+        Assert.Equal(2, will["approved_calculated"]);                           // calc + partUnchecked
+        Assert.Equal(1, not["price_held"]);
+        Assert.Equal(1, not["assign_marque"]);
+        Assert.Equal(1, not["confirm_borrow"]);
+        Assert.Equal("confirm_borrow", s.NotCreatedBy.Single(x => x.Code == "confirm_borrow").IssuesGroup);
+        if (required)
+        {
+            Assert.False(will.ContainsKey("unreviewed"));
+            Assert.Equal(1, not["not_price_approved"]);
+            Assert.Equal(3, s.WillCreate);
+        }
+        else
+        {
+            Assert.Equal(1, will["unreviewed"]);
+            Assert.Equal(4, s.WillCreate);
+        }
+        Assert.Equal(1, s.PartNotChecked);
+        Assert.Equal(2, s.StillOpen);                                           // pending + needs_manual
+        Assert.Equal(2, s.SkippableOpen);
+        Assert.False(s.CanComplete);
+        Assert.Contains(s.CompleteBlockers, b => b.Code == "create_new" && b.Count == 6);
+        Assert.Contains(s.CompleteBlockers, b => b.Code == "create_failed" && b.Count == 1);
+    }
+
+    [Fact]
+    public async Task Finish_summary_allows_completing_when_every_line_is_done()
+    {
+        var rig = new Rig();
+        rig.State = new() { L("created", n: 1), L("matched", n: 2), L("skip", n: 3) };
+        var s = (await rig.Build().GetFinishSummaryAsync(DocId, CancellationToken.None))!;
+        Assert.True(s.CanComplete);
+        Assert.Empty(s.CompleteBlockers);
+        Assert.Equal(0, s.WillCreate);
+    }
+
     // ── Marque assignment guards (moved from the controller) ──────────────────
 
     [Fact]

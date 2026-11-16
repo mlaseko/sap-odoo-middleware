@@ -25,6 +25,13 @@
 
 <style>
     .hint { font-weight: normal; color: var(--muted); font-size: 13px; }
+    .ln-tools { display:flex; flex-wrap:wrap; align-items:center; gap:8px; background:var(--surface); border:1px solid var(--border);
+                border-radius:var(--radius-sm); padding:8px 10px; margin:0 0 10px; }
+    .ln-tools input[type=search] { width:300px; }
+    .ln-shown { color:var(--muted); font-size:12.5px; }
+    .ln-bulk { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-left:auto; }
+    .ln-bulk input.mq { width:80px; text-transform:uppercase; }
+    #lines-table th.sel-col, #lines-table td.sel-col { width:28px; text-align:center; }
     @@keyframes line-flash { from { background: var(--accent-soft); } to { background: transparent; } }
     #lines-table tr.line-row.flash > td { animation: line-flash 2.5s ease-out; }
     .ld-review { border: 1px solid rgba(251,146,60,.35); background: rgba(251,146,60,.08); border-radius: var(--radius-sm);
@@ -199,23 +206,41 @@
                 <button id="btn-automatch" class="btn btn-sm" type="button">Auto-match again</button>
                 <button id="btn-confirm-marques" class="btn btn-sm" type="button" title="Accept DGX's resolved marque for every auto-resolved line — do this after spot-checking/overriding exceptions">Confirm DGX-resolved marques</button>
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
-                <button id="btn-skip-pending" class="btn btn-sm" type="button">Skip All Pending (<span id="cnt-skip-pending">@(Model.Count("pending") + Model.Count("needs_manual"))</span>)</button>
                 <button id="btn-reopen-skipped" class="btn btn-sm" type="button">Reopen Skipped (<span id="cnt-reopen-skipped">@Model.Count("skip")</span>)</button>
-                <a id="btn-price-review" class="btn btn-sm" href="/autohub/documents/@Model.Doc.Id/prices"
-                   title="Review and adjust the prices calculated for the lines to be created, with related parts for comparison">Price review</a>
-                <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@(Model.Count("create_new") + Model.Count("create_failed"))</span>)</button>
-                <button id="btn-confirm-create" class="btn btn-sm" type="button">Confirm all &amp; Create</button>
-                <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>
+                <a id="btn-finish" class="btn btn-sm btn-primary" href="/autohub/documents/@Model.Doc.Id/finish"
+                   title="See exactly what will be created, then create the items in SAP and complete the review">Create &amp; finish →</a>
             </div>
         }
     </div>
 }
 
 <h3>Line items (@Model.Lines.Count) <span class="hint">— click a row for details / edit</span></h3>
-@{ var colCount = Model.IsEditable ? 10 : 9; }
+
+@* Search, filters and (while editable) multi-select with bulk actions: wwwroot/js/autohub/lines-tools.js *@
+<div class="ln-tools" id="ln-tools" data-editable="@Model.IsEditable.ToString().ToLowerInvariant()">
+    <input type="search" id="ln-search" placeholder="Search article, OEM, description, brand…" autocomplete="off">
+    <select id="ln-status" title="Line status">
+        <option value="">Any status</option>
+        <option value="pending">Pending</option>
+        <option value="create_new">To create</option>
+        <option value="create_failed">Create failed</option>
+        <option value="needs_confirmation">Confirm match</option>
+        <option value="needs_manual">Needs manual</option>
+        <option value="needs_manufacturer">Assign marque</option>
+        <option value="matched">Matched</option>
+        <option value="created">Created</option>
+        <option value="skip">Skipped</option>
+    </select>
+    <select id="ln-next" title="What the line needs next"><option value="">Anything needed</option></select>
+    <span class="ln-shown" id="ln-shown"></span>
+    <span class="ln-bulk" id="ln-bulk"></span>
+</div>
+
+@{ var colCount = Model.IsEditable ? 11 : 9; }
 <table id="lines-table">
     <thead>
         <tr>
+            @if (Model.IsEditable) { <th class="sel-col"><input type="checkbox" id="ln-all" title="Select all shown lines"></th> }
             <th class="num">#</th>
             <th class="col-art">Supplier Art.</th>
             <th class="col-oems">OEMs</th>
@@ -236,6 +261,7 @@
         <tr class="line-row @(l.IsPromotional ? "promo" : null)" data-line-id="@l.Id"
             data-suggested-code="@l.SuggestedDonorItemCode" data-suggested-supplier="@l.SuggestedDonorSupplier"
             data-source="@l.EnrichmentSource" data-review-status="@l.ReviewStatus">
+            @if (Model.IsEditable) { <td class="sel-col" data-noexpand="1"><input type="checkbox" class="ln-sel"></td> }
             <td class="num">@l.LineNumber</td>
             <td class="col-art">@l.SupplierArticleNumber</td>
             <td class="col-oems" title="@oems">@oems</td>
@@ -332,3 +358,4 @@
 }
 
 <script src="~/js/autohub/invoice-lines.js" asp-append-version="true"></script>
+<script src="~/js/autohub/lines-tools.js" asp-append-version="true"></script>
