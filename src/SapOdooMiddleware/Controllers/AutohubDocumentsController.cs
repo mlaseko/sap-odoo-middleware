@@ -17,6 +17,7 @@ namespace SapOdooMiddleware.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/autohub/documents")]
+[ServiceFilter(typeof(AutohubActivityFilter))]   // invoice history
 public class AutohubDocumentsController : ControllerBase
 {
     private readonly IStagingPartsDocumentRepository _docs;
@@ -30,7 +31,7 @@ public class AutohubDocumentsController : ControllerBase
     private readonly IAutohubSapB1Service _sap;   // Autohub company (Molas Live 2021) connection
     private readonly INeonBridgeService _bridge;   // resolve donor oitm rows for the operator swap
     private readonly IDonorSearchClient _donorSearch;   // DGX "find more candidates" (broad TecDoc pool)
-    private readonly IManufacturerResolutionClient _manufacturer;   // DGX /resolve_manufacturer (marque handshake)
+    private readonly IMarqueAssignmentService _marque;   // DGX /resolve_manufacturer (marque handshake), shared with Issues bulk
 
     public AutohubDocumentsController(
         IStagingPartsDocumentRepository docs,
@@ -44,7 +45,7 @@ public class AutohubDocumentsController : ControllerBase
         IAutohubSapB1Service sap,
         INeonBridgeService bridge,
         IDonorSearchClient donorSearch,
-        IManufacturerResolutionClient manufacturer)
+        IMarqueAssignmentService marque)
     {
         _docs = docs;
         _review = review;
@@ -57,7 +58,7 @@ public class AutohubDocumentsController : ControllerBase
         _sap = sap;
         _bridge = bridge;
         _donorSearch = donorSearch;
-        _manufacturer = manufacturer;
+        _marque = marque;
     }
 
     private static readonly JsonSerializerOptions EnrichmentJson = new()
@@ -291,72 +292,16 @@ public class AutohubDocumentsController : ControllerBase
     public async Task<IActionResult> ResolveManufacturer(
         Guid documentId, Guid lineId, [FromBody] ResolveManufacturerBody body, CancellationToken ct)
     {
-        if (await GuardLine(documentId, lineId, ct) is { } err) return err;
-
-        var code = body?.ManufacturerCode?.Trim();
-        if (string.IsNullOrWhiteSpace(code))
-            return BadRequest(new { error = "manufacturerCode is required." });
-        if (PartsItemProvisioningService.IsUnresolvedPrefix(code))
-            return BadRequest(new { error = "'GEN' is not an assignable marque — pick a real manufacturer." });
-
-        var row = await _review.GetByIdAsync(lineId, ct);
-        if (row is null) return NotFound();
-        // Resolvable from any actionable state — a needs_manufacturer hold OR during review (pending /
-        // create_new / needs_manual), so the operator can assign the marque without a create round-trip
-        // first. Only a terminal line (already created / matched / skipped) is off-limits.
-        if (row.ReviewStatus is "created" or "matched" or "skip")
-            return Conflict(new { error = $"Line is '{row.ReviewStatus}' — nothing to resolve." });
-
-        var payloadJson = await _review.GetEnrichmentPayloadAsync(lineId, ct);
-        if (string.IsNullOrWhiteSpace(payloadJson))
-            return Conflict(new { error = "Line has no stored enrichment to finalize." });
-
-        EnrichmentResponse held;
-        try
+        var r = await _marque.AssignAsync(documentId, lineId, body?.ManufacturerCode, body?.ItemsGroupCode, CurrentUser, ct);
+        return r.Kind switch
         {
-            held = JsonSerializer.Deserialize<EnrichmentResponse>(payloadJson, EnrichmentJson)
-                   ?? throw new InvalidOperationException("empty payload");
-        }
-        catch (Exception ex)
-        {
-            return StatusCode(StatusCodes.Status500InternalServerError,
-                new { error = $"Stored enrichment could not be read: {ex.Message}" });
-        }
-
-        // OEMs DGX re-ranks under the marque: the line's own OEMs plus the enrichment's, de-duped. v1 re-ranks
-        // exactly what we send (it does not fetch stored cross-refs), so passing the fuller chain gets it back
-        // marque-ordered. Brand is the staging line Brand — the key the stored ruling is filed under.
-        var oems = (row.OemNumbers ?? new List<string>())
-            .Concat(held.ItemData?.FilteredOems ?? Enumerable.Empty<string>())
-            .Where(o => !string.IsNullOrWhiteSpace(o))
-            .Select(o => o.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        ManufacturerPackage pkg;
-        try
-        {
-            pkg = await _manufacturer.ResolveAsync(
-                new ResolveManufacturerRequest(row.SupplierArticleNumber, row.Brand, code!, CurrentUser, oems), ct);
-        }
-        catch (Exception ex)
-        {
-            return StatusCode(StatusCodes.Status502BadGateway, new { error = $"Manufacturer resolution failed: {ex.Message}" });
-        }
-
-        if (!string.IsNullOrWhiteSpace(pkg.Error))
-            return StatusCode(StatusCodes.Status502BadGateway, new { error = $"DGX could not resolve '{code}': {pkg.Error}" });
-        if (PartsItemProvisioningService.IsUnresolvedPrefix(pkg.Prefix))
-            return StatusCode(StatusCodes.Status502BadGateway, new { error = $"DGX returned no usable prefix for '{code}'." });
-
-        var merged = ManufacturerResolutionMerge.Apply(held, pkg);
-        // Optional operator override of the SAP item group. DGX's package sets the group from the donor;
-        // when the operator supplies a positive group here it wins, so a wrong borrowed group (e.g. 105)
-        // can be corrected on the same panel as the marque. Line stays create_new — minted on Bulk Create.
-        if (body!.ItemsGroupCode is > 0 && merged.ItemData is { } md)
-            merged = merged with { ItemData = md with { SuggestedItmsGrpCod = body.ItemsGroupCode } };
-        await _review.ApplyManufacturerResolutionAsync(lineId, JsonSerializer.Serialize(merged), ct);
-        return Ok(await _review.GetByIdAsync(lineId, ct));
+            MarqueAssignKind.Ok         => Ok(r.Line),
+            MarqueAssignKind.BadRequest => BadRequest(new { error = r.Error }),
+            MarqueAssignKind.NotFound   => NotFound(),
+            MarqueAssignKind.Conflict   => Conflict(new { error = r.Error }),
+            MarqueAssignKind.Upstream   => StatusCode(StatusCodes.Status502BadGateway, new { error = r.Error }),
+            _                           => StatusCode(StatusCodes.Status500InternalServerError, new { error = r.Error }),
+        };
     }
 
     public sealed record ResolveManufacturerBody(string? ManufacturerCode, int? ItemsGroupCode);

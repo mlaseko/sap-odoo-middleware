@@ -1,0 +1,65 @@
+@page "/autohub/documents/{id:guid}/issues"
+@model SapOdooMiddleware.Areas.Autohub.Pages.Documents.IssuesModel
+
+<div class="page-head">
+    <div>
+        <h2>@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
+        <div class="sub">@Model.Doc.SupplierName · @Model.Doc.Currency</div>
+    </div>
+    <div style="display:flex; gap:12px; align-items:center;">
+        <a class="btn btn-sm" href="/autohub/documents">← Back to list</a>
+    </div>
+</div>
+
+<partial name="_InvoiceTabs" model="@(new SapOdooMiddleware.Areas.Autohub.Pages.Documents.InvoiceTabs(Model.Doc.Id, "issues"))" />
+
+<style>
+    main:has(#is-root) { max-width: 1680px; }
+    .is-layout { display: grid; grid-template-columns: 270px 1fr; gap: 18px; align-items: start; }
+    .is-groups { display: flex; flex-direction: column; gap: 6px; position: sticky; top: 76px; }
+    .is-group { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+                padding: 9px 12px; color: var(--text); cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+    .is-group:hover { background: var(--surface-2); }
+    .is-group.active { border-color: var(--accent); background: var(--accent-soft); color: var(--text-strong); }
+    .is-group .n { font-weight: 700; }
+    .is-group.info { opacity: .8; }
+    .is-head h3 { margin: 0 0 4px; }
+    .is-head .help { color: var(--muted); margin: 0 0 12px; }
+    .is-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--border);
+               border-radius: var(--radius-sm); padding: 9px 12px; margin-bottom: 10px; position: sticky; top: 58px; z-index: 5; }
+    .is-bulk .sel { color: var(--muted); margin-right: 6px; }
+    .is-bulk .marque-form { display: none; gap: 6px; align-items: center; }
+    .is-bulk .marque-form.open { display: inline-flex; }
+    .is-bulk input.mq { width: 90px; text-transform: uppercase; }
+    #is-table td { vertical-align: top; }
+    #is-table td.num, #is-table th.num { text-align: right; white-space: nowrap; }
+    #is-table .sub { color: var(--muted); font-size: 12px; }
+    #is-table ul.issues { margin: 0; padding-left: 16px; }
+    #is-table ul.issues li.primary { color: var(--text-strong); }
+    #is-table ul.issues li:not(.primary) { color: var(--muted); font-size: 12.5px; }
+    .is-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .is-actions a.btn { text-decoration: none; }
+    tr.is-card > td { background: var(--surface-2); }
+    .card3 { display: grid; grid-template-columns: 1fr 1.3fr 1fr; gap: 14px; }
+    .card3 > div { background: var(--surface); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 10px 12px; }
+    .card3 h4 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+    .card3 table.kv th { width: 34%; }
+    .card3 img { max-width: 120px; max-height: 90px; object-fit: contain; background: #fff; border-radius: 6px; float: right; margin-left: 8px; }
+    .oem-hit { color: var(--success); font-weight: 600; }
+    .fit-list { max-height: 120px; overflow: auto; font-size: 12.5px; }
+    .is-empty { padding: 40px; text-align: center; color: var(--muted); border: 1px dashed var(--border); border-radius: var(--radius); }
+</style>
+
+<div id="is-root" data-doc-id="@Model.Doc.Id" data-editable="@Model.IsEditable.ToString().ToLowerInvariant()">
+    @if (!Model.IsEditable)
+    {
+        <div class="note-warn">This invoice's review is completed, so lines are shown read-only.</div>
+    }
+    <div id="is-message"></div>
+    <div class="is-layout">
+        <aside class="is-groups" id="is-groups"><div class="sub">Loading…</div></aside>
+        <section id="is-panel"></section>
+    </div>
+</div>
+
+<script src="~/js/autohub/issues.js" asp-append-version="true"></script>

@@ -1,0 +1,37 @@
+@page "/autohub/documents/{id:guid}/finish"
+@model SapOdooMiddleware.Areas.Autohub.Pages.Documents.FinishModel
+
+<div class="page-head">
+    <div>
+        <h2>@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
+        <div class="sub">@Model.Doc.SupplierName · @Model.Doc.Currency</div>
+    </div>
+    <div style="display:flex; gap:12px; align-items:center;">
+        <a class="btn btn-sm" href="/autohub/documents">← Back to list</a>
+    </div>
+</div>
+
+<partial name="_InvoiceTabs" model="@(new SapOdooMiddleware.Areas.Autohub.Pages.Documents.InvoiceTabs(Model.Doc.Id, "finish"))" />
+
+<style>
+    .fi-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .fi-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; }
+    .fi-card h3 { margin: 0 0 4px; }
+    .fi-card .big { font-size: 30px; font-weight: 750; color: var(--text-strong); }
+    .fi-card .sub { color: var(--muted); font-size: 13px; }
+    .fi-card ul { margin: 10px 0 0; padding-left: 18px; }
+    .fi-card li { margin: 3px 0; }
+    .fi-card.go { border-color: var(--accent); }
+    .fi-card.warn { border-color: rgba(251,146,60,.45); }
+    .fi-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 14px; }
+    .fi-progress { height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; margin: 10px 0; }
+    .fi-progress > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+    .fi-done { color: var(--success); }
+</style>
+
+<div id="fi-root" data-doc-id="@Model.Doc.Id">
+    <div id="fi-message"></div>
+    <div id="fi-body"><div class="sub">Loading…</div></div>
+</div>
+
+<script src="~/js/autohub/finish.js" asp-append-version="true"></script>

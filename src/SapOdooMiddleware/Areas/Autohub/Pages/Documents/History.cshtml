@@ -1,0 +1,27 @@
+@page "/autohub/documents/{id:guid}/history"
+@model SapOdooMiddleware.Areas.Autohub.Pages.Documents.HistoryModel
+
+<div class="page-head">
+    <div>
+        <h2>@(Model.Doc.InvoiceNumber ?? Model.Doc.OriginalFilename)</h2>
+        <div class="sub">@Model.Doc.SupplierName · @Model.Doc.Currency · uploaded @Model.Doc.UploadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</div>
+    </div>
+    <div style="display:flex; gap:12px; align-items:center;">
+        <a class="btn btn-sm" href="/autohub/documents">← Back to list</a>
+    </div>
+</div>
+
+<partial name="_InvoiceTabs" model="@(new SapOdooMiddleware.Areas.Autohub.Pages.Documents.InvoiceTabs(Model.Doc.Id, "history"))" />
+
+<div id="hi-root" data-doc-id="@Model.Doc.Id">
+    <div class="ln-tools" style="display:flex; gap:8px; align-items:center; margin-bottom:10px;">
+        <input type="search" id="hi-search" placeholder="Search the history (line number, action, item code…)" style="width:360px">
+        <span class="sub" id="hi-count"></span>
+    </div>
+    <table id="hi-table">
+        <thead><tr><th>When</th><th>Who</th><th class="num">Line</th><th>What happened</th></tr></thead>
+        <tbody><tr><td colspan="4">Loading…</td></tr></tbody>
+    </table>
+</div>
+
+<script src="~/js/autohub/history.js" asp-append-version="true"></script>
