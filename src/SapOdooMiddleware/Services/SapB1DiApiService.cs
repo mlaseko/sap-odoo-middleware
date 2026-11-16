@@ -5503,7 +5503,8 @@ SELECT * FROM (
         T0.InQty - T0.OutQty  AS NetMovement,
 
         CAST(NULL AS DECIMAL(19,6)) AS OrderedQty,
-        CAST(NULL AS DECIMAL(19,6)) AS OpenQty
+        CAST(NULL AS DECIMAL(19,6)) AS OpenQty,
+        T0.TransNum           AS TransNum
 
     FROM OINM T0
 
@@ -5576,7 +5577,8 @@ SELECT * FROM (
         CAST(0 AS DECIMAL(19,6)) AS QtyOut,
         CAST(0 AS DECIMAL(19,6)) AS NetMovement,
         POR1.Quantity          AS OrderedQty,
-        POR1.OpenQty           AS OpenQty
+        POR1.OpenQty           AS OpenQty,
+        CAST(NULL AS INT)      AS TransNum
     FROM OPOR
     INNER JOIN POR1     ON OPOR.DocEntry = POR1.DocEntry
     LEFT  JOIN OITM OITM_PO ON POR1.ItemCode = OITM_PO.ItemCode
@@ -5584,7 +5586,7 @@ SELECT * FROM (
     LEFT  JOIN OUSR OUSR_PO ON OPOR.UserSign   = OUSR_PO.USERID
     WHERE POR1.ItemCode = '{safeCode}'{poDateFilter}
 ) X
-ORDER BY PostingDate, DocumentNumber";
+ORDER BY PostingDate, CASE WHEN TransNum IS NULL THEN 1 ELSE 0 END, TransNum, DocumentNumber";
 
             _logger.LogInformation(
                 "Executing transaction history query for ItemCode={ItemCode}", itemCode);
@@ -5637,6 +5639,10 @@ ORDER BY PostingDate, DocumentNumber";
                             ? null
                             : Convert.ToDecimal(
                                 rs.Fields.Item("OpenQty").Value),
+                        TransNum = rs.Fields.Item("TransNum").Value is DBNull
+                            ? null
+                            : Convert.ToInt32(
+                                rs.Fields.Item("TransNum").Value),
                     });
                     rs.MoveNext();
                 }
