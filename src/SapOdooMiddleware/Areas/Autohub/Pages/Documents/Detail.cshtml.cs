@@ -59,6 +59,33 @@ public class DetailModel : PageModel
         _               => ("pill-yellow", "pending"),
     };
 
+    /// <summary>
+    /// Tooltip for the "⚠ check part" badge: the DGX could not confirm the matched part is the same kind of
+    /// part as the invoice line (part-name comparison verdict MATCH / UNCERTAIN / DIFFERENT).
+    /// </summary>
+    public static string ReviewReason(string? verdict, string? selectedName, string? selectedSupplier)
+    {
+        var why = string.Equals(verdict, "DIFFERENT", StringComparison.OrdinalIgnoreCase)
+            ? "The matched part looks like a different kind of part from the invoice line."
+            : "The matched part could not be confirmed as the same kind of part as the invoice line.";
+        var part = string.IsNullOrWhiteSpace(selectedName) ? "" :
+            $" Matched part: {selectedName}{(string.IsNullOrWhiteSpace(selectedSupplier) ? "" : $" ({selectedSupplier})")}.";
+        return why + part + " Open the line to confirm it or choose another part.";
+    }
+
+    /// <summary>Plain-language explanation for the source badge (tooltip).</summary>
+    public static string SourceExplanation(string? matchStrategy)
+    {
+        var s = matchStrategy ?? "";
+        if (s.Contains("cross_supplier")) return "Matched to another supplier's part (same OEM number); the item is created under this invoice's supplier.";
+        if (s.Contains("germax"))          return "Found in the Germax catalogue by a shared OEM number.";
+        if (s.Contains("rapidapi"))        return "Found by a live TecDoc search on the OEM / article number.";
+        if (s.Contains("borrowed_oem_bridge")) return "Borrowed from another supplier's TecDoc part with the same OEM number.";
+        if (s is "tier1_oem" or "tier2_article") return "Already in SAP (matched by OEM or article number in the SAP mirror).";
+        if (s.Contains("tecdoc") || s.Contains("enrichment_direct")) return "Found in TecDoc by this supplier's article number.";
+        return s;
+    }
+
     /// <summary>Small "where did this match come from" badge derived from MatchStrategy (Slice 2). Empty = no badge.</summary>
     public static (string Label, string Css) SourceBadge(string? matchStrategy)
     {

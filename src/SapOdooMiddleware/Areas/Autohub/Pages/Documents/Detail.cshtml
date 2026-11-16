@@ -23,6 +23,9 @@
 
 <style>
     .hint { font-weight: normal; color: var(--muted); font-size: 13px; }
+    .ld-review { border: 1px solid rgba(251,146,60,.35); background: rgba(251,146,60,.08); border-radius: var(--radius-sm);
+                 padding: 10px 12px; margin: 0 0 12px; }
+    .ld-review table.kv { margin: 8px 0; }
     /* Header scrolls with the table — NOT sticky. The .review-banner already pins at top:58px, and a
        second sticky header at the same offset collided with it and floated over the first rows. */
     #lines-table thead th { background: var(--surface-2); }
@@ -242,12 +245,12 @@
                 @{ var sb = SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.SourceBadge(l.MatchStrategy); }
                 @if (sb.Label.Length > 0)
                 {
-                    <span class="pill @sb.Css" title="@l.MatchStrategy">@sb.Label</span>
+                    <span class="pill @sb.Css" title="@SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.SourceExplanation(l.MatchStrategy)">@sb.Label</span>
                 }
-                @if (l.NeedsReview)
+                @if (l.NeedsReview && l.EnrichmentConfirmedAt is null && l.ReviewStatus != "created")
                 {
                     <span class="pill pill-orange"
-                          title="Borrowed part type unverified (@l.SelectedComponentVerdict) — review/choose the donor">⚠ review</span>
+                          title="@SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.ReviewReason(l.SelectedComponentVerdict, l.SelectedName, l.SelectedSupplier)">⚠ check part</span>
                 }
                 @if (l.NeedsMarque && l.ReviewStatus != "needs_manufacturer" && l.ReviewStatus != "created")
                 {
@@ -268,7 +271,7 @@
                             }
                             <button type="button" data-action="match">Manual match…</button>
                             <button type="button" data-action="create_new">Create New (SAP)</button>
-                            @if (l.HasDonorCandidates && l.ReviewStatus != "created")
+                            @if ((l.HasDonorCandidates || !string.IsNullOrEmpty(l.EnrichmentSource)) && l.ReviewStatus != "created")
                             {
                                 <button type="button" data-action="swap_donor">Choose donor…</button>
                             }
@@ -526,6 +529,16 @@
         return (mr.resolved === true && mr.prefix) ? marqueConfirmHtml(mr, lineId) : marquePickerHtml(mr, lineId);
     }
 
+    function groupInputHtml(cur) {
+        const codes = Object.keys(GROUP_NAMES);
+        if (!codes.length)
+            return '<input type="number" class="ov-group" value="' + esc(cur) + '" placeholder="e.g. 105">';
+        const opts = codes.sort((a, b) => Number(a) - Number(b)).map(c =>
+            '<option value="' + esc(c) + '"' + (c === String(cur) ? ' selected' : '') + '>' + esc(c) + ' · ' + esc(GROUP_NAMES[c]) + '</option>');
+        if (cur && !GROUP_NAMES[String(cur)]) opts.unshift('<option value="' + esc(cur) + '" selected>' + esc(cur) + '</option>');
+        return '<select class="ov-group">' + (cur ? '' : '<option value="">(keep)</option>') + opts.join('') + '</select>';
+    }
+
     // Override for a line that already has a real marque/group (resolved or borrowed): a collapsed control
     // to correct a wrong auto-assigned marque (SKU prefix) or SAP item group. Saving posts to the same
     // resolve-manufacturer endpoint (marque via DGX + optional group override) and keeps the line queued.
@@ -537,12 +550,59 @@
             '<div class="ov-form" style="display:none;">' +
               '<label class="ov-row"><span>Marque (SKU prefix)</span>' +
                 '<input type="text" class="ov-marque" value="' + esc(curPrefix) + '" placeholder="e.g. BM, MB, VAG"></label>' +
-              '<label class="ov-row"><span>SAP item group</span>' +
-                '<input type="number" class="ov-group" value="' + esc(curGroup) + '" placeholder="e.g. 105"></label>' +
+              '<label class="ov-row"><span>SAP item group</span>' + groupInputHtml(curGroup) + '</label>' +
               '<div class="mq-actions"><button type="button" class="btn btn-sm ov-save">Save override</button>' +
                 '<span class="ov-status"></span></div>' +
             '</div>' +
             '</div>';
+    }
+
+    // Plain-language names for the DGX enrichment sources.
+    const SOURCE_LABEL = {
+        tecdoc_direct: 'TecDoc: exact article match for this supplier',
+        borrowed_oem_bridge: "Another supplier's part with the same OEM number (TecDoc)",
+        germax_local: 'Germax catalogue (shared OEM number)',
+        rapidapi_tecdoc_live: 'TecDoc live search by OEM / article number',
+        rapidapi_tecdoc: 'TecDoc search, part chosen by an operator',
+        unmatched: 'No catalogue match found',
+    };
+    const sourceText = s => s ? (SOURCE_LABEL[s] ? SOURCE_LABEL[s] + ' <span class="dc-dim">(' + esc(s) + ')</span>' : esc(s)) : 'unknown';
+
+    // SAP item group names (GET /api/sap/item-groups, cached server-side), loaded once per page.
+    let groupNamesPromise = null;
+    function loadGroupNames() {
+        if (!groupNamesPromise) groupNamesPromise = fetch('/api/sap/item-groups', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} })
+            .then(r => r.ok ? r.json() : [])
+            .then(list => { const m = {}; (list || []).forEach(g => { m[String(g.code)] = g.name; }); return m; })
+            .catch(() => ({}));
+        return groupNamesPromise;
+    }
+    let GROUP_NAMES = {};
+    const groupText = code => code == null || code === '' ? '' :
+        esc(code) + (GROUP_NAMES[String(code)] ? ' · ' + esc(GROUP_NAMES[String(code)]) : '');
+
+    // Why a line is flagged "check part": the DGX could not confirm the matched part is the same kind of
+    // part as the invoice line (verdict MATCH / UNCERTAIN / DIFFERENT from the part-name comparison).
+    function reviewReasonHtml(enr, lineId, reviewStatus) {
+        const sel = enr.audit && enr.audit.selection;
+        if (!sel || sel.needs_review !== true) return '';
+        const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
+        const invoiceDesc = row ? (row.querySelector('.col-desc')?.textContent || '') : '';
+        const v = String(sel.selected_component_verdict || '').toUpperCase();
+        const why = v === 'DIFFERENT'
+            ? 'The matched part looks like a <strong>different kind of part</strong> from the invoice line.'
+            : 'The matched part could not be confirmed as the <strong>same kind of part</strong> as the invoice line (the part names do not share a clear part type).';
+        const canConfirm = ['pending', 'create_new', 'create_failed'].includes(reviewStatus);
+        return '<div class="ld-review">' +
+            '<div><strong>⚠ Check the part.</strong> ' + why + '</div>' +
+            '<table class="kv"><tr><th>Invoice says</th><td>' + esc(invoiceDesc) + '</td></tr>' +
+            '<tr><th>Matched part</th><td>' + esc(sel.selected_name || '?') +
+                (sel.selected_supplier ? ' <span class="dc-dim">(' + esc(sel.selected_supplier) + ')</span>' : '') + '</td></tr></table>' +
+            '<div class="mq-actions">' +
+                '<button type="button" class="btn btn-sm ld-choose-donor">Choose another part…</button>' +
+                (canConfirm ? '<button type="button" class="btn btn-sm ld-confirm-part">The part is correct, confirm</button>' : '') +
+                '<span class="cp-status"></span>' +
+            '</div></div>';
     }
 
     function enrichmentHtml(enr, reviewStatus, lineId) {
@@ -568,9 +628,9 @@
         if (mr && actionable && prefixUnresolved) head = marqueSectionHtml(mr, lineId);
         else if (actionable && !prefixUnresolved && !noData) head = marqueOverrideHtml(mr, d, lineId);
         // Enrichment already happened during extraction — show its outcome, don't imply it's pending.
-        let html = head + '<h3>Item enrichment</h3>';
+        let html = head + (lineId && actionable ? reviewReasonHtml(enr, lineId, reviewStatus) : '') + '<h3>Item enrichment</h3>';
         html += '<p>Enrichment: <strong>' + (noData ? 'no catalog match found' : 'done') + '</strong>' +
-                ' &middot; source <strong>' + esc(enr.enrichment_source || enr.source || 'unknown') + '</strong>';
+                ' &middot; found by <strong>' + sourceText(enr.enrichment_source || enr.source) + '</strong>';
         // Only a genuine cross-supplier borrow needs sign-off before creating.
         if (bf) html += ' <span class="pill pill-yellow">borrowed — confirm before create</span>';
         html += '</p>';
@@ -584,7 +644,7 @@
         html += '<table class="kv">';
         html += '<tr><th>Description</th><td>' + esc(d.primary_description) + '</td></tr>';
         html += '<tr><th>Fit&nbsp;for</th><td>' + esc(d.fit_for_auto) + '</td></tr>';
-        html += '<tr><th>SAP group</th><td>' + esc(d.suggested_itms_grp_cod) + '</td></tr>';
+        html += '<tr><th>SAP group</th><td>' + groupText(d.suggested_itms_grp_cod) + '</td></tr>';
         html += '<tr><th>SKU prefix</th><td>' + esc(d.suggested_sku_prefix) + '</td></tr>';
         if (d.filtered_oems && d.filtered_oems.length) html += '<tr><th>OEMs</th><td>' + esc(d.filtered_oems.join(', ')) + '</td></tr>';
         html += '</table>';
@@ -670,10 +730,12 @@
             cands = await r.json();
         } catch (e) { alert('Could not load donor candidates: ' + e.message); return; }
 
-        if (!cands || !cands.length) { alert('No donor candidates available for this line.'); return; }
+        // No stored alternatives (e.g. the part came from a TecDoc search or Germax rather than an OEM
+        // bridge): open the window anyway and run the TecDoc search straight away.
+        const searchNow = !cands || !cands.length;
 
         // Unified working set. Local candidates first; extended-search (API) ones appended on demand.
-        const all = cands.map(c => Object.assign({ _kind: 'local' }, c));
+        const all = (cands || []).map(c => Object.assign({ _kind: 'local' }, c));
 
         function wireOemExpanders(scope) {
             scope.querySelectorAll('.dc-oem-expand').forEach(btn => {
@@ -712,7 +774,9 @@
         function renderList() {
             const listEl = mBody.querySelector('#donor-list');
             if (!listEl) return;
-            listEl.innerHTML = all.map((c, i) => donorCardHtml(c, i)).join('');
+            listEl.innerHTML = all.length
+                ? all.map((c, i) => donorCardHtml(c, i)).join('')
+                : '<p class="dc-dim">No stored alternatives for this line. Use “Find more candidates” to search TecDoc by its OEM numbers.</p>';
             wireOemExpanders(listEl);
         }
 
@@ -790,6 +854,7 @@
                 findBtn.disabled = false; findBtn.textContent = '🔍 Find more candidates';
             }
         };
+        if (searchNow && findBtn) findBtn.click();
     }
 
     // ---- per-line actions (Match / Create New+enrich / Skip) ----
@@ -889,10 +954,13 @@
             if (r.status === 204) { box.innerHTML = '<em>No enrichment data (matched directly or not yet enriched).</em>'; return; }
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const reviewStatus = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]')?.dataset.reviewStatus || '';
-            box.innerHTML = enrichmentHtml(await r.json(), reviewStatus, lineId);
+            const enr = await r.json();
+            GROUP_NAMES = await loadGroupNames();
+            box.innerHTML = enrichmentHtml(enr, reviewStatus, lineId);
             wireMarqueResolve(lineId, box);
             wireMarqueOverride(lineId, box);
             wireBorrowConfirm(lineId, box);
+            wirePartReview(lineId, box);
         } catch (e) {
             box.dataset.loaded = 'false';
             box.innerHTML = '<em class="ld-error">Could not load enrichment: ' + esc(e.message) + '</em>';
@@ -975,6 +1043,37 @@
 
     // Per-line sign-off for a cross-supplier borrow: marks the line confirmed (stays create_new) so Bulk
     // Create's borrow gate passes — the per-line equivalent of "Confirm all & Create".
+    function wirePartReview(lineId, box) {
+        // "Check the part" box: choose another part (donor window), or confirm the matched part is right.
+        // Confirming stamps the line's enrichment confirmation (same as Confirm borrow) and queues it to
+        // create, which also clears the ⚠ check-part flag.
+        const choose = box.querySelector('.ld-choose-donor');
+        if (choose) choose.addEventListener('click', () => {
+            const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
+            openDonorSwapModal(row, lineId);
+        });
+        const ok = box.querySelector('.ld-confirm-part');
+        if (!ok) return;
+        const status = box.querySelector('.cp-status');
+        ok.addEventListener('click', async () => {
+            ok.disabled = true;
+            if (status) status.textContent = 'Confirming…';
+            try {
+                const updated = await api('POST', '/lines/' + lineId + '/create-new', { confirmed: true });
+                const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
+                if (row) {
+                    setRowPill(row, (updated && updated.reviewStatus) || 'create_new');
+                    row.querySelectorAll('.status-cell .pill-orange').forEach(p => { if (p.textContent.includes('check part')) p.remove(); });
+                }
+                if (status) status.textContent = '✓ Confirmed: will be created on Bulk Create.';
+                refreshSummary();
+            } catch (e) {
+                if (status) status.textContent = 'Failed: ' + e.message;
+                ok.disabled = false;
+            }
+        });
+    }
+
     function wireBorrowConfirm(lineId, box) {
         const btn = box.querySelector('.ld-confirm-borrow');
         if (!btn) return;
