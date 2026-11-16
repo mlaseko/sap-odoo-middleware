@@ -327,7 +327,51 @@ public class AutohubDocumentsController : ControllerBase
     {
         if (await GuardLine(documentId, lineId, ct) is { } err) return err;
         var json = await _review.GetEnrichmentPayloadAsync(lineId, ct);
-        return string.IsNullOrWhiteSpace(json) ? NoContent() : Content(json, "application/json");
+        if (string.IsNullOrWhiteSpace(json)) return NoContent();
+
+        // Add picture_url: the picture of the part the line points to NOW. After a part change the stored
+        // item_data.image_url can still be the previous part's, so the current catalogue row's picture comes
+        // first, then the stored image, then the first of the stored alternatives. Unreadable → as stored.
+        System.Text.Json.Nodes.JsonNode? root;
+        try { root = System.Text.Json.Nodes.JsonNode.Parse(json); }
+        catch (JsonException) { return Content(json, "application/json"); }
+        if (root is not System.Text.Json.Nodes.JsonObject obj) return Content(json, "application/json");
+
+        string? picture = null;
+        if (TryLong(obj["neon_oitm_id"], out var oitmId))
+        {
+            try { picture = await _bridge.GetOitmImageUrlAsync(oitmId, ct); }
+            catch (Exception) { /* the stored picture still works */ }
+        }
+        var itemData = obj["item_data"] as System.Text.Json.Nodes.JsonObject;
+        picture ??= NonEmpty(itemData?["image_url"]);
+        picture ??= FirstImage(itemData?["all_image_urls"]);
+        obj["picture_url"] = picture;
+        return Content(obj.ToJsonString(), "application/json");
+    }
+
+    private static string? NonEmpty(System.Text.Json.Nodes.JsonNode? n) =>
+        n is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s) ? s.Trim() : null;
+
+    private static bool TryLong(System.Text.Json.Nodes.JsonNode? n, out long value)
+    {
+        value = 0;
+        if (n is not System.Text.Json.Nodes.JsonValue v) return false;
+        if (v.TryGetValue<long>(out value)) return value > 0;
+        return v.TryGetValue<string>(out var s) && long.TryParse(s, out value) && value > 0;
+    }
+
+    /// <summary>all_image_urls is stored as an array, a JSON-array string or a comma-separated string.</summary>
+    private static string? FirstImage(System.Text.Json.Nodes.JsonNode? n)
+    {
+        if (n is System.Text.Json.Nodes.JsonArray arr) return arr.Select(NonEmpty).FirstOrDefault(x => x is not null);
+        var s = NonEmpty(n);
+        if (s is null) return null;
+        if (s.StartsWith('['))
+        {
+            try { return FirstImage(System.Text.Json.Nodes.JsonNode.Parse(s)); } catch (JsonException) { return null; }
+        }
+        return s.Split(',').Select(x => x.Trim()).FirstOrDefault(x => x.StartsWith("http", StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>

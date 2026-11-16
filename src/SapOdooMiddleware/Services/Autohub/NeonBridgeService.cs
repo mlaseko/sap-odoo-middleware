@@ -24,6 +24,9 @@ public sealed record DonorDetail(
 
 public interface INeonBridgeService
 {
+    /// <summary>The picture of a parts_catalog <c>oitm</c> row (image_url), or null when it has none or is missing.</summary>
+    Task<string?> GetOitmImageUrlAsync(long oitmId, CancellationToken ct);
+
     /// <summary>
     /// Reads the SAP ItemCode currently linked to a parts_catalog <c>oitm</c> row, or null when the row is
     /// unlinked (item_code NULL/empty) or missing. Used to detect Path C1 — a borrowed/direct enrichment
@@ -115,6 +118,16 @@ public sealed class NeonBridgeService : INeonBridgeService
     }
 
     private string ConnectionString => _company.Current.Neon.ConnectionString;
+
+    public async Task<string?> GetOitmImageUrlAsync(long oitmId, CancellationToken ct)
+    {
+        const string sql = "SELECT NULLIF(btrim(image_url), '') FROM oitm WHERE id = @id;";
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("id", oitmId);
+        return await cmd.ExecuteScalarAsync(ct) as string;
+    }
 
     public async Task<string?> GetItemCodeAsync(int neonOitmId, CancellationToken ct)
     {
