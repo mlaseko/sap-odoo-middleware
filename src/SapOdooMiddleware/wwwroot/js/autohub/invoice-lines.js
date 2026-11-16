@@ -128,6 +128,7 @@ function reloadKeepingPlace() {
     // Close via a dismiss gesture (Escape / click-outside): confirm first if the selection was changed.
     function requestCloseModal() {
         if (overlay.style.display === 'none') return;
+        if (mBox && mBox.dataset.busy) return;          // a part change is running: wait for it
         if (modalDirty && !confirm('You changed something in this dialog. Close without saving?')) return;
         closeModal();
     }
@@ -362,6 +363,11 @@ function reloadKeepingPlace() {
             const lineId = row.dataset.lineId;
             const action = btn.dataset.action;
             const details = btn.closest('details'); if (details) details.open = false;
+            const QUICK = { automatch: 'Auto-matching', skip: 'Skipping', reopen: 'Reopening', create_new: 'Marking to create', needs_manual: 'Marking needs manual', match: 'Matching' };
+            const lineNo = (row.querySelector('td.num')?.textContent || '').trim();
+            let done = () => { };
+            const busyStart = () => { if (window.AutohubBusy && QUICK[action]) done = window.AutohubBusy.start(QUICK[action] + ' line ' + lineNo + '…'); };
+            if (action !== 'match') busyStart();
             try {
                 if (action === 'automatch') {
                     const updated = await api('POST', '/lines/' + lineId + '/auto-match');
@@ -369,6 +375,7 @@ function reloadKeepingPlace() {
                 } else if (action === 'match') {
                     const sku = prompt('Manual match — enter the SAP item code (verified against the Autohub company):');
                     if (!sku) return;
+                    busyStart();
                     const updated = await api('POST', '/lines/' + lineId + '/match', { item_code: sku });
                     if (updated) setRowPill(row, updated.review_status);
                 } else if (action === 'skip') {
@@ -394,8 +401,9 @@ function reloadKeepingPlace() {
                 }
                 await refreshSummary();
             } catch (e) {
+                done(); done = () => { };
                 alert('Action failed: ' + e.message);
-            }
+            } finally { done(); }
         });
     });
 
@@ -763,23 +771,31 @@ function reloadKeepingPlace() {
         }
     }
 
+    // ---- working indicator (busy.js) ----
+    const busyToast = (text, hint) => window.AutohubBusy ? window.AutohubBusy.start(text, hint) : () => { };
+    const busyButton = (btn, label) => window.AutohubBusy ? window.AutohubBusy.button(btn, label) : () => { };
+
     // ---- banner buttons ----
     let lastAutoMatch = 0;
     document.getElementById('btn-automatch')?.addEventListener('click', async (e) => {
         const now = Date.now();
         if (now - lastAutoMatch < 30000) { alert('Please wait a moment before auto-matching again.'); return; }
         lastAutoMatch = now;
-        e.target.disabled = true;
+        const restore = busyButton(e.currentTarget, 'Auto-matching…');
+        const done = busyToast('Auto-matching the pending lines against SAP…', 'This can take a minute on a large invoice.');
         try {
             const r = await api('POST', '/auto-match');
+            done();
             alert('Auto-match: ' + r.newly_matched + ' newly matched, ' + r.still_pending + ' still pending. Reloading.');
             reloadKeepingPlace();
-        } catch (err) { alert('Auto-match failed: ' + err.message); e.target.disabled = false; }
+        } catch (err) { done(); alert('Auto-match failed: ' + err.message); restore(); }
     });
 
-    document.getElementById('btn-markpending')?.addEventListener('click', async () => {
+    document.getElementById('btn-markpending')?.addEventListener('click', async (e) => {
+        const restore = busyButton(e.currentTarget, 'Marking…');
+        const done = busyToast('Marking all pending lines to create…');
         try { await api('POST', '/bulk-mark-pending-as-create-new'); reloadKeepingPlace(); }
-        catch (err) { alert('Failed: ' + err.message); }
+        catch (err) { done(); restore(); alert('Failed: ' + err.message); }
     });
 
     (function () {
@@ -794,13 +810,16 @@ function reloadKeepingPlace() {
                 '(open the line → change the marque). These brands are multi-marque, so a few may be BMW/Mercedes, not VAG.</p>',
                 [
                     { label: 'Cancel', onClick: closeModal },
-                    { label: 'Confirm resolved', primary: true, onClick: async () => {
+                    { label: 'Confirm resolved', primary: true, onClick: async (ev) => {
+                        busyButton(ev.currentTarget, 'Confirming…');
+                        const done = busyToast('Accepting the DGX marques…');
                         try {
                             const r = await api('POST', '/confirm-resolved-marques');
+                            done();
                             closeModal();
                             alert('Confirmed ' + (r.confirmed || 0) + ' resolved marque(s) — queued as Create New.');
                             reloadKeepingPlace();
-                        } catch (e) { alert('Failed: ' + e.message); }
+                        } catch (e) { done(); closeModal(); alert('Failed: ' + e.message); }
                     } }
                 ]);
         });
@@ -808,9 +827,12 @@ function reloadKeepingPlace() {
 
     document.getElementById('btn-reopen-skipped')?.addEventListener('click', () => {
         const n = document.getElementById('cnt-reopen-skipped').textContent;
-        const reopen = async (q) => {
+        const reopen = async (q, ev) => {
+            mActions.querySelectorAll('button').forEach(b => { b.disabled = true; });
+            busyButton(ev && ev.currentTarget, 'Reopening…');
+            const done = busyToast('Reopening the skipped lines…');
             try { await api('POST', '/bulk-reopen-skipped' + q); reloadKeepingPlace(); }
-            catch (e) { alert('Reopen failed: ' + e.message); }
+            catch (e) { done(); closeModal(); alert('Reopen failed: ' + e.message); }
         };
         openModal(
             '<h3>Reopen skipped lines</h3>' +
@@ -822,8 +844,8 @@ function reloadKeepingPlace() {
             '</ul>',
             [
                 { label: 'Cancel', onClick: closeModal },
-                { label: '→ Needs manual', onClick: () => reopen('') },
-                { label: 'Re-run enrichment', primary: true, onClick: () => reopen('?reEnrich=true') }
+                { label: '→ Needs manual', onClick: (ev) => reopen('', ev) },
+                { label: 'Re-run enrichment', primary: true, onClick: (ev) => reopen('?reEnrich=true', ev) }
             ]);
     });
 

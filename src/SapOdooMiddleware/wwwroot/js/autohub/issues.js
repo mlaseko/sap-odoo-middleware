@@ -271,12 +271,20 @@
     }
 
     // ---- actions ----
-    async function runAction(action, ids, extra) {
+    async function runAction(action, ids, extra, clicked) {
         if (!ids.length || busy) return;
         const g = currentGroup();
         if (action === 'skip' && !confirm('Skip ' + ids.length + ' line(s)? They will not be created or matched.')) return;
         busy = true;
-        showMessage('Working on ' + ids.length + ' line(s)…');
+        const label = esc(actionLabel(action, g && g.code).replace(/…$/, ''));
+        showMessage('<span class="busy-spin small"></span> ' + label + ': working on ' + ids.length + ' line(s)…');
+        // Every action button waits until this one is done; the clicked one shows it is working.
+        const Busy = window.AutohubBusy;
+        const restoreBtn = Busy ? Busy.button(clicked, 'Working…') : () => { };
+        const frozen = Array.from(panel.querySelectorAll('button, input, select')).filter(el => !el.disabled && el !== clicked);
+        frozen.forEach(el => { el.disabled = true; });
+        const done = Busy ? Busy.start(actionLabel(action, g && g.code).replace(/…$/, '') + ': working on ' + ids.length + ' line(s)…',
+            ids.length > 5 ? 'Large batches can take a minute. Please wait.' : null) : () => { };
         try {
             const r = await api('POST', '/issues/bulk', Object.assign({ action, line_ids: ids }, extra || {}));
             const byId = Object.fromEntries((g ? g.lines : []).map(l => [l.line_id, l]));
@@ -293,6 +301,9 @@
             showMessage('Could not do that: ' + esc(e.message), 'error');
         } finally {
             busy = false;
+            done();
+            restoreBtn();
+            frozen.forEach(el => { if (el.isConnected) el.disabled = false; });
         }
     }
 
@@ -331,7 +342,7 @@
         if (bulk) {
             const ids = g.lines.map(l => l.line_id).filter(id => selected.has(id));
             if (bulk.dataset.bulk === 'assign_marque') { openMarqueForm(); return; }
-            runAction(bulk.dataset.bulk, ids);
+            runAction(bulk.dataset.bulk, ids, null, bulk);
             return;
         }
         const tr = ev.target.closest('tr.is-row');
@@ -343,7 +354,7 @@
                 renderPanel(); openMarqueForm();
                 return;
             }
-            runAction(one.dataset.one, [tr.dataset.lineId]);
+            runAction(one.dataset.one, [tr.dataset.lineId], null, one);
             return;
         }
         if (ev.target.closest('[data-card]') && tr) {
@@ -360,7 +371,7 @@
             if (!code) { showMessage('Enter a marque, e.g. MB, BM, VAG.', 'error'); return; }
             if (code === 'GEN') { showMessage('GEN is not a marque: pick the real manufacturer.', 'error'); return; }
             marqueOpen = false; marqueDraft.code = ''; marqueDraft.group = '';
-            runAction('assign_marque', ids, { manufacturer_code: code, items_group_code: grp ? Number(grp) : null });
+            runAction('assign_marque', ids, { manufacturer_code: code, items_group_code: grp ? Number(grp) : null }, ev.target);
         }
     });
 
@@ -396,8 +407,9 @@
     }
     function closeModal() { overlay.style.display = 'none'; }
     if (overlay) {
-        overlay.addEventListener('mousedown', e => { if (e.target === overlay) closeModal(); });
-        document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay.style.display !== 'none') closeModal(); });
+        const busyModal = () => mBox && mBox.dataset.busy;   // a part change is running: wait for it
+        overlay.addEventListener('mousedown', e => { if (e.target === overlay && !busyModal()) closeModal(); });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay.style.display !== 'none' && !busyModal()) closeModal(); });
     }
     const donorPicker = overlay && window.AutohubDonorPicker
         ? window.AutohubDonorPicker({ api, esc, openModal, closeModal, mBody, mBox, base, apiKey: API_KEY })

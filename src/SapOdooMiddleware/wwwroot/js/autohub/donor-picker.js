@@ -77,13 +77,30 @@ window.AutohubDonorPicker = function (host) {
             '</label>';
     }
 
+    const Busy = window.AutohubBusy || { start: () => () => { }, button: () => () => { } };
+
+    // While the part is being changed the window cannot be closed (the host's Esc / click-outside check
+    // mBox.dataset.busy) and its buttons and list are disabled.
+    function setBusy(on) {
+        if (!mBox) return;
+        if (on) { mBox.dataset.busy = '1'; mBox.classList.add('is-busy'); }
+        else { delete mBox.dataset.busy; mBox.classList.remove('is-busy'); }
+        if (mBox.parentElement) mBox.parentElement.querySelectorAll('#modal-actions button').forEach(b => { b.disabled = on; });
+    }
+
     async function open(lineId, onSwapped) {
+        // Open the window at once, so the click visibly does something while the alternatives load.
+        openModal('<h3 class="dc-title">Choose borrowed donor</h3><div class="spinner"></div>' +
+            '<p class="dc-dim" style="text-align:center">Loading the alternatives for this line…</p>', [{ label: 'Cancel', onClick: closeModal }]);
+        if (mBox) mBox.classList.add('modal-wide');
         let cands;
         try {
             const r = await fetch(base + '/lines/' + lineId + '/donor-candidates', { headers: API_KEY ? { 'X-Api-Key': API_KEY } : {} });
             if (!r.ok) throw new Error('HTTP ' + r.status);
             cands = await r.json();
-        } catch (e) { alert('Could not load donor candidates: ' + e.message); return; }
+        } catch (e) { closeModal(); alert('Could not load donor candidates: ' + e.message); return; }
+        const overlayEl = mBox && mBox.parentElement;
+        if (overlayEl && overlayEl.style.display === 'none') return;   // cancelled while loading
 
         // No stored alternatives (e.g. the part came from a TecDoc search or Germax rather than an OEM
         // bridge): open the window anyway and run the TecDoc search straight away.
@@ -148,24 +165,40 @@ window.AutohubDonorPicker = function (host) {
 
         openModal(bodyHtml, [
             { label: 'Cancel', onClick: closeModal },
-            { label: 'Use selected donor', primary: true, onClick: async () => {
+            { label: 'Use selected donor', primary: true, onClick: async (ev) => {
+                if (mBox && mBox.dataset.busy) return;
                 const sel = mBody.querySelector('input[name="donor-pick"]:checked');
                 if (!sel) { alert('Select a donor first.'); return; }
                 const c = all[parseInt(sel.value, 10)];
                 if (!c) { alert('Select a donor first.'); return; }
                 if (c.auto_pick_eligible === false &&
                     !confirm('This candidate is a different part type (' + (c.verdict || '') + '). Borrow from it anyway?')) return;
+                const restoreBtn = Busy.button(ev && ev.currentTarget, 'Changing the part…');
+                setBusy(true);
+                const done = Busy.start('Changing the part to ' + (c.article_number || 'the chosen part') + (c.supplier ? ' (' + c.supplier + ')' : '') + '…',
+                    'The part is fetched and the line looked up again; this can take up to a minute. Please wait.');
+                let res;
                 try {
                     // Extended-search candidates aren't in oitm yet — the DGX materializes them on swap.
-                    const res = c._kind === 'api'
+                    res = c._kind === 'api'
                         ? await api('POST', '/lines/' + lineId + '/swap-donor-api',
                             { tecdoc_article_id: c.tecdoc_article_id, article_number: c.article_number,
                               supplier: c.supplier, supplier_id: c.supplier_id, name: c.name, verdict: c.verdict })
                         : await api('POST', '/lines/' + lineId + '/swap-donor',
                             { article_number: c.article_number, supplier: c.supplier });
-                    closeModal();
-                    if (onSwapped) await onSwapped(res);
-                } catch (e) { alert('Swap failed: ' + e.message); }
+                } catch (e) {
+                    done(); setBusy(false); restoreBtn();
+                    alert('Swap failed: ' + e.message);
+                    return;
+                }
+                setBusy(false);
+                closeModal();
+                try {
+                    if (onSwapped) {
+                        const updating = Busy.start('Part changed. Updating the line…');
+                        try { await onSwapped(res); } finally { updating(); }
+                    }
+                } finally { done(); }
             } }
         ]);
         if (mBox) mBox.classList.add('modal-wide');   // this modal is a wide table
