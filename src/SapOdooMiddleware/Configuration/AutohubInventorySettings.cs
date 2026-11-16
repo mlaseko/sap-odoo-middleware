@@ -48,6 +48,10 @@ public class AutohubInventorySettings
     /// returns. 0 = SAP default series.</summary>
     public int CreditMemoSeries { get; set; } = 0;
 
+    /// <summary>Receiving warehouse of every line of a purchase order created from an Autohub
+    /// invoice (003 = Mikocheni). Its branch becomes the PO's branch.</summary>
+    public string PurchaseOrderWarehouse { get; set; } = "003";
+
     /// <summary>Base URL of the zone-fulfillment sync service's internal refresh
     /// hook, as reachable from this host (e.g. http://localhost:5100). Empty
     /// disables the hook — picks then mirror via that service's 30-second

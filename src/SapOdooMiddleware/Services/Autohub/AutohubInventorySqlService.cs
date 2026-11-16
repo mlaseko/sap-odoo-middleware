@@ -153,6 +153,22 @@ public interface IAutohubInventorySqlService
     Task<List<CustomerSummary>> GetCustomersAsync(string? search, int limit, CancellationToken ct);
 
     /// <summary>
+    /// Vendor picker list (OCRD CardType 'S', not frozen), filtered by a search string matching
+    /// code or name, alphabetical, capped at <paramref name="limit"/>.
+    /// </summary>
+    Task<List<VendorSummary>> GetVendorsAsync(string? search, int limit, CancellationToken ct);
+
+    /// <summary>The vendor (OCRD CardType 'S') with this code, or null.</summary>
+    Task<VendorSummary?> GetVendorAsync(string cardCode, CancellationToken ct);
+
+    /// <summary>
+    /// The given item codes as SAP knows them (OITM): whether each is a purchase item and not frozen.
+    /// Codes that do not exist are absent from the result.
+    /// </summary>
+    Task<List<ItemPurchaseStatus>> GetItemPurchaseStatusAsync(
+        IReadOnlyCollection<string> itemCodes, CancellationToken ct);
+
+    /// <summary>
     /// Return document headers with status. <paramref name="docTable"/> is "ORRR"
     /// (Return Requests) or "ORIN" (A/R Credit Memos posted for returns).
     /// <paramref name="status"/>: open | closed | canceled | all. Newest first.
@@ -251,7 +267,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
     // (the five from spec §6.3, plus OPDN for GRPO and ORRR/ORIN for returns —
     // customer returns post as A/R Credit Memos).
     private static readonly HashSet<string> AllowedAppRefTables =
-        new(StringComparer.OrdinalIgnoreCase) { "OIGN", "OWTQ", "OWTR", "OINC", "OIQR", "OPDN", "ORRR", "ORIN" };
+        new(StringComparer.OrdinalIgnoreCase) { "OIGN", "OWTQ", "OWTR", "OINC", "OIQR", "OPDN", "ORRR", "ORIN", "OPOR" };
 
     private static readonly TimeSpan WarehouseCacheTtl = TimeSpan.FromMinutes(5);
 
@@ -1257,6 +1273,83 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 CardName = reader.IsDBNull(1) ? null : reader.GetString(1),
                 Phone = reader.IsDBNull(2) ? null : reader.GetString(2),
             });
+        }
+        return list;
+    }
+
+    public async Task<List<VendorSummary>> GetVendorsAsync(string? search, int limit, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT TOP (@limit) CardCode, CardName, Currency
+            FROM OCRD
+            WHERE CardType = 'S'
+              AND ISNULL(frozenFor, 'N') = 'N'
+              AND (@search IS NULL OR CardCode LIKE @pattern OR CardName LIKE @pattern)
+            ORDER BY CardName;
+            """;
+        var list = new List<VendorSummary>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@limit", limit);
+        cmd.Parameters.Add("@search", System.Data.SqlDbType.NVarChar, 100).Value =
+            (object?)search ?? DBNull.Value;
+        cmd.Parameters.Add("@pattern", System.Data.SqlDbType.NVarChar, 102).Value =
+            (object?)(search is null ? null : $"%{search}%") ?? DBNull.Value;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            list.Add(ReadVendor(reader));
+        return list;
+    }
+
+    public async Task<VendorSummary?> GetVendorAsync(string cardCode, CancellationToken ct)
+    {
+        const string sql = """
+            SELECT CardCode, CardName, Currency, ISNULL(frozenFor, 'N')
+            FROM OCRD WHERE CardType = 'S' AND CardCode = @code;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@code", System.Data.SqlDbType.NVarChar, 15).Value = cardCode;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct)) return null;
+        var vendor = ReadVendor(reader);
+        vendor.Frozen = reader.GetString(3) == "Y";
+        return vendor;
+    }
+
+    private static VendorSummary ReadVendor(SqlDataReader reader) => new()
+    {
+        CardCode = reader.GetString(0),
+        CardName = reader.IsDBNull(1) ? null : reader.GetString(1),
+        Currency = reader.IsDBNull(2) ? null : reader.GetString(2).Trim(),
+    };
+
+    public async Task<List<ItemPurchaseStatus>> GetItemPurchaseStatusAsync(
+        IReadOnlyCollection<string> itemCodes, CancellationToken ct)
+    {
+        var codes = itemCodes.Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => c.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var list = new List<ItemPurchaseStatus>();
+        if (codes.Count == 0) return list;
+
+        await using var conn = await OpenAsync(ct);
+        // Batches keep the IN list well under SQL Server's 2,100-parameter limit.
+        foreach (var batch in codes.Chunk(1000))
+        {
+            var names = batch.Select((_, i) => $"@i{i}").ToList();
+            var sql = "SELECT ItemCode, PrchseItem, ISNULL(frozenFor, 'N') FROM OITM " +
+                      $"WHERE ItemCode IN ({string.Join(", ", names)});";
+            await using var cmd = new SqlCommand(sql, conn);
+            for (int i = 0; i < batch.Length; i++)
+                cmd.Parameters.Add(names[i], System.Data.SqlDbType.NVarChar, 50).Value = batch[i];
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                list.Add(new ItemPurchaseStatus(
+                    reader.GetString(0),
+                    PurchaseItem: !reader.IsDBNull(1) && reader.GetString(1) == "Y",
+                    Frozen: reader.GetString(2) == "Y"));
+            }
         }
         return list;
     }

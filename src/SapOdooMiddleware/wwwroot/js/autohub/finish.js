@@ -166,7 +166,8 @@
 
     async function complete() {
         if (!confirm('Complete the review of this invoice? Lines can no longer be changed afterwards.')) return;
-        try { await api('POST', '/complete-review'); location.href = '/autohub/documents'; }
+        // Stay on this tab: the purchase order card below is the next step.
+        try { await api('POST', '/complete-review'); location.reload(); }
         catch (e) { showMessage('Cannot complete the review: ' + esc(e.message), 'error'); await load(); }
     }
 
