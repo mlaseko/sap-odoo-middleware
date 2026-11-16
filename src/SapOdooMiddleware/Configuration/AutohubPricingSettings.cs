@@ -31,4 +31,10 @@ public sealed class AutohubPricingSettings
 
     /// <summary>How long forex rates are cached in memory (they change infrequently).</summary>
     public int ForexCacheMinutes { get; set; } = 5;
+
+    /// <summary>Price review: a margin, (PL03 − PL01) ÷ PL03, below this is flagged. Default 0.20.</summary>
+    public decimal PriceReviewMarginLow { get; set; } = 0.20m;
+
+    /// <summary>Price review: a margin above this is flagged. Default 0.90.</summary>
+    public decimal PriceReviewMarginHigh { get; set; } = 0.90m;
 }
