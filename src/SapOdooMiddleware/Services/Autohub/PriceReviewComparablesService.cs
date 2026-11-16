@@ -5,10 +5,15 @@ using SapOdooMiddleware.Persistence;
 
 namespace SapOdooMiddleware.Services.Autohub;
 
-/// <summary>A related part with its SAP prices. Name is the SAP part name when set, else the item name.</summary>
+/// <summary>
+/// A related part: catalogue details from Neon (name, part, brand, article, supplier, image, vehicle
+/// count, stock from the SAP mirror) and prices from SAP (PL03, PL05, average cost).
+/// </summary>
 public sealed record ComparablePart(
-    string ItemCode, string? Name, string? Brand, string Tier, bool TierMapped, string? PartComponent,
-    decimal? Pl03, decimal? Pl05, decimal? AvgCost, decimal OnHand,
+    string ItemCode, string? Name, string? ItemName, string? PartComponent, string? PartGroup,
+    string? Brand, string Tier, bool TierMapped, string? ArticleNumber, string? SupplierName,
+    string? ImageUrl, int VehiclesCount, decimal OnHand, decimal Available,
+    decimal? Pl03, decimal? Pl05, decimal? AvgCost,
     IReadOnlyList<string> SharedOems, IReadOnlyList<string> Via);
 
 /// <summary>PL03 spread of a group of related parts (only parts with a PL03 count).</summary>
@@ -22,7 +27,8 @@ public sealed record ComparableStats(int N, decimal Min, decimal Median, decimal
 ///
 /// LinePl03 is the price the line would be created at (the reviewer's current decision, else the
 /// calculated PL03). VsMedian = LinePl03 ÷ the Same median − 1 (0.38 = 38% above), and Position is
-/// "above", "below" or "in_line" against the PriceReviewComparableBand setting. Flags carry the
+/// "above", "below" or "in_line" against the PriceReviewComparableBand setting (returned as
+/// ComparableBand so a screen can re-place a PL03 the reviewer is typing). Flags carry the
 /// cost check: invoice cost far above the SAP average cost of the same part.
 /// </summary>
 public sealed record PriceReviewComparables(
@@ -30,7 +36,7 @@ public sealed record PriceReviewComparables(
     decimal? LinePl03, string? LinePl03Source, decimal? CifTzs,
     IReadOnlyList<ComparablePart> Same, IReadOnlyList<ComparablePart> OtherTier, int OtherPartCount,
     ComparableStats? SameStats, ComparableStats? OtherTierStats,
-    decimal? VsMedian, string? Position, decimal? MedianAvgCost, int MedianAvgCostN,
+    decimal? VsMedian, string? Position, decimal ComparableBand, decimal? MedianAvgCost, int MedianAvgCostN,
     IReadOnlyList<PriceReviewFlag> Flags, string? Note);
 
 public interface IPriceReviewComparablesService
@@ -44,8 +50,9 @@ public interface IPriceReviewComparablesService
 
 /// <summary>
 /// Price review step 3, ported from the DGX price gate (price_gate/gate.py + comparables.py). Related
-/// parts come from parts_catalog (shared genuine OEM numbers, oitm_related_parts); prices, stock and
-/// average cost come from SAP, because Neon's oitm.sell_price_tzs is not a reliable selling price.
+/// parts are found in parts_catalog (shared genuine OEM numbers, oitm_related_parts) and described from
+/// Neon, which holds richer details than SAP. SAP is read only for the prices of the item codes found
+/// (PL03, PL05, average cost), because Neon's oitm.sell_price_tzs is not a reliable selling price.
 /// Comparison is on PL03 only: PL01 means raw CIF on older items and CIF × 1.25 on newer ones.
 /// </summary>
 public sealed class PriceReviewComparablesService : IPriceReviewComparablesService
@@ -108,14 +115,17 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
         int otherPart = 0;
         foreach (var c in candidates)
         {
-            if (!sap.TryGetValue(c.ItemCode, out var item) || !item.Active) continue;   // only sold, active items
+            // Details from Neon; SAP only prices it. An item SAP does not have, or holds as inactive, is dropped.
+            if (!sap.TryGetValue(c.ItemCode, out var price) || !price.Active) continue;
 
-            var brand = item.Brand ?? c.Brand;
-            var (cTier, cMapped) = TierOf(brand, tiers);
+            var (cTier, cMapped) = TierOf(c.Brand, tiers);
             var part = new ComparablePart(
-                ItemCode: item.ItemCode, Name: item.PartName ?? item.ItemName ?? c.Name, Brand: brand,
-                Tier: cTier, TierMapped: cMapped, PartComponent: c.PartComponent,
-                Pl03: item.Pl03, Pl05: item.Pl05, AvgCost: item.AvgCost, OnHand: item.OnHand,
+                ItemCode: c.ItemCode, Name: c.Name ?? c.ItemName, ItemName: c.ItemName,
+                PartComponent: c.PartComponent, PartGroup: c.PartGroup,
+                Brand: c.Brand, Tier: cTier, TierMapped: cMapped,
+                ArticleNumber: c.ArticleNumber, SupplierName: c.SupplierName, ImageUrl: c.ImageUrl,
+                VehiclesCount: c.VehiclesCount, OnHand: c.OnHand, Available: c.Available,
+                Pl03: price.Pl03, Pl05: price.Pl05, AvgCost: price.AvgCost,
                 SharedOems: c.SharedOems, Via: c.Via);
 
             if (partKey is not null && NormPart(c.PartComponent) != partKey)
@@ -123,7 +133,7 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
                 otherPart++;
                 continue;
             }
-            if (item.AvgCost is { } cost) samePartCosts.Add(cost);
+            if (price.AvgCost is { } cost) samePartCosts.Add(cost);
             (cTier == tier ? same : otherTier).Add(part);
         }
 
@@ -162,7 +172,7 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
             LinePl03: linePl03, LinePl03Source: source, CifTzs: reviewLine?.CifTzs,
             Same: same, OtherTier: otherTier, OtherPartCount: otherPart,
             SameStats: sameStats, OtherTierStats: Stats(otherTier.Select(p => p.Pl03)),
-            VsMedian: vsMedian, Position: position,
+            VsMedian: vsMedian, Position: position, ComparableBand: _settings.PriceReviewComparableBand,
             MedianAvgCost: medianCost, MedianAvgCostN: samePartCosts.Count,
             Flags: flags, Note: note);
     }

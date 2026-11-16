@@ -193,6 +193,8 @@
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
                 <button id="btn-skip-pending" class="btn btn-sm" type="button">Skip All Pending (<span id="cnt-skip-pending">@(Model.Count("pending") + Model.Count("needs_manual"))</span>)</button>
                 <button id="btn-reopen-skipped" class="btn btn-sm" type="button">Reopen Skipped (<span id="cnt-reopen-skipped">@Model.Count("skip")</span>)</button>
+                <a id="btn-price-review" class="btn btn-sm" href="/autohub/documents/@Model.Doc.Id/prices"
+                   title="Review and adjust the prices calculated for the lines to be created, with related parts for comparison">Price review</a>
                 <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@(Model.Count("create_new") + Model.Count("create_failed"))</span>)</button>
                 <button id="btn-confirm-create" class="btn btn-sm" type="button">Confirm all &amp; Create</button>
                 <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>

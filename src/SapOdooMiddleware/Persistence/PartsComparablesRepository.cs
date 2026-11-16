@@ -14,10 +14,14 @@ public sealed record PartsLineAnchors(
 
 /// <summary>
 /// An item active in SAP that shares a genuine OEM number with a line, or is recorded as its related
-/// part. Brand is the SAP selling brand (U_MdlTEST). Prices come from SAP separately.
+/// part, with its catalogue details from Neon (oitm + the NeonAutoHubProducts mirror of SAP).
+/// Brand is the selling brand (U_MdlTEST); OnHand / Available are the mirror's stock figures.
+/// Only the prices come from SAP, separately.
 /// </summary>
 public sealed record PartsComparableCandidate(
-    long OitmId, string ItemCode, string? Name, string? PartComponent, string? Brand,
+    long OitmId, string ItemCode, string? Name, string? ItemName, string? PartComponent, string? PartGroup,
+    string? Brand, string? ArticleNumber, string? SupplierName, string? ImageUrl, int VehiclesCount,
+    decimal OnHand, decimal Available,
     IReadOnlyList<string> SharedOems, IReadOnlyList<string> Via);
 
 public interface IPartsComparablesRepository
@@ -146,14 +150,18 @@ public sealed class PartsComparablesRepository : IPartsComparablesRepository
             SELECT r.oitm_id, r.shared_oem, 'related_parts'
               FROM public.oitm_related_parts r WHERE r.related_oitm_id = ANY(@anchors)
         )
-        SELECT i.id::bigint, i.item_code, i.name, i.part_component, TRIM(p."U_MdlTEST") AS brand,
+        SELECT i.id::bigint, i.item_code, i.name, NULLIF(TRIM(p."U_Item_Name"), '') AS item_name,
+               i.part_component, i.part_group, NULLIF(TRIM(p."U_MdlTEST"), '') AS brand,
+               COALESCE(NULLIF(TRIM(i.article_number), ''), NULLIF(TRIM(p."U_Article_No"), '')) AS article,
+               i.supplier_name, i.image_url, COALESCE(i.compatible_vehicles_count, 0)::int AS vehicles,
+               COALESCE(p."OnHandSap", 0)::numeric AS on_hand, COALESCE(p."AvailableCache", 0)::numeric AS available,
                array_remove(array_agg(DISTINCT h.n), NULL) AS shared_oems,
                array_agg(DISTINCT h.via) AS via
           FROM all_hits h
           JOIN public.oitm i ON i.id = h.oitm_id
           JOIN public."NeonAutoHubProducts" p ON p."ItemCode" = i.item_code AND p."IsActive"
          WHERE NOT (upper(i.item_code) = ANY(@exclude))
-         GROUP BY 1, 2, 3, 4, 5
+         GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
          ORDER BY count(DISTINCT h.n) DESC, i.item_code
          LIMIT @lim;
         """;
@@ -180,14 +188,23 @@ public sealed class PartsComparablesRepository : IPartsComparablesRepository
         await using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
         {
+            string? Str(int i) => r.IsDBNull(i) ? null : r.GetString(i);
             list.Add(new PartsComparableCandidate(
                 OitmId: r.GetInt64(0),
                 ItemCode: r.GetString(1),
-                Name: r.IsDBNull(2) ? null : r.GetString(2),
-                PartComponent: r.IsDBNull(3) ? null : r.GetString(3),
-                Brand: r.IsDBNull(4) ? null : r.GetString(4),
-                SharedOems: r.IsDBNull(5) ? Array.Empty<string>() : r.GetFieldValue<string[]>(5),
-                Via: r.IsDBNull(6) ? Array.Empty<string>() : r.GetFieldValue<string[]>(6)));
+                Name: Str(2),
+                ItemName: Str(3),
+                PartComponent: Str(4),
+                PartGroup: Str(5),
+                Brand: Str(6),
+                ArticleNumber: Str(7),
+                SupplierName: Str(8),
+                ImageUrl: Str(9),
+                VehiclesCount: r.GetInt32(10),
+                OnHand: r.GetDecimal(11),
+                Available: r.GetDecimal(12),
+                SharedOems: r.IsDBNull(13) ? Array.Empty<string>() : r.GetFieldValue<string[]>(13),
+                Via: r.IsDBNull(14) ? Array.Empty<string>() : r.GetFieldValue<string[]>(14)));
         }
         return list;
     }

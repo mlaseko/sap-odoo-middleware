@@ -11,10 +11,12 @@ namespace SapOdooMiddleware.Services.Autohub;
 /// All reads go through direct SQL (fast, no DI API license seat); all writes
 /// stay on the DI API via <see cref="IAutohubSapB1Service"/>.
 /// </summary>
-/// <summary>A related part as SAP holds it, for the price review. Prices are TZS; null when not set.</summary>
-public sealed record ComparableSapItem(
-    string ItemCode, string? ItemName, string? PartName, string? Brand, decimal OnHand,
-    decimal? AvgCost, decimal? Pl03, decimal? Pl05, bool Active);
+/// <summary>
+/// A related part's prices as SAP holds them, for the price review (details come from Neon). TZS; null
+/// when not set. AvgCost is SAP's average cost, used for the invoice-cost check. Active is false when
+/// the item is inactive (frozen) in SAP.
+/// </summary>
+public sealed record ComparableSapItem(string ItemCode, decimal? AvgCost, decimal? Pl03, decimal? Pl05, bool Active);
 
 public interface IAutohubInventorySqlService
 {
@@ -178,8 +180,8 @@ public interface IAutohubInventorySqlService
         IReadOnlyCollection<string> itemCodes, int priceList, CancellationToken ct);
 
     /// <summary>
-    /// Price-review facts for related parts, in one query per 1,000 codes: name, selling brand, stock,
-    /// SAP average cost and the PL03 / PL05 prices. Items not in SAP are absent.
+    /// Prices for related parts in the price review, in one query per 1,000 codes: PL03, PL05, the SAP
+    /// average cost and whether the item is active. Items not in SAP are absent.
     /// </summary>
     Task<Dictionary<string, ComparableSapItem>> GetComparableItemsAsync(
         IReadOnlyCollection<string> itemCodes, CancellationToken ct);
@@ -1467,9 +1469,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         {
             var names = chunk.Select((_, i) => $"@c{i}").ToList();
             var sql = $"""
-                SELECT I.ItemCode, I.ItemName, I.U_Item_Name, I.U_MdlTEST,
-                       ISNULL(I.OnHand, 0), I.AvgPrice, P3.Price, P5.Price,
-                       ISNULL(I.validFor, 'N'), ISNULL(I.frozenFor, 'N')
+                SELECT I.ItemCode, I.AvgPrice, P3.Price, P5.Price, ISNULL(I.frozenFor, 'N')
                 FROM OITM I
                 LEFT JOIN ITM1 P3 ON P3.ItemCode = I.ItemCode AND P3.PriceList = 3
                 LEFT JOIN ITM1 P5 ON P5.ItemCode = I.ItemCode AND P5.PriceList = 5
@@ -1480,19 +1480,15 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
             {
-                decimal? Dec(int i) => reader.IsDBNull(i) ? null : Convert.ToDecimal(reader.GetValue(i));
-                string? Str(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
+                decimal? Positive(int i) =>
+                    reader.IsDBNull(i) ? null : Convert.ToDecimal(reader.GetValue(i)) is var v && v > 0m ? v : null;
                 var code = reader.GetString(0);
                 items[code] = new ComparableSapItem(
                     ItemCode: code,
-                    ItemName: Str(1),
-                    PartName: Str(2),
-                    Brand: Str(3)?.Trim(),
-                    OnHand: Dec(4) ?? 0m,
-                    AvgCost: Dec(5) is > 0m ? Dec(5) : null,
-                    Pl03: Dec(6) is > 0m ? Dec(6) : null,
-                    Pl05: Dec(7) is > 0m ? Dec(7) : null,
-                    Active: Str(9) != "Y");   // frozenFor = 'Y' means inactive in SAP
+                    AvgCost: Positive(1),
+                    Pl03: Positive(2),
+                    Pl05: Positive(3),
+                    Active: reader.GetString(4) != "Y");   // frozenFor = 'Y' means inactive in SAP
             }
         }
         return items;

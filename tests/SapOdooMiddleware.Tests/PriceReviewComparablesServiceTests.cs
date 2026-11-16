@@ -38,12 +38,16 @@ public class PriceReviewComparablesServiceTests
             Array.Empty<PriceReviewFlag>(), null, decision);
 
     private static PartsComparableCandidate Cand(string code, string? part = "water pump", string? brand = "VIKA") =>
-        new(OitmId: code.GetHashCode(), ItemCode: code, Name: $"neon {code}", PartComponent: part, Brand: brand,
+        new(OitmId: code.GetHashCode(), ItemCode: code, Name: $"neon {code}", ItemName: $"mirror {code}",
+            PartComponent: part, PartGroup: "Cooling", Brand: brand, ArticleNumber: $"A-{code}",
+            SupplierName: "Supplier", ImageUrl: $"https://img/{code}.jpg", VehiclesCount: 12,
+            OnHand: 3m, Available: 2m,
             SharedOems: new[] { "LR110708" }, Via: new[] { "oem_xref" });
 
-    private static ComparableSapItem Sap(string code, decimal? pl03, string? brand = "VIKA", decimal? cost = 20000m,
+    // SAP supplies prices only; a brand argument is accepted for readability but SAP's brand is not used.
+    private static ComparableSapItem Sap(string code, decimal? pl03, string? brand = null, decimal? cost = 20000m,
         bool active = true) =>
-        new(code, $"sap {code}", null, brand, 3m, cost, pl03, pl03 is null ? null : pl03 * 0.8m, active);
+        new(code, cost, pl03, pl03 is null ? null : pl03 * 0.8m, active);
 
     private static PriceReviewComparablesService Service(
         IReadOnlyList<PartsComparableCandidate> candidates, IReadOnlyList<ComparableSapItem> sapItems,
@@ -109,8 +113,14 @@ public class PriceReviewComparablesServiceTests
         Assert.Equal(0.3636m, r.VsMedian);                                               // 150k / 110k − 1
         Assert.Equal("above", r.Position);
         Assert.Contains(r.Flags, f => f.Code == "above_related");
-        Assert.Equal("sap VK1", r.Same[0].Name);
-        Assert.Equal(100000m, r.Same[0].Pl03);
+        // Details from Neon, prices from SAP.
+        var vk1 = r.Same[0];
+        Assert.Equal("neon VK1", vk1.Name);
+        Assert.Equal("A-VK1", vk1.ArticleNumber);
+        Assert.Equal("https://img/VK1.jpg", vk1.ImageUrl);
+        Assert.Equal(3m, vk1.OnHand);
+        Assert.Equal(100000m, vk1.Pl03);
+        Assert.Equal(80000m, vk1.Pl05);
     }
 
     [Fact]
