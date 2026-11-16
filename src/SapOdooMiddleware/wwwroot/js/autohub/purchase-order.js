@@ -103,9 +103,17 @@
 
     async function create() {
         const p = preview;
-        if (!confirm('Create the purchase order in SAP?\n\nVendor: ' + p.vendor.card_code + ' · ' + (p.vendor.card_name || '') +
-            '\nLines: ' + p.lines.length + ' (warehouse ' + p.warehouse + ')\nTotal: ' + money(p.doc_total) + ' ' + p.currency +
-            '\nInvoice: ' + (p.invoice_number || '—') + '\n\nThis cannot be undone from here.')) return;
+        if (!await window.ahConfirm({
+            title: 'Create the purchase order in SAP?',
+            rows: [
+                ['Vendor', p.vendor.card_code + ' · ' + (p.vendor.card_name || '')],
+                ['Lines', p.lines.length + ' (warehouse ' + p.warehouse + ')'],
+                ['Total', money(p.doc_total) + ' ' + p.currency],
+                ['Invoice', p.invoice_number || '—'],
+            ],
+            note: 'This cannot be undone from here.',
+            ok: 'Create purchase order',
+        })) return;
         busy = true; render();
         try {
             const r = await api('POST', '/documents/' + docId + '/purchase-order', { card_code: p.vendor.card_code });

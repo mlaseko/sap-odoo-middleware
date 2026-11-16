@@ -106,9 +106,13 @@
     // ---- Bulk Create ----
     async function runCreate() {
         const s = summary;
-        const lines = s.will_create_by.map(c => '  ' + c.count + ' · ' + c.title).join('\n');
-        const not = s.not_created ? '\n\n' + s.not_created + ' queued line(s) will NOT be created yet.' : '';
-        if (!confirm('Create ' + s.will_create + ' item(s) in SAP?\n\n' + lines + not + '\n\nThis cannot be undone.')) return;
+        if (!await window.ahConfirm({
+            title: 'Create ' + s.will_create + ' item(s) in SAP?',
+            list: s.will_create_by.map(c => c.count + ' · ' + c.title),
+            message: s.not_created ? s.not_created + ' queued line(s) will NOT be created yet.' : null,
+            note: 'This cannot be undone.',
+            ok: 'Create ' + s.will_create + ' item(s)',
+        })) return;
         showMessage('');
         let r;
         try { r = await api('POST', '/bulk-create-async'); }
@@ -157,7 +161,13 @@
     // ---- other actions ----
     async function skipOpen() {
         const n = summary.skippable_open;
-        if (!confirm('Skip ' + n + ' undecided line(s) (pending and needs manual)? They will not be created or matched. You can reopen them from All lines.')) return;
+        if (!await window.ahConfirm({
+            title: 'Skip ' + n + ' undecided line(s)?',
+            message: 'Pending and needs-manual lines will not be created or matched.',
+            note: 'You can reopen them from All lines.',
+            ok: 'Skip ' + n + ' line(s)',
+            danger: true,
+        })) return;
         try { await api('POST', '/bulk-skip-pending'); showMessage('Skipped the undecided lines.'); }
         catch (e) { showMessage('Could not skip: ' + esc(e.message), 'error'); }
         await load();
@@ -165,7 +175,11 @@
     }
 
     async function complete() {
-        if (!confirm('Complete the review of this invoice? Lines can no longer be changed afterwards.')) return;
+        if (!await window.ahConfirm({
+            title: 'Complete the review of this invoice?',
+            message: 'Lines can no longer be changed afterwards. The purchase order is the next step.',
+            ok: 'Complete review',
+        })) return;
         // Stay on this tab: the purchase order card below is the next step.
         try { await api('POST', '/complete-review'); location.reload(); }
         catch (e) { showMessage('Cannot complete the review: ' + esc(e.message), 'error'); await load(); }

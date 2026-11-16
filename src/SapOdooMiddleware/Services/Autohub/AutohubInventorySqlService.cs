@@ -117,6 +117,12 @@ public interface IAutohubInventorySqlService
         string cardCode, string numAtCard, CancellationToken ct);
 
     /// <summary>
+    /// What became of an A/P invoice draft (ODRF, ObjType 18): open, added as the A/P invoice whose
+    /// OPCH.draftKey is the draft, closed, or deleted.
+    /// </summary>
+    Task<PurchaseInvoiceDraftStatus> GetPurchaseInvoiceDraftStatusAsync(int draftDocEntry, CancellationToken ct);
+
+    /// <summary>
     /// A customer's AR invoice item lines for the return-request copy screen, newest
     /// invoice first. <paramref name="openOnly"/> limits to open invoices; pass false
     /// to include closed (paid) ones, since returns often happen after payment. SAP
@@ -998,6 +1004,52 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             AlreadyExisted = true,
         };
     }
+
+    public async Task<PurchaseInvoiceDraftStatus> GetPurchaseInvoiceDraftStatusAsync(
+        int draftDocEntry, CancellationToken ct)
+    {
+        // SAP keeps the draft (DocStatus C) when finance adds it and stamps OPCH.draftKey with
+        // the draft's DocEntry (checked on draft 222 → A/P invoice 61, Nov 2026).
+        const string sql = """
+            SELECT D.DocEntry, D.DocNum, D.DocStatus, D.CardCode, D.NumAtCard, D.U_AppRef, D.DocCur,
+                   CASE WHEN D.DocCur = (SELECT MainCurncy FROM OADM) THEN D.DocTotal ELSE D.DocTotalFC END,
+                   I.DocEntry, I.DocNum, I.CANCELED, I.CardCode, I.NumAtCard
+            FROM (SELECT @e AS E) X
+            LEFT JOIN ODRF D ON D.DocEntry = X.E AND D.ObjType = '18'
+            OUTER APPLY (SELECT TOP 1 P.DocEntry, P.DocNum, P.CANCELED, P.CardCode, P.NumAtCard
+                         FROM OPCH P WHERE P.draftKey = X.E ORDER BY P.DocEntry DESC) I;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@e", draftDocEntry);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        await r.ReadAsync(ct);   // always one row
+
+        bool draftExists = !r.IsDBNull(0);
+        bool invoiceExists = !r.IsDBNull(8);
+        string? Str(int i) => r.IsDBNull(i) ? null : r.GetString(i).Trim();
+        return new PurchaseInvoiceDraftStatus
+        {
+            DraftDocEntry = draftDocEntry,
+            Status = PurchaseInvoiceDraftStatusOf(draftExists, Str(2), invoiceExists),
+            DraftDocNum = draftExists ? r.GetInt32(1) : null,
+            CardCode = Str(3) ?? Str(11),
+            NumAtCard = Str(4) ?? Str(12),
+            AppRef = Str(5),
+            DocCurrency = Str(6),
+            DocTotal = r.IsDBNull(7) ? null : (double)r.GetDecimal(7),
+            InvoiceDocEntry = invoiceExists ? r.GetInt32(8) : null,
+            InvoiceDocNum = invoiceExists ? r.GetInt32(9) : null,
+            InvoiceCancelled = invoiceExists && Str(10) != "N",
+        };
+    }
+
+    /// <summary>open | added | closed | deleted — pure, unit-tested.</summary>
+    internal static string PurchaseInvoiceDraftStatusOf(bool draftExists, string? draftDocStatus, bool invoiceExists) =>
+        invoiceExists ? "added"
+        : !draftExists ? "deleted"
+        : draftDocStatus == "O" ? "open"
+        : "closed";
 
     public async Task<List<PurchaseInvoiceConflict>> FindPurchaseInvoicesByNumAtCardAsync(
         string cardCode, string numAtCard, CancellationToken ct)
