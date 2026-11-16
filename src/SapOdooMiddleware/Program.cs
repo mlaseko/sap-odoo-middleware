@@ -301,6 +301,9 @@ builder.Services.AddScoped<IPartsPriceReviewRepository, PartsPriceReviewReposito
 builder.Services.AddScoped<IPriceReviewService, PriceReviewService>();
 builder.Services.AddScoped<IPartsComparablesRepository, PartsComparablesRepository>();  // related parts (parts_catalog)
 builder.Services.AddScoped<IPriceReviewComparablesService, PriceReviewComparablesService>();
+builder.Services.AddScoped<IMarqueAssignmentService, MarqueAssignmentService>();         // per-line + bulk marque assignment
+builder.Services.AddScoped<IPartsLineStateRepository, PartsLineStateRepository>();       // Issues: line states
+builder.Services.AddScoped<IInvoiceIssuesService, InvoiceIssuesService>();               // Issues: next action + bulk
 builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
 builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();
 builder.Services.AddScoped<PartsItemCreationService>();
