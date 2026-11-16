@@ -238,7 +238,8 @@
                 {
                     <span class="pill @sb.Css" title="@SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.SourceExplanation(l.MatchStrategy)">@sb.Label</span>
                 }
-                @if (l.NeedsReview && l.EnrichmentConfirmedAt is null && l.ReviewStatus != "created")
+                @if (l.NeedsReview && l.EnrichmentConfirmedAt is null && l.ReviewStatus != "created"
+                     && SapOdooMiddleware.Services.Autohub.PartNameMatch.Verdict(l.Description, l.SelectedName) != SapOdooMiddleware.Services.Autohub.PartNameMatch.Match)
                 {
                     <span class="pill pill-orange"
                           title="@SapOdooMiddleware.Areas.Autohub.Pages.Documents.DetailModel.ReviewReason(l.SelectedComponentVerdict, l.SelectedName, l.SelectedSupplier)">⚠ check part</span>

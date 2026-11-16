@@ -18,7 +18,7 @@ public class AutohubLinePictureTests
     private static readonly Guid DocId = Guid.NewGuid();
     private static readonly Guid LineId = Guid.NewGuid();
 
-    private static async Task<JsonNode?> Fetch(string payload, string? catalogueImage)
+    private static async Task<JsonNode?> Fetch(string payload, string? catalogueImage, string description = "d")
     {
         var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
@@ -31,7 +31,7 @@ public class AutohubLinePictureTests
                 s.AddSingleton<IOdooService>(new Mock<IOdooService>().Object);
                 var review = new Mock<IPartsReviewRepository>();
                 review.Setup(r => r.GetByIdAsync(LineId, It.IsAny<CancellationToken>())).ReturnsAsync(new PartsReviewLineRow(
-                    LineId, DocId, 1, 1, "A", new List<string>(), "d", "VIKA", 1m, "PC", 10m, null, null, false, "pending",
+                    LineId, DocId, 1, 1, "A", new List<string>(), description, "VIKA", 1m, "PC", 10m, null, null, false, "pending",
                     null, null, null, null, null, null, null, null, null, null, null, false, null, null, null, false, false));
                 review.Setup(r => r.GetEnrichmentPayloadAsync(LineId, It.IsAny<CancellationToken>())).ReturnsAsync(payload);
                 s.AddSingleton(review.Object);
@@ -68,5 +68,19 @@ public class AutohubLinePictureTests
 
         var none = await Fetch("""{"item_data":{"primary_description":"x"}}""", null);
         Assert.Null((string?)none!["picture_url"]);
+    }
+
+    [Fact]
+    public async Task Flagged_part_is_rechecked_with_the_current_name_rules()
+    {
+        const string flagged = """{"audit":{"selection":{"needs_review":true,"selected_component_verdict":"UNCERTAIN","selected_name":"Oxygen Sensor"}}}""";
+        var same = await Fetch(flagged, null, "Lambda sensor; 4 wires");
+        Assert.Equal("MATCH", (string?)same!["part_check"]);
+
+        var other = await Fetch(flagged, null, "Brake pad set");
+        Assert.Equal("DIFFERENT", (string?)other!["part_check"]);
+
+        var notFlagged = await Fetch("""{"audit":{"selection":{"needs_review":false}}}""", null);
+        Assert.Null(notFlagged!["part_check"]);
     }
 }

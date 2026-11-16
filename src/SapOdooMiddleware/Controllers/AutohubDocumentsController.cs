@@ -350,6 +350,15 @@ public class AutohubDocumentsController : ControllerBase
         picture ??= NonEmpty(itemData?["image_url"]);
         picture ??= FirstImage(itemData?["all_image_urls"]);
         obj["picture_url"] = picture;
+
+        // part_check: the DGX's "check the part" flag re-checked with the current name rules (PartNameMatch);
+        // MATCH means the names only differ in wording and the panel does not ask to check the part.
+        var selection = (obj["audit"] as System.Text.Json.Nodes.JsonObject)?["selection"] as System.Text.Json.Nodes.JsonObject;
+        if (selection?["needs_review"] is System.Text.Json.Nodes.JsonValue nr && nr.TryGetValue<bool>(out var needsReview) && needsReview)
+        {
+            var line = await _review.GetByIdAsync(lineId, ct);
+            obj["part_check"] = PartNameMatch.Verdict(line?.Description, NonEmpty(selection["selected_name"]));
+        }
         return Content(obj.ToJsonString(), "application/json");
     }
 

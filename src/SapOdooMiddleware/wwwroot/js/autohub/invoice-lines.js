@@ -269,10 +269,10 @@ function reloadKeepingPlace() {
     // part as the invoice line (verdict MATCH / UNCERTAIN / DIFFERENT from the part-name comparison).
     function reviewReasonHtml(enr, lineId, reviewStatus) {
         const sel = enr.audit && enr.audit.selection;
-        if (!sel || sel.needs_review !== true) return '';
+        if (!sel || sel.needs_review !== true || enr.part_check === 'MATCH') return '';   // MATCH: names differ only in wording
+        const v = String(enr.part_check || sel.selected_component_verdict || '').toUpperCase();
         const row = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]');
         const invoiceDesc = row ? (row.querySelector('.col-desc')?.textContent || '') : '';
-        const v = String(sel.selected_component_verdict || '').toUpperCase();
         const why = v === 'DIFFERENT'
             ? 'The matched part looks like a <strong>different kind of part</strong> from the invoice line.'
             : 'The matched part could not be confirmed as the <strong>same kind of part</strong> as the invoice line (the part names do not share a clear part type).';
