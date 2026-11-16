@@ -231,6 +231,10 @@
         if (enr.error) part = '<div><h4>Matched part</h4><span class="note-error">' + esc(enr.error) + '</span></div>';
         else if (enr.none || !enr.item_data) part = '<div><h4>Matched part</h4><p class="sub">' +
             (enr.none ? 'Not looked up yet.' : 'No catalogue match was found.') + '</p></div>';
+        else if ((enr.enrichment_source || enr.source) === 'unmatched' && !enr.item_data.primary_description && !enr.borrowed_from)
+            // The DGX found no part: the item data only carries its marque / group guess.
+            part = '<div><h4>Matched part</h4><p class="sub">No catalogue match was found: no part is borrowed. ' +
+                'Choose a part, or the item is created from the invoice line.</p></div>';
         else {
             const d = enr.item_data, bf = enr.borrowed_from, sel = enr.audit && enr.audit.selection;
             const src = enr.enrichment_source || enr.source;
