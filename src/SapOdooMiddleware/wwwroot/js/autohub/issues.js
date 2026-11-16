@@ -60,10 +60,10 @@
             return ({ check_part: 'Part is correct, confirm', confirm_match: 'Create a new item instead',
                       confirm_borrow: 'Confirm borrowed part' })[group] || 'Confirm and mark to create';
         return ({ skip: 'Skip', queue: 'Mark to create', use_suggested_match: 'Use suggested SAP item',
-                  accept_marque: 'Accept DGX marque', assign_marque: 'Assign marque…', retry_create: 'Retry creating',
+                  accept_marque: 'Accept DGX marque', keep_marque: 'Keep this marque', assign_marque: 'Assign marque…', retry_create: 'Retry creating',
                   open_prices: 'Open price review' })[action] || action;
     }
-    const PRIMARY = new Set(['confirm_and_queue', 'queue', 'accept_marque', 'use_suggested_match', 'retry_create']);
+    const PRIMARY = new Set(['confirm_and_queue', 'queue', 'accept_marque', 'keep_marque', 'use_suggested_match', 'retry_create']);
     // Groups where choosing another part (the donor window on the invoice) is a sensible fix.
     const PART_GROUPS = new Set(['check_part', 'manual', 'confirm_borrow', 'confirm_match']);
 

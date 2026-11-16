@@ -136,6 +136,7 @@ public sealed class AutohubActivityFilter : IAsyncActionFilter
                     "confirm_and_queue" => "Confirmed the matched part and marked to create (from Issues).",
                     "use_suggested_match" => "Matched to the suggested SAP item (from Issues).",
                     "accept_marque" => "Accepted the DGX marque (from Issues).",
+                    "keep_marque" => "Kept the marque it will be created under (from Issues).",
                     "assign_marque" => $"Marque set to {b?.ManufacturerCode?.Trim().ToUpperInvariant()}" +
                                        (b?.ItemsGroupCode is > 0 ? $", SAP group {b.ItemsGroupCode}" : "") + " (from Issues).",
                     "retry_create" => "Creation retried (from Issues).",

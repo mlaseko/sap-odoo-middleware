@@ -8,7 +8,8 @@ namespace SapOdooMiddleware.Persistence;
 /// Everything needed to decide what an Autohub invoice line needs next, in one row: the line, its review
 /// state, and the few enrichment facts that drive the decision (part check, marque, borrow sign-off).
 /// MarqueResolved is the DGX's manufacturer_resolution.resolved ("true" / "false" / null when absent);
-/// SkuPrefix is the prefix the item would be created under (blank or GEN = not resolved yet).
+/// SkuPrefix is the prefix the item would be created under (blank or GEN = not resolved yet). FitForAuto and
+/// PartOems are the matched part's vehicle fit and OEM numbers (item_data), used as marque evidence.
 /// </summary>
 public sealed record PartsLineState(
     Guid Id, int LineNumber, string? SupplierArticleNumber, string? Description, string? Brand,
@@ -17,7 +18,8 @@ public sealed record PartsLineState(
     bool NeedsPartReview, string? PartVerdict, string? SelectedName, string? SelectedSupplier,
     string? MarqueResolved, string? MarqueResolvedPrefix, string? MarqueTopCandidate, string? SkuPrefix, int? ItemGroupCode,
     string? SuggestedDonorItemCode, string? SuggestedDonorSupplier, string? MatchedItemCode, string? GeneratedItemCode,
-    string? BorrowedFromArticle, string? BorrowedFromSupplier, IReadOnlyList<string>? OemNumbers = null);
+    string? BorrowedFromArticle, string? BorrowedFromSupplier, IReadOnlyList<string>? OemNumbers = null,
+    string? FitForAuto = null, IReadOnlyList<string>? PartOems = null);
 
 public interface IPartsLineStateRepository
 {
@@ -33,6 +35,13 @@ public interface IPartsLineStateRepository
     /// line to create. The per-line version of "Confirm DGX-resolved marques". Returns the updated line ids.
     /// </summary>
     Task<IReadOnlyList<Guid>> ApplyResolvedMarquesAsync(Guid documentId, IReadOnlyList<Guid> lineIds, CancellationToken ct);
+
+    /// <summary>
+    /// Record that the operator keeps each line's current marque (its real SKU prefix): the stored
+    /// manufacturer_resolution becomes resolved:true with that prefix, so the line no longer needs a marque
+    /// decision. The status is not changed. Returns the updated line ids (lines with a real prefix only).
+    /// </summary>
+    Task<IReadOnlyList<Guid>> KeepCurrentMarqueAsync(Guid documentId, IReadOnlyList<Guid> lineIds, string keptBy, CancellationToken ct);
 }
 
 public sealed class PartsLineStateRepository : IPartsLineStateRepository
@@ -75,7 +84,10 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
                    "EnrichmentPayloadJson"#>>'{item_data,suggested_sku_prefix}',
                    "EnrichmentPayloadJson"#>>'{item_data,suggested_itms_grp_cod}',
                    "SuggestedDonorItemCode", "SuggestedDonorSupplier", "MatchedItemCode", "GeneratedItemCode",
-                   "BorrowedFromArticle", "BorrowedFromSupplier", "OemNumbers"::text, "DocumentId"
+                   "BorrowedFromArticle", "BorrowedFromSupplier", "OemNumbers"::text, "DocumentId",
+                   "EnrichmentPayloadJson"#>>'{item_data,fit_for_auto}',
+                   CASE WHEN jsonb_typeof("EnrichmentPayloadJson"#>'{item_data,filtered_oems}') = 'array'
+                        THEN ("EnrichmentPayloadJson"#>'{item_data,filtered_oems}')::text END
             FROM public."staging_document_line"
             WHERE "DocumentId" = ANY(@docs)
             ORDER BY "DocumentId", "LineNumber", "Id";
@@ -100,9 +112,43 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
                 MarqueResolved: S(18), MarqueResolvedPrefix: S(19), MarqueTopCandidate: S(20), SkuPrefix: S(21),
                 ItemGroupCode: int.TryParse(S(22), out var g) ? g : null,
                 SuggestedDonorItemCode: S(23), SuggestedDonorSupplier: S(24), MatchedItemCode: S(25), GeneratedItemCode: S(26),
-                BorrowedFromArticle: S(27), BorrowedFromSupplier: S(28), OemNumbers: ParseOems(S(29))));
+                BorrowedFromArticle: S(27), BorrowedFromSupplier: S(28), OemNumbers: ParseOems(S(29)),
+                FitForAuto: S(31), PartOems: ParseOems(S(32))));
         }
         return byDoc;
+    }
+
+    public async Task<IReadOnlyList<Guid>> KeepCurrentMarqueAsync(
+        Guid documentId, IReadOnlyList<Guid> lineIds, string keptBy, CancellationToken ct)
+    {
+        if (lineIds.Count == 0) return Array.Empty<Guid>();
+        const string sql = """
+            UPDATE public."staging_document_line"
+            SET "EnrichmentPayloadJson" = jsonb_set(
+                    "EnrichmentPayloadJson", '{manufacturer_resolution}',
+                    COALESCE(CASE WHEN jsonb_typeof("EnrichmentPayloadJson"#>'{manufacturer_resolution}') = 'object'
+                                  THEN "EnrichmentPayloadJson"#>'{manufacturer_resolution}' END, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'resolved', true,
+                        'prefix', upper(btrim("EnrichmentPayloadJson"#>>'{item_data,suggested_sku_prefix}')),
+                        'method', 'operator_kept',
+                        'evidence', 'Kept by ' || @by || ' on ' || to_char(now(), 'YYYY-MM-DD')),
+                    true)
+            WHERE "DocumentId" = @doc
+              AND "Id" = ANY(@ids)
+              AND "ReviewStatus" NOT IN ('created','matched','skip')
+              AND upper(COALESCE(btrim("EnrichmentPayloadJson"#>>'{item_data,suggested_sku_prefix}'), '')) NOT IN ('', 'GEN')
+            RETURNING "Id";
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("doc", documentId);
+        cmd.Parameters.AddWithValue("by", keptBy);
+        cmd.Parameters.Add(new NpgsqlParameter("ids", NpgsqlDbType.Array | NpgsqlDbType.Uuid) { Value = lineIds.ToArray() });
+        var updated = new List<Guid>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct)) updated.Add(r.GetGuid(0));
+        return updated;
     }
 
     /// <summary>OemNumbers is stored as a JSON array; an unreadable value counts as none.</summary>

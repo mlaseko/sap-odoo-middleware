@@ -32,6 +32,7 @@ public class AutohubDocumentsController : ControllerBase
     private readonly INeonBridgeService _bridge;   // resolve donor oitm rows for the operator swap
     private readonly IDonorSearchClient _donorSearch;   // DGX "find more candidates" (broad TecDoc pool)
     private readonly IMarqueAssignmentService _marque;   // DGX /resolve_manufacturer (marque handshake), shared with Issues bulk
+    private readonly IInvoiceIssuesService _issues;      // marque counts by the Issues rules
 
     public AutohubDocumentsController(
         IStagingPartsDocumentRepository docs,
@@ -45,8 +46,10 @@ public class AutohubDocumentsController : ControllerBase
         IAutohubSapB1Service sap,
         INeonBridgeService bridge,
         IDonorSearchClient donorSearch,
-        IMarqueAssignmentService marque)
+        IMarqueAssignmentService marque,
+        IInvoiceIssuesService issues)
     {
+        _issues = issues;
         _docs = docs;
         _review = review;
         _uploads = uploads;
@@ -811,7 +814,7 @@ public class AutohubDocumentsController : ControllerBase
 
         var counts = await _review.GetStatusCountsAsync(documentId, ct);
         var awaitingEnrichment = await _review.CountAwaitingEnrichmentAsync(documentId, ct);
-        var (marqueToConfirm, marqueToPick) = await _review.GetMarqueProgressAsync(documentId, ct);
+        var (marqueToConfirm, marqueToPick) = await _issues.GetMarqueCountsAsync(documentId, ct);
         var canComplete = doc.Status == "extracted"
             && counts.GetValueOrDefault("pending") == 0
             && counts.GetValueOrDefault("create_failed") == 0
