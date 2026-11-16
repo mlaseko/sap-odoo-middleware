@@ -120,7 +120,7 @@
             '<button type="button" class="btn btn-sm" data-act="clear">Clear</button>';
     }
 
-    async function runBulk(action) {
+    async function runBulk(action, clicked) {
         const sel = selectedRows();
         if (!sel.length) return;
         const extra = {};
@@ -131,9 +131,14 @@
         }
         if (action === 'skip' && !confirm('Skip ' + sel.length + ' line(s)? They will not be created or matched.')) return;
         bulk.querySelectorAll('button').forEach(b => b.disabled = true);
+        const what = (clicked?.textContent || 'Working').trim();
+        if (window.AutohubBusy) window.AutohubBusy.button(clicked, 'Working…');   // the bar is redrawn afterwards
+        const done = window.AutohubBusy ? window.AutohubBusy.start(what + ': ' + sel.length + ' line(s)…',
+            sel.length > 5 ? 'Large batches can take a minute. Please wait.' : null) : () => { };
         let r;
         try { r = await api('POST', '/issues/bulk', Object.assign({ action, line_ids: sel.map(x => x.dataset.lineId) }, extra)); }
-        catch (e) { alert('Could not do that: ' + e.message); bulk.dataset.n = ''; renderBulk(); return; }
+        catch (e) { done(); alert('Could not do that: ' + e.message); bulk.dataset.n = ''; renderBulk(); return; }
+        done();
 
         const byId = Object.fromEntries(sel.map(x => [x.dataset.lineId, x]));
         const fails = [];
@@ -171,7 +176,7 @@
         const b = ev.target.closest('[data-act]');
         if (!b) return;
         if (b.dataset.act === 'clear') { rows().forEach(r => { const c = r.querySelector('.ln-sel'); if (c) c.checked = false; }); renderBulk(); return; }
-        runBulk(b.dataset.act);
+        runBulk(b.dataset.act, b);
     });
 
     loadState();

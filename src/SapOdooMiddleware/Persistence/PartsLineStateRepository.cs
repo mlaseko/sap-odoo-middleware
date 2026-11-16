@@ -1,6 +1,7 @@
 using Npgsql;
 using NpgsqlTypes;
 using SapOdooMiddleware.Configuration;
+using SapOdooMiddleware.Services.Autohub;
 
 namespace SapOdooMiddleware.Persistence;
 
@@ -10,6 +11,8 @@ namespace SapOdooMiddleware.Persistence;
 /// MarqueResolved is the DGX's manufacturer_resolution.resolved ("true" / "false" / null when absent);
 /// SkuPrefix is the prefix the item would be created under (blank or GEN = not resolved yet). FitForAuto and
 /// PartOems are the matched part's vehicle fit and OEM numbers (item_data), used as marque evidence.
+/// ConfirmationRequired: the line borrows another supplier's part (cross-supplier match strategy) and Bulk
+/// Create will hold it until confirmed.
 /// </summary>
 public sealed record PartsLineState(
     Guid Id, int LineNumber, string? SupplierArticleNumber, string? Description, string? Brand,
@@ -72,7 +75,7 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
                    "Quantity", "UnitPriceForeign", COALESCE("IsPromotional", false), "ReviewStatus", "CreateErrorMessage",
                    "EnrichmentSource",
                    COALESCE(jsonb_typeof("EnrichmentPayloadJson"#>'{item_data}') = 'object', false) AS has_item_data,
-                   COALESCE("EnrichmentConfirmationRequired", false),
+                   "MatchStrategy",
                    ("EnrichmentConfirmedAt" IS NOT NULL) AS confirmed,
                    COALESCE(("EnrichmentPayloadJson"#>>'{audit,selection,needs_review}') = 'true', false) AS needs_review,
                    "EnrichmentPayloadJson"#>>'{audit,selection,selected_component_verdict}',
@@ -107,7 +110,10 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
                 Id: r.GetGuid(0), LineNumber: r.GetInt32(1), SupplierArticleNumber: S(2), Description: S(3), Brand: S(4),
                 Quantity: D(5), UnitPriceForeign: D(6), IsPromotional: r.GetBoolean(7), ReviewStatus: S(8) ?? "pending",
                 CreateErrorMessage: S(9), EnrichmentSource: S(10), HasItemData: r.GetBoolean(11),
-                ConfirmationRequired: r.GetBoolean(12), Confirmed: r.GetBoolean(13),
+                // Only a genuine cross-supplier borrow needs confirming, the same rule Bulk Create applies
+                // (PartsItemProvisioningService). The stored EnrichmentConfirmationRequired is the DGX's
+                // blanket flag, set on nearly every line, even ones with no matched part.
+                ConfirmationRequired: EnrichmentStrategies.IsCrossSupplierStrategy(S(12)), Confirmed: r.GetBoolean(13),
                 NeedsPartReview: r.GetBoolean(14), PartVerdict: S(15), SelectedName: S(16), SelectedSupplier: S(17),
                 MarqueResolved: S(18), MarqueResolvedPrefix: S(19), MarqueTopCandidate: S(20), SkuPrefix: S(21),
                 ItemGroupCode: int.TryParse(S(22), out var g) ? g : null,
