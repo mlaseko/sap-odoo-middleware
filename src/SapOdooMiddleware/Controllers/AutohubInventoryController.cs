@@ -1251,6 +1251,22 @@ public class AutohubInventoryController : ControllerBase
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
 
+            // Branch (OPDN.BPLId) is mandatory in a company with branches: take it from the
+            // receiving warehouses, which must all belong to one active branch.
+            var branchIds = new HashSet<int>();
+            foreach (var whs in request.Lines.Select(l => l.WhsCode!).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var (branchId, branchError) = await ResolveActiveBranchAsync(whs, ct);
+                if (branchError is not null)
+                    return UnprocessableEntity(ApiResponse<InventoryDocResult>.Fail(branchError));
+                branchIds.Add(branchId!.Value);
+            }
+            if (branchIds.Count > 1)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(
+                    $"The receiving warehouses belong to different branches ({string.Join(", ", branchIds)}) " +
+                    "— post one GRPO per branch."));
+            int? bplId = branchIds.Count == 1 ? branchIds.First() : null;
+
             // Destination bin handling per line, using each line's receiving warehouse.
             for (int i = 0; i < request.Lines.Count; i++)
             {
@@ -1276,7 +1292,7 @@ public class AutohubInventoryController : ControllerBase
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
 
-            var result = await _sap.CreateGrpoAsync(request, _settings.GrpoSeries, baseCurrency, ct);
+            var result = await _sap.CreateGrpoAsync(request, _settings.GrpoSeries, baseCurrency, bplId, ct);
             return Ok(ApiResponse<InventoryDocResult>.Ok(result));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
@@ -1407,6 +1423,15 @@ public class AutohubInventoryController : ControllerBase
                     ") — they cannot be merged into one invoice."));
             var currency = new PurchaseDocCurrency(rateGroups[0].Key.Currency, rateGroups[0].Key.Rate);
 
+            // One branch for the whole draft: the GRPOs' own.
+            var branches = ordered.Select(g => g.BplId).Distinct().ToList();
+            if (branches.Count > 1)
+                return BadRequest(ApiResponse<PurchaseInvoiceDraftResult>.Fail(
+                    "The GRPOs belong to different branches (" +
+                    string.Join(", ", ordered.Select(g => $"GRPO {g.DocNum}: branch {g.BplId?.ToString() ?? "none"}")) +
+                    ") — they cannot be merged into one invoice."));
+            int? bplId = branches[0];
+
             // One A/P invoice per supplier invoice number.
             var conflicts = (await _sql.FindPurchaseInvoicesByNumAtCardAsync(request.CardCode, request.NumAtCard, ct))
                 .Where(c => !string.Equals(c.AppRef?.Trim(), request.AppRef, StringComparison.Ordinal))
@@ -1422,7 +1447,7 @@ public class AutohubInventoryController : ControllerBase
                 .SelectMany(g => g.OpenLines.Select(l => (GrpoDocEntry: g.DocEntry, Line: l)))
                 .ToList();
 
-            var result = await _sap.CreatePurchaseInvoiceDraftAsync(request, lines, currency, ct);
+            var result = await _sap.CreatePurchaseInvoiceDraftAsync(request, lines, currency, bplId, ct);
             return Ok(ApiResponse<PurchaseInvoiceDraftResult>.Ok(result));
         }
         catch (PurchaseInvoiceDraftTotalMismatchException ex)
