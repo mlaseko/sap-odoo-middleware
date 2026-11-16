@@ -239,7 +239,7 @@ internal class SapB1DiApiServiceStub : ISapB1Service
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
     public Task<InventoryDocResult> CreateGrpoAsync(
-        GrpoCreate request, int series, PurchaseDocCurrency? baseCurrency, CancellationToken ct) =>
+        GrpoCreate request, int series, PurchaseDocCurrency? baseCurrency, int? bplId, CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");
 
@@ -340,6 +340,7 @@ internal sealed class AutohubSapB1DiApiServiceStub : SapB1DiApiServiceStub, IAut
         PurchaseInvoiceDraftCreate request,
         IReadOnlyList<(int GrpoDocEntry, GrpoOpenLine Line)> lines,
         PurchaseDocCurrency currency,
+        int? bplId,
         CancellationToken ct) =>
         throw new PlatformNotSupportedException(
             "SAP B1 DI API is only supported on Windows. Deploy to a Windows host.");

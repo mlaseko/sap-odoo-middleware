@@ -121,6 +121,8 @@ public class GrpoForInvoice
     public string Canceled { get; set; } = "N";
     public string DocCurrency { get; set; } = "";
     public double DocRate { get; set; }
+    /// <summary>Branch of the GRPO (OPDN.BPLId); null when the company has no branches.</summary>
+    public int? BplId { get; set; }
     public List<GrpoOpenLine> OpenLines { get; set; } = new();
 }
 

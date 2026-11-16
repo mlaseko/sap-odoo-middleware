@@ -6845,7 +6845,7 @@ ORDER BY PostingDate, DocumentNumber";
 
     /// <inheritdoc/>
     public async Task<InventoryDocResult> CreateGrpoAsync(
-        GrpoCreate request, int series, PurchaseDocCurrency? baseCurrency, CancellationToken ct)
+        GrpoCreate request, int series, PurchaseDocCurrency? baseCurrency, int? bplId, CancellationToken ct)
     {
         await _lock.WaitAsync(ct);
         try
@@ -6859,6 +6859,8 @@ ORDER BY PostingDate, DocumentNumber";
                 grpo.CardCode = request.CardCode;
                 grpo.DocDate = request.DocDate ?? DateTime.Today;
                 grpo.DocDueDate = request.DocDate ?? DateTime.Today;
+                if (bplId is > 0)
+                    grpo.BPL_IDAssignedToInvoice = bplId.Value;   // OPDN.BPLId — mandatory with branches
 
                 // A foreign-currency PO keeps its own rate on the GRPO; otherwise SAP would
                 // take the posting date's rate and the GRPO values would drift from the PO.
@@ -6936,6 +6938,7 @@ ORDER BY PostingDate, DocumentNumber";
         PurchaseInvoiceDraftCreate request,
         IReadOnlyList<(int GrpoDocEntry, GrpoOpenLine Line)> lines,
         PurchaseDocCurrency currency,
+        int? bplId,
         CancellationToken ct)
     {
         if (lines.Count == 0)
@@ -6954,6 +6957,8 @@ ORDER BY PostingDate, DocumentNumber";
             {
                 doc.DocObjectCode = BoObjectTypes.oPurchaseInvoices;
                 doc.CardCode = request.CardCode;
+                if (bplId is > 0)
+                    doc.BPL_IDAssignedToInvoice = bplId.Value;   // ODRF.BPLId — the GRPOs' branch
                 if (foreign)
                 {
                     // The GRPOs' (= the PO's) rate, not the invoice date's: finance decision, Nov 2026.

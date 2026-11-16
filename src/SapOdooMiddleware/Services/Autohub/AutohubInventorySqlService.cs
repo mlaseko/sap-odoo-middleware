@@ -906,7 +906,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         var parameters = grpoDocEntries.Select((d, i) => ($"@g{i}", d)).ToList();
         var sql = $"""
             SELECT T0.DocEntry, T0.DocNum, T0.CardCode, T0.DocStatus, T0.CANCELED,
-                   T0.DocCur, T0.DocRate, T1.LineNum, T1.OpenQty
+                   T0.DocCur, T0.DocRate, T1.LineNum, T1.OpenQty, T0.BPLId
             FROM OPDN T0
             LEFT JOIN PDN1 T1 ON T1.DocEntry = T0.DocEntry
                              AND T1.LineStatus = 'O' AND T1.OpenQty > 0
@@ -944,6 +944,7 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                     Canceled = reader.IsDBNull(4) ? "N" : reader.GetString(4),
                     DocCurrency = reader.IsDBNull(5) ? "" : reader.GetString(5).Trim(),
                     DocRate = reader.IsDBNull(6) ? 0 : (double)reader.GetDecimal(6),
+                    BplId = reader.IsDBNull(9) ? null : reader.GetInt32(9),
                 };
                 byEntry.Add(docEntry, grpo);
             }

@@ -408,9 +408,11 @@ public interface ISapB1Service
     /// liability, closing fully received lines. Partial receipts supported.
     /// <paramref name="baseCurrency"/> is the currency and rate shared by the base POs: when
     /// foreign, the GRPO's DocCurrency/DocRate are set to them so its values match the PO.
+    /// <paramref name="bplId"/> is the receiving warehouses' branch (OPDN.BPLId), mandatory
+    /// in a company with branches.
     /// </summary>
     Task<InventoryDocResult> CreateGrpoAsync(
-        GrpoCreate request, int series, PurchaseDocCurrency? baseCurrency, CancellationToken ct);
+        GrpoCreate request, int series, PurchaseDocCurrency? baseCurrency, int? bplId, CancellationToken ct);
 
     /// <summary>
     /// Sets the item's default bin across multiple warehouses in ONE

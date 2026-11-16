@@ -26,10 +26,10 @@ public class AutohubPurchaseInvoiceDraftTests
             NullLogger<AutohubInventoryController>.Instance);
 
     private static GrpoForInvoice Grpo(int entry, string card = Card, string status = "O", string canceled = "N",
-        string cur = "TZS", double rate = 1, int openLines = 2) => new()
+        string cur = "TZS", double rate = 1, int openLines = 2, int? bpl = 1) => new()
     {
         DocEntry = entry, DocNum = entry + 1000, CardCode = card, DocStatus = status, Canceled = canceled,
-        DocCurrency = cur, DocRate = rate,
+        DocCurrency = cur, DocRate = rate, BplId = bpl,
         OpenLines = Enumerable.Range(0, openLines).Select(i => new GrpoOpenLine(i, 3 + i)).ToList(),
     };
 
@@ -63,9 +63,9 @@ public class AutohubPurchaseInvoiceDraftTests
         sap.Setup(s => s.CreatePurchaseInvoiceDraftAsync(
                 It.IsAny<PurchaseInvoiceDraftCreate>(),
                 It.IsAny<IReadOnlyList<(int GrpoDocEntry, GrpoOpenLine Line)>>(),
-                It.IsAny<PurchaseDocCurrency>(), It.IsAny<CancellationToken>()))
+                It.IsAny<PurchaseDocCurrency>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
            .ReturnsAsync((PurchaseInvoiceDraftCreate _, IReadOnlyList<(int GrpoDocEntry, GrpoOpenLine Line)> lines,
-                          PurchaseDocCurrency cur, CancellationToken _) => new PurchaseInvoiceDraftResult
+                          PurchaseDocCurrency cur, int? _, CancellationToken _) => new PurchaseInvoiceDraftResult
            {
                DraftDocEntry = 812, DraftDocNum = 812, LineCount = lines.Count, DocTotal = 41234500, DocCurrency = cur.Currency,
            });
@@ -75,7 +75,7 @@ public class AutohubPurchaseInvoiceDraftTests
     private static void VerifyNoDraft(Mock<IAutohubSapB1Service> sap) =>
         sap.Verify(s => s.CreatePurchaseInvoiceDraftAsync(
             It.IsAny<PurchaseInvoiceDraftCreate>(), It.IsAny<IReadOnlyList<(int, GrpoOpenLine)>>(),
-            It.IsAny<PurchaseDocCurrency>(), It.IsAny<CancellationToken>()), Times.Never);
+            It.IsAny<PurchaseDocCurrency>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
 
     private static List<string> Errors(IActionResult result) =>
         Assert.IsType<ApiResponse<PurchaseInvoiceDraftResult>>(((ObjectResult)result).Value).Errors!;
@@ -101,7 +101,7 @@ public class AutohubPurchaseInvoiceDraftTests
                 && l[0].GrpoDocEntry == 3301 && l[0].Line.LineNum == 0
                 && l[1].GrpoDocEntry == 3301 && l[1].Line.LineNum == 1
                 && l[2].GrpoDocEntry == 3302 && l[2].Line.LineNum == 0),
-            new PurchaseDocCurrency("TZS", 1), It.IsAny<CancellationToken>()), Times.Once);
+            new PurchaseDocCurrency("TZS", 1), 1, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -194,7 +194,7 @@ public class AutohubPurchaseInvoiceDraftTests
         Assert.IsType<OkObjectResult>(result);
         sap.Verify(s => s.CreatePurchaseInvoiceDraftAsync(
             It.IsAny<PurchaseInvoiceDraftCreate>(), It.IsAny<IReadOnlyList<(int, GrpoOpenLine)>>(),
-            new PurchaseDocCurrency("USD", 2500), It.IsAny<CancellationToken>()), Times.Once);
+            new PurchaseDocCurrency("USD", 2500), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -233,7 +233,7 @@ public class AutohubPurchaseInvoiceDraftTests
         var sap = new Mock<IAutohubSapB1Service>();
         sap.Setup(s => s.CreatePurchaseInvoiceDraftAsync(
                 It.IsAny<PurchaseInvoiceDraftCreate>(), It.IsAny<IReadOnlyList<(int, GrpoOpenLine)>>(),
-                It.IsAny<PurchaseDocCurrency>(), It.IsAny<CancellationToken>()))
+                It.IsAny<PurchaseDocCurrency>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
            .ThrowsAsync(new PurchaseInvoiceDraftTotalMismatchException(812, 1000, 999, "TZS", removed: true));
         var request = Request(3301);
         request.ExpectedTotal = 999;
@@ -244,6 +244,19 @@ public class AutohubPurchaseInvoiceDraftTests
         Assert.Contains("1000.00 TZS", error);
         Assert.Contains("999.00 TZS", error);
         Assert.Contains("was deleted", error);
+    }
+
+    [Fact]
+    public async Task Draft_GrposInDifferentBranches_Returns400()
+    {
+        var sql = Sql(new[] { Grpo(3301, bpl: 1), Grpo(3302, bpl: 2) });
+        var sap = Sap();
+
+        var result = await Build(sql, sap).CreatePurchaseInvoiceDraft(Request(3301, 3302), CancellationToken.None);
+
+        Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Contains("different branches", Assert.Single(Errors(result)));
+        VerifyNoDraft(sap);
     }
 
     [Fact]
@@ -272,8 +285,10 @@ public class AutohubPurchaseInvoiceDraftTests
         sql.Setup(s => s.GetOpenPurchaseOrderLinesAsync(Card, null, It.IsAny<CancellationToken>()))
            .ReturnsAsync(poLines.ToList());
         sql.Setup(s => s.IsBinManagedAsync(It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        sql.Setup(s => s.GetWarehouseBranchAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+           .ReturnsAsync(new WarehouseBranch { BplId = 1, BranchName = "Main", Active = true });
         var sap = new Mock<IAutohubSapB1Service>();
-        sap.Setup(s => s.CreateGrpoAsync(It.IsAny<GrpoCreate>(), It.IsAny<int>(), It.IsAny<PurchaseDocCurrency?>(), It.IsAny<CancellationToken>()))
+        sap.Setup(s => s.CreateGrpoAsync(It.IsAny<GrpoCreate>(), It.IsAny<int>(), It.IsAny<PurchaseDocCurrency?>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()))
            .ReturnsAsync(new InventoryDocResult { DocEntry = 3301, DocNum = 3301 });
         return (sql, sap);
     }
@@ -297,7 +312,20 @@ public class AutohubPurchaseInvoiceDraftTests
         Assert.IsType<OkObjectResult>(result);
         sap.Verify(s => s.CreateGrpoAsync(
             It.Is<GrpoCreate>(r => r.NumAtCard == "2026INS0342 / Ctn 1, 2"), It.IsAny<int>(),
-            new PurchaseDocCurrency("USD", 2500.5), It.IsAny<CancellationToken>()), Times.Once);
+            new PurchaseDocCurrency("USD", 2500.5), 1, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Grpo_WarehouseWithoutBranch_Returns422_AndPostsNothing()
+    {
+        var (sql, sap) = GrpoMocks(PoLine(501, 0, "TZS", 1));
+        sql.Setup(s => s.GetWarehouseBranchAsync("01", It.IsAny<CancellationToken>()))
+           .ReturnsAsync((WarehouseBranch?)null);
+
+        var result = await Build(sql, sap).CreateGrpo(GrpoRequest((501, 0)), CancellationToken.None);
+
+        Assert.IsType<UnprocessableEntityObjectResult>(result);
+        sap.Verify(s => s.CreateGrpoAsync(It.IsAny<GrpoCreate>(), It.IsAny<int>(), It.IsAny<PurchaseDocCurrency?>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -311,7 +339,7 @@ public class AutohubPurchaseInvoiceDraftTests
         var error = Assert.Single(Assert.IsType<ApiResponse<InventoryDocResult>>(bad.Value).Errors!);
         Assert.Contains("PO 1201: USD at 2500", error);
         Assert.Contains("PO 1202: TZS at 1", error);
-        sap.Verify(s => s.CreateGrpoAsync(It.IsAny<GrpoCreate>(), It.IsAny<int>(), It.IsAny<PurchaseDocCurrency?>(), It.IsAny<CancellationToken>()), Times.Never);
+        sap.Verify(s => s.CreateGrpoAsync(It.IsAny<GrpoCreate>(), It.IsAny<int>(), It.IsAny<PurchaseDocCurrency?>(), It.IsAny<int?>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
