@@ -1284,6 +1284,16 @@ public class AutohubInventoryController : ControllerBase
                     poLine.ItemCode, line.WhsCode!, BinDirection.Destination, ct);
                 if (res.Resolution == "auto")
                     line.BinAbs = res.Auto!.BinAbs;
+                else if (res.Resolution == "required"
+                         && await DefaultReceivingBinAsync(line.WhsCode!, ct) is { } fallback)
+                {
+                    // The item has never been in a bin here: receive it into the warehouse's
+                    // configured default bin (e.g. 003-SYSTEM-BIN-LOCATION); it is put away later.
+                    line.BinAbs = fallback.BinAbs;
+                    _logger.LogInformation(
+                        "GRPO app_ref={AppRef} lines[{Index}] ({ItemCode}): no bin known in {Whs}, using default bin {Bin}.",
+                        request.AppRef, i, poLine.ItemCode, line.WhsCode, fallback.BinCode);
+                }
                 else
                     errors.Add(
                         $"lines[{i}] ({poLine.ItemCode}): destination bin required in warehouse {line.WhsCode} " +
@@ -1461,6 +1471,22 @@ public class AutohubInventoryController : ControllerBase
                 request.AppRef, request.CardCode);
             return StatusCode(500, ApiResponse<PurchaseInvoiceDraftResult>.Fail(ex.Message));
         }
+    }
+
+    /// <summary>
+    /// GET /api/autohub/inv/purchase-invoice-drafts/{draftDocEntry}
+    /// What became of an A/P invoice draft: <c>open</c> (finance has not added it yet), <c>added</c>
+    /// (with the A/P invoice's DocEntry/DocNum, and whether it was later cancelled), <c>closed</c>, or
+    /// <c>deleted</c>. Read-only.
+    /// </summary>
+    [HttpGet("purchase-invoice-drafts/{draftDocEntry:int}")]
+    [ProducesResponseType(typeof(ApiResponse<PurchaseInvoiceDraftStatus>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetPurchaseInvoiceDraftStatus(int draftDocEntry, CancellationToken ct)
+    {
+        if (draftDocEntry <= 0)
+            return BadRequest(ApiResponse<PurchaseInvoiceDraftStatus>.Fail("draftDocEntry must be positive."));
+        var status = await _sql.GetPurchaseInvoiceDraftStatusAsync(draftDocEntry, ct);
+        return Ok(ApiResponse<PurchaseInvoiceDraftStatus>.Ok(status));
     }
 
     // ── Customer returns: Return Request ← invoice, Credit Memo ← request ──
@@ -2178,6 +2204,21 @@ public class AutohubInventoryController : ControllerBase
     }
 
     // ── Write helpers ────────────────────────────────────────────────
+
+    /// <summary>
+    /// The configured default receiving bin of a warehouse (<see cref="AutohubInventorySettings.DefaultReceivingBins"/>),
+    /// or null when none is configured. A configured code that is not an active bin of the warehouse is an error.
+    /// </summary>
+    private async Task<WarehouseBin?> DefaultReceivingBinAsync(string whsCode, CancellationToken ct)
+    {
+        if (!_settings.DefaultReceivingBins.TryGetValue(whsCode, out var binCode) || string.IsNullOrWhiteSpace(binCode))
+            return null;
+        var bins = await _sql.GetWarehouseBinsAsync(whsCode, ct);
+        return bins.FirstOrDefault(b => string.Equals(b.BinCode, binCode.Trim(), StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException(
+                $"Default receiving bin '{binCode}' configured for warehouse {whsCode} does not exist " +
+                "(AutohubInventory:DefaultReceivingBins).");
+    }
 
     private static void ValidateAppRef(string? appRef, List<string> errors)
     {

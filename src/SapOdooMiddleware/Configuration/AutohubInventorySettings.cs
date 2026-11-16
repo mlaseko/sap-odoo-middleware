@@ -52,6 +52,14 @@ public class AutohubInventorySettings
     /// invoice (003 = Mikocheni). Its branch becomes the PO's branch.</summary>
     public string PurchaseOrderWarehouse { get; set; } = "003";
 
+    /// <summary>
+    /// Bin a GRPO line falls back to, per warehouse (warehouse code → OBIN.BinCode), when the item
+    /// has never been in a bin there (bin resolver "required"). Items that already have a default or
+    /// stocked bin keep it. Warehouses not listed still refuse such a line until a bin is sent.
+    /// </summary>
+    public Dictionary<string, string> DefaultReceivingBins { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase) { ["003"] = "003-SYSTEM-BIN-LOCATION" };
+
     /// <summary>Base URL of the zone-fulfillment sync service's internal refresh
     /// hook, as reachable from this host (e.g. http://localhost:5100). Empty
     /// disables the hook — picks then mirror via that service's 30-second

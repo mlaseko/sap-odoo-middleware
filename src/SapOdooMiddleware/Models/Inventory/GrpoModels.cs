@@ -154,3 +154,25 @@ public sealed class PurchaseInvoiceDraftTotalMismatchException : Exception
         Removed = removed;
     }
 }
+
+/// <summary>
+/// GET /api/autohub/inv/purchase-invoice-drafts/{draftDocEntry}: what became of an A/P invoice draft.
+/// <c>Status</c>: <c>open</c> (waiting for finance), <c>added</c> (finance added it: the A/P invoice whose
+/// OPCH.draftKey is the draft), <c>closed</c> (closed in SAP without an invoice found), <c>deleted</c> (no
+/// such draft any more and no invoice from it).
+/// </summary>
+public class PurchaseInvoiceDraftStatus
+{
+    public int DraftDocEntry { get; set; }
+    public string Status { get; set; } = "";
+    public int? DraftDocNum { get; set; }
+    public string? CardCode { get; set; }
+    public string? NumAtCard { get; set; }
+    public string? AppRef { get; set; }
+    public double? DocTotal { get; set; }
+    public string? DocCurrency { get; set; }
+    public int? InvoiceDocEntry { get; set; }
+    public int? InvoiceDocNum { get; set; }
+    /// <summary>True when the A/P invoice added from the draft has since been cancelled.</summary>
+    public bool InvoiceCancelled { get; set; }
+}
