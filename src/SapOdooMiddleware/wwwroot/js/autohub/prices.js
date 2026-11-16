@@ -1,0 +1,360 @@
+// Autohub price review page (/autohub/documents/{id}/prices). Page values come from data attributes on #pr-bar.
+(function () {
+    const bar = document.getElementById('pr-bar');
+    const EDITABLE = bar.dataset.editable === 'true';
+    const base = '/api/autohub/documents/' + bar.dataset.docId + '/price-review';
+    const API_KEY = document.querySelector('meta[name="api-key"]')?.content || '';
+    const body = document.getElementById('pr-body');
+    const msg = document.getElementById('pr-message');
+
+    let review = null;          // last GET /price-review
+    let filter = 'all';
+    const edits = {};           // lineId -> { pl03, reason, preview }
+    const relCache = {};        // lineId -> comparables response
+    const openRel = new Set();  // lineIds with the related-parts row open
+
+    async function api(method, path, payload) {
+        const opts = { method, headers: {} };
+        if (API_KEY) opts.headers['X-Api-Key'] = API_KEY;
+        if (payload !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(payload); }
+        const r = await fetch(base + path, opts);
+        const text = await r.text();
+        const json = text ? JSON.parse(text) : null;
+        if (!r.ok) {
+            const e = new Error((json && json.error) || ('HTTP ' + r.status));
+            e.body = json;
+            throw e;
+        }
+        return json;
+    }
+
+    const esc = s => (s == null ? '' : String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])));
+    const tzs = v => v == null ? '–' : Math.round(Number(v)).toLocaleString();
+    const pct = v => v == null ? '–' : (Number(v) * 100).toFixed(1) + '%';
+    const signedPct = v => v == null ? '–' : (v > 0 ? '+' : '') + (Number(v) * 100).toFixed(0) + '%';
+    const money = (v, cur) => v == null ? '–' : Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (cur ? ' ' + cur : '');
+    const FLAG_CSS = { below_cost: 'pill-red', margin_low: 'pill-orange', margin_high: 'pill-yellow',
+                       floor_bound: 'pill-grey', no_brand_ratio: 'pill-grey', above_related: 'pill-yellow',
+                       below_related: 'pill-blue', cost_outlier: 'pill-red' };
+    const FLAG_LABEL = { below_cost: 'below cost', margin_low: 'low margin', margin_high: 'high margin',
+                         floor_bound: 'brand minimum', no_brand_ratio: 'default ratio', above_related: 'above related',
+                         below_related: 'below related', cost_outlier: 'cost outlier' };
+    const flagsHtml = flags => (flags || []).map(f =>
+        '<span class="pill flag ' + (FLAG_CSS[f.code] || 'pill-grey') + '" title="' + esc(f.text) + '">' + esc(FLAG_LABEL[f.code] || f.code) + '</span>').join('');
+
+    function showMessage(html, kind) {
+        msg.innerHTML = html ? '<div class="' + (kind === 'error' ? 'note-error' : 'notice') + '" style="margin-bottom:12px">' + html + '</div>' : '';
+    }
+
+    // ---- state helpers ----
+    const lineById = id => review.lines.find(l => l.line_id === id);
+    function decisionState(l) {
+        const d = l.decision;
+        if (!d) return 'todo';
+        if (d.stale) return 'todo';
+        return d.status;   // approved | held
+    }
+    function currentPl03(l) {                     // what the input shows
+        const e = edits[l.line_id];
+        if (e && e.pl03 !== undefined) return e.pl03;
+        if (l.decision && !l.decision.stale && l.decision.final_pl03 != null) return l.decision.final_pl03;
+        return l.formula_pl03;
+    }
+    const isChanged = l => l.formula_pl03 != null && currentPl03(l) != null && Number(currentPl03(l)) !== Number(l.formula_pl03);
+    function hasUnsaved(l) {
+        const e = edits[l.line_id];
+        if (!e) return false;
+        const saved = l.decision && !l.decision.stale ? l.decision.final_pl03 : l.formula_pl03;
+        return (e.pl03 !== undefined && Number(e.pl03) !== Number(saved)) ||
+               (e.reason !== undefined && (e.reason || '') !== ((l.decision && l.decision.reason) || ''));
+    }
+
+    // ---- render ----
+    function renderCounts() {
+        const s = review.summary;
+        document.getElementById('pr-counts').innerHTML =
+            '<span class="rc">' + s.total + '</span> lines to create · ' +
+            '<span class="rc">' + s.approved + '</span> approved · ' +
+            '<span class="rc">' + s.held + '</span> held · ' +
+            '<span class="rc">' + s.unreviewed + '</span> to review' + (s.stale ? ' (' + s.stale + ' changed since approval)' : '') + ' · ' +
+            '<span class="rc">' + s.flagged + '</span> with warnings' +
+            (s.errors ? ' · <span class="rc err">' + s.errors + ' cannot be priced</span>' : '');
+        const cur = review.currency || '?';
+        document.getElementById('pr-currency').textContent = review.forex_rate
+            ? cur + ' at ' + Number(review.forex_rate).toLocaleString() + ' TZS'
+            : (review.forex_error || cur);
+    }
+
+    function visible(l) {
+        switch (filter) {
+            case 'todo': return decisionState(l) === 'todo';
+            case 'flagged': return (l.flags || []).length > 0 || !!l.error;
+            case 'approved': return decisionState(l) === 'approved';
+            case 'held': return decisionState(l) === 'held';
+            default: return true;
+        }
+    }
+
+    function decisionCell(l) {
+        const d = l.decision;
+        let html = '';
+        if (d) {
+            const pill = d.status === 'approved' ? 'pill-green' : 'pill-yellow';
+            html += '<span class="pill ' + pill + '">' + esc(d.status) + '</span>' +
+                    '<div class="sub">' + esc(d.reviewed_by) + ' · ' + new Date(d.reviewed_at).toLocaleString() + '</div>';
+            if (d.stale) html += '<div class="stale" title="' + esc((d.stale_reasons || []).join(' ')) + '">⚠ figures changed: review again</div>';
+        }
+        if (EDITABLE && !l.error) {
+            html += '<div class="pr-actions" style="margin-top:4px">' +
+                '<button class="btn btn-sm btn-primary" data-act="approved" type="button">Approve</button>' +
+                '<button class="btn btn-sm" data-act="held" type="button">Hold</button>' +
+                (d ? '<button class="btn btn-sm" data-act="clear" type="button" title="Clear the decision">Clear</button>' : '') +
+                '</div>';
+        }
+        return html;
+    }
+
+    function rowHtml(l) {
+        const e = edits[l.line_id] || {};
+        const pv = e.preview;
+        const pl03 = currentPl03(l);
+        const pl05 = pv ? pv.pl05 : (l.decision && !l.decision.stale && l.decision.final_pl05 != null ? l.decision.final_pl05 : l.formula_pl05);
+        const margin = pv ? pv.margin : (l.decision && !l.decision.stale && l.decision.final_margin != null ? l.decision.final_margin : l.formula_margin);
+        const flags = pv ? pv.flags : l.flags;
+        const changed = isChanged(l);
+        const reason = e.reason !== undefined ? e.reason : ((l.decision && l.decision.reason) || '');
+        const discount = l.discount_pct ? '<div class="sub">less ' + Number(l.discount_pct) + '% = ' + money(l.effective_unit_price) + '</div>' : '';
+        const pl03Cell = l.error
+            ? '–'
+            : (EDITABLE
+                ? '<input class="pl03" type="number" min="1" step="1" value="' + esc(pl03 != null ? Math.round(pl03) : '') + '">' +
+                  (changed ? '<input class="reason" type="text" maxlength="500" placeholder="Reason for the change (required)" value="' + esc(reason) + '">' : '')
+                : tzs(pl03) + (reason ? '<div class="sub">' + esc(reason) + '</div>' : ''));
+        return '<tr class="pr-row' + (changed ? ' changed' : '') + (l.error ? ' line-error' : '') + '" data-line-id="' + l.line_id + '">' +
+            '<td class="num">' + l.line_number + '</td>' +
+            '<td class="desc"><div>' + esc(l.description || '') + '</div>' +
+                '<div class="sub">' + esc(l.article_number || '') + (l.brand ? ' · ' + esc(l.brand) : '') + '</div>' +
+                (l.error ? '<div class="err">' + esc(l.error) + '</div>' : '') + '</td>' +
+            '<td class="num">' + (l.quantity != null ? Number(l.quantity) : '–') + '</td>' +
+            '<td class="num">' + money(l.unit_price_foreign, review.currency) + discount + '</td>' +
+            '<td class="num">' + tzs(l.cif_tzs) + '<div class="sub">PL01 ' + tzs(l.pl01) + '</div></td>' +
+            '<td class="num" title="' + esc(l.ratio_brand ? 'ratio ' + l.ratio + ' (' + l.ratio_brand + ')' + (l.floor_applied ? ', brand minimum ' + tzs(l.floor) : '') : '') + '">' + tzs(l.formula_pl03) + '</td>' +
+            '<td class="num">' + pl03Cell + '</td>' +
+            '<td class="num">' + tzs(pl05) + '</td>' +
+            '<td class="num">' + pct(margin) + '</td>' +
+            '<td>' + flagsHtml(flags) + '</td>' +
+            '<td>' + decisionCell(l) + '</td>' +
+            '<td><span class="rel-toggle" data-rel="1">' + (openRel.has(l.line_id) ? '▾' : '▸') + ' Related</span></td>' +
+            '</tr>' +
+            (openRel.has(l.line_id) ? '<tr class="rel-row" data-rel-for="' + l.line_id + '"><td colspan="12">' + relHtml(l) + '</td></tr>' : '');
+    }
+
+    function render() {
+        renderCounts();
+        const rows = review.lines.filter(visible);
+        body.innerHTML = rows.length
+            ? rows.map(rowHtml).join('')
+            : '<tr><td colspan="12">' + (review.lines.length ? 'No lines match this filter.' : 'No lines are waiting to be created on this invoice.') + '</td></tr>';
+    }
+
+    function rerenderRow(lineId) {
+        const l = lineById(lineId);
+        const tr = body.querySelector('tr.pr-row[data-line-id="' + lineId + '"]');
+        if (!l || !tr) return;
+        const relTr = body.querySelector('tr.rel-row[data-rel-for="' + lineId + '"]');
+        const focused = document.activeElement && tr.contains(document.activeElement) ? document.activeElement.className : null;
+        const caret = focused ? document.activeElement.selectionStart : null;
+        const tmp = document.createElement('tbody');
+        tmp.innerHTML = rowHtml(l);
+        if (relTr) relTr.remove();
+        const nodes = Array.from(tmp.children);
+        tr.replaceWith(...nodes);
+        if (focused) {
+            const el = nodes[0].querySelector('input.' + focused.split(' ')[0]);
+            if (el) { el.focus(); try { el.setSelectionRange(caret, caret); } catch (_) { } }
+        }
+        renderCounts();
+    }
+
+    // ---- related parts ----
+    function relHtml(l) {
+        const c = relCache[l.line_id];
+        if (!c) return 'Loading related parts…';
+        if (c.error) return '<span class="err">' + esc(c.error) + '</span>';
+        // Compare the PL03 in the box (typed, saved or calculated), not only what the server last saw.
+        const typed = currentPl03(l);
+        const ours = typed != null && Number(typed) > 0 ? Number(typed) : c.line_pl03;
+        const ourLabel = isChanged(l) ? 'your PL03' : (c.line_pl03_source === 'decision' ? 'approved PL03' : 'calculated PL03');
+        const median = c.same_stats ? c.same_stats.median : null;
+        const vs = ours && median ? ours / median - 1 : null;
+        const band = Number(c.comparable_band || 0.25);
+        const pos = vs == null ? null : (vs > band ? 'above' : (vs < -band ? 'below' : 'in_line'));
+        const flags = (c.flags || []).filter(f => f.code !== 'above_related' && f.code !== 'below_related');
+        if (pos === 'above') flags.push({ code: 'above_related', text: 'PL03 is ' + Math.round(vs * 100) + '% above the median of ' + c.same_stats.n + ' related parts.' });
+        if (pos === 'below') flags.push({ code: 'below_related', text: 'PL03 is ' + Math.round(-vs * 100) + '% below the median of ' + c.same_stats.n + ' related parts.' });
+        let html = '<div class="rel-summary">';
+        if (c.same_stats) {
+            html += '<span>Related parts (' + esc(c.tier) + (c.tier_mapped ? '' : ', brand not mapped') + '): ' +
+                '<span class="big">median ' + tzs(c.same_stats.median) + '</span> · range ' + tzs(c.same_stats.min) + '–' + tzs(c.same_stats.max) +
+                ' · ' + c.same_stats.n + ' priced</span>';
+            if (vs != null)
+                html += '<span>' + esc(ourLabel) + ' ' + tzs(ours) + ' is <span class="big pos-' + esc(pos) + '">' +
+                        signedPct(vs) + '</span> vs the median</span>';
+        } else {
+            html += '<span>No priced related parts in the same tier.</span>';
+        }
+        if (c.part_name) html += '<span>Part: ' + esc(c.part_name) + '</span>';
+        else html += '<span class="sub">Part name unknown: grouped by tier only.</span>';
+        if (c.median_avg_cost != null) html += '<span>Median SAP average cost: ' + tzs(c.median_avg_cost) + ' (' + c.median_avg_cost_n + ' items)</span>';
+        html += '</div>';
+        if (flags.length) html += '<div style="margin-bottom:6px">' + flagsHtml(flags) + ' ' + flags.map(f => esc(f.text)).join(' ') + '</div>';
+        if (c.note) html += '<div class="sub">' + esc(c.note) + '</div>';
+        html += partsTable(c.same, ours);
+        if ((c.other_tier || []).length) {
+            html += '<details class="other-tiers"><summary>Other quality tiers (' + c.other_tier.length + ')' +
+                (c.other_tier_stats ? ': median ' + tzs(c.other_tier_stats.median) : '') + '</summary>' +
+                partsTable(c.other_tier, ours) + '</details>';
+        }
+        if (c.other_part_count) html += '<div class="sub">' + c.other_part_count + ' further part(s) share an OEM number but are a different part, so they are not compared.</div>';
+        return html;
+    }
+
+    function partsTable(parts, ourPl03) {
+        if (!parts || !parts.length) return '';
+        return '<table class="rel"><thead><tr><th></th><th>Item</th><th>Part</th><th>Brand / tier</th><th>Article · supplier</th>' +
+            '<th class="num">Stock</th><th class="num">PL03</th><th class="num">PL05</th><th class="num">Ours vs this</th><th>Shared OEMs</th></tr></thead><tbody>' +
+            parts.map(p => '<tr>' +
+                '<td>' + (p.image_url ? '<img loading="lazy" src="' + esc(p.image_url) + '" alt="">' : '') + '</td>' +
+                '<td>' + esc(p.item_code) + '</td>' +
+                '<td>' + esc(p.name || p.item_name || '') + (p.part_component ? '<div class="sub">' + esc(p.part_component) + (p.vehicles_count ? ' · fits ' + p.vehicles_count + ' vehicles' : '') + '</div>' : '') + '</td>' +
+                '<td>' + esc(p.brand || '') + '<div class="sub">' + esc(p.tier) + (p.tier_mapped ? '' : ' (not mapped)') + '</div></td>' +
+                '<td>' + esc(p.article_number || '') + '<div class="sub">' + esc(p.supplier_name || '') + '</div></td>' +
+                '<td class="num">' + Number(p.on_hand || 0) + '</td>' +
+                '<td class="num">' + tzs(p.pl03) + '</td>' +
+                '<td class="num">' + tzs(p.pl05) + '</td>' +
+                '<td class="num">' + (p.pl03 && ourPl03 ? signedPct(ourPl03 / p.pl03 - 1) : '–') + '</td>' +
+                '<td class="sub">' + esc((p.shared_oems || []).join(', ')) + '</td>' +
+                '</tr>').join('') +
+            '</tbody></table>';
+    }
+
+    async function loadRelated(lineId, force) {
+        if (relCache[lineId] && !force) return;
+        try { relCache[lineId] = await api('GET', '/lines/' + lineId + '/comparables'); }
+        catch (e) { relCache[lineId] = { error: 'Could not load related parts: ' + e.message }; }
+        rerenderRow(lineId);
+    }
+
+    // ---- live recalculation ----
+    const timers = {};
+    function schedulePreview(lineId) {
+        clearTimeout(timers[lineId]);
+        timers[lineId] = setTimeout(async () => {
+            const e = edits[lineId];
+            if (!e || e.pl03 === undefined || !(Number(e.pl03) > 0)) return;
+            try {
+                const r = await api('POST', '/preview', { lines: [{ line_id: lineId, pl03: Number(e.pl03) }] });
+                const p = r.lines[0];
+                e.preview = p.error ? null : p;
+                if (p.error) showMessage(esc(p.error), 'error');
+            } catch (err) { showMessage('Could not recalculate: ' + esc(err.message), 'error'); }
+            rerenderRow(lineId);
+        }, 300);
+    }
+
+    // ---- decisions ----
+    async function decide(items) {
+        showMessage('');
+        try {
+            const r = await api('POST', '/decisions', { lines: items });
+            review = r.review;
+            items.forEach(i => { delete edits[i.line_id]; delete relCache[i.line_id]; });
+            render();
+            openRel.forEach(id => loadRelated(id));
+            showMessage('Saved ' + r.saved + ' decision(s).');
+        } catch (e) {
+            const errs = e.body && e.body.errors;
+            if (errs && errs.length) {
+                const line = id => { const l = lineById(id); return l ? 'Line ' + l.line_number : 'Request'; };
+                showMessage('Nothing was saved:<ul>' + errs.map(x => '<li>' + esc(line(x.line_id)) + ': ' + esc(x.error) + '</li>').join('') + '</ul>', 'error');
+            } else {
+                showMessage('Could not save: ' + esc(e.message), 'error');
+            }
+        }
+    }
+
+    body.addEventListener('input', ev => {
+        const tr = ev.target.closest('tr.pr-row');
+        if (!tr) return;
+        const id = tr.dataset.lineId;
+        const e = edits[id] || (edits[id] = {});
+        if (ev.target.classList.contains('pl03')) {
+            e.pl03 = ev.target.value === '' ? null : Number(ev.target.value);
+            e.preview = null;
+            const l = lineById(id);
+            const nowChanged = isChanged(l);
+            if (nowChanged !== tr.classList.contains('changed')) rerenderRow(id);   // show / hide the reason box
+            schedulePreview(id);
+        } else if (ev.target.classList.contains('reason')) {
+            e.reason = ev.target.value;
+        }
+    });
+
+    body.addEventListener('click', ev => {
+        const tr = ev.target.closest('tr.pr-row');
+        if (!tr) return;
+        const id = tr.dataset.lineId;
+        if (ev.target.closest('[data-rel]')) {
+            if (openRel.has(id)) openRel.delete(id); else { openRel.add(id); loadRelated(id); }
+            rerenderRow(id);
+            return;
+        }
+        const btn = ev.target.closest('button[data-act]');
+        if (!btn) return;
+        const l = lineById(id);
+        const act = btn.dataset.act;
+        if (act === 'clear') {
+            api('DELETE', '/decisions/' + id).then(reload).catch(e => showMessage('Could not clear: ' + esc(e.message), 'error'));
+            return;
+        }
+        const pl03 = currentPl03(l);
+        if (pl03 == null || !(Number(pl03) > 0)) { showMessage('Line ' + l.line_number + ': enter a PL03 above zero.', 'error'); return; }
+        const e = edits[id] || {};
+        const reason = e.reason !== undefined ? e.reason : (l.decision && l.decision.reason) || '';
+        decide([{ line_id: id, status: act, pl03: isChanged(l) ? Number(pl03) : null, reason: isChanged(l) ? reason : null }]);
+    });
+
+    document.getElementById('pr-filter').addEventListener('click', ev => {
+        const b = ev.target.closest('button[data-f]');
+        if (!b) return;
+        filter = b.dataset.f;
+        document.querySelectorAll('#pr-filter button').forEach(x => x.classList.toggle('active', x === b));
+        render();
+    });
+
+    const approveClean = document.getElementById('pr-approve-clean');
+    if (approveClean) approveClean.addEventListener('click', () => {
+        const items = review.lines
+            .filter(l => !l.error && (l.flags || []).length === 0 && decisionState(l) !== 'approved'
+                         && !hasUnsaved(l) && !isChanged(l))
+            .map(l => ({ line_id: l.line_id, status: 'approved', pl03: null, reason: null }));
+        if (!items.length) { showMessage('No unapproved lines without warnings at the calculated price.'); return; }
+        if (!confirm('Approve ' + items.length + ' line(s) at their calculated PL03?')) return;
+        decide(items);
+    });
+
+    async function reload() {
+        try {
+            review = await api('GET', '');
+            render();
+        } catch (e) {
+            body.innerHTML = '<tr><td colspan="12" class="err">Could not load the price review: ' + esc(e.message) + '</td></tr>';
+        }
+    }
+
+    window.addEventListener('beforeunload', ev => {
+        if (review && review.lines.some(hasUnsaved)) { ev.preventDefault(); ev.returnValue = ''; }
+    });
+
+    reload();
+})();

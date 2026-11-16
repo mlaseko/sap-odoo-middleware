@@ -17,7 +17,7 @@ public sealed record PartsLineState(
     bool NeedsPartReview, string? PartVerdict, string? SelectedName, string? SelectedSupplier,
     string? MarqueResolved, string? MarqueResolvedPrefix, string? MarqueTopCandidate, string? SkuPrefix, int? ItemGroupCode,
     string? SuggestedDonorItemCode, string? SuggestedDonorSupplier, string? MatchedItemCode, string? GeneratedItemCode,
-    string? BorrowedFromArticle, string? BorrowedFromSupplier);
+    string? BorrowedFromArticle, string? BorrowedFromSupplier, IReadOnlyList<string>? OemNumbers = null);
 
 public interface IPartsLineStateRepository
 {
@@ -65,7 +65,7 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
                    "EnrichmentPayloadJson"#>>'{item_data,suggested_sku_prefix}',
                    "EnrichmentPayloadJson"#>>'{item_data,suggested_itms_grp_cod}',
                    "SuggestedDonorItemCode", "SuggestedDonorSupplier", "MatchedItemCode", "GeneratedItemCode",
-                   "BorrowedFromArticle", "BorrowedFromSupplier"
+                   "BorrowedFromArticle", "BorrowedFromSupplier", "OemNumbers"::text
             FROM public."staging_document_line"
             WHERE "DocumentId" = @doc
             ORDER BY "LineNumber", "Id";
@@ -88,9 +88,17 @@ public sealed class PartsLineStateRepository : IPartsLineStateRepository
                 MarqueResolved: S(18), MarqueResolvedPrefix: S(19), MarqueTopCandidate: S(20), SkuPrefix: S(21),
                 ItemGroupCode: int.TryParse(S(22), out var g) ? g : null,
                 SuggestedDonorItemCode: S(23), SuggestedDonorSupplier: S(24), MatchedItemCode: S(25), GeneratedItemCode: S(26),
-                BorrowedFromArticle: S(27), BorrowedFromSupplier: S(28)));
+                BorrowedFromArticle: S(27), BorrowedFromSupplier: S(28), OemNumbers: ParseOems(S(29))));
         }
         return list;
+    }
+
+    /// <summary>OemNumbers is stored as a JSON array; an unreadable value counts as none.</summary>
+    private static IReadOnlyList<string> ParseOems(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return Array.Empty<string>();
+        try { return System.Text.Json.JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>(); }
+        catch (System.Text.Json.JsonException) { return Array.Empty<string>(); }
     }
 
     public async Task<IReadOnlyList<Guid>> ApplyResolvedMarquesAsync(

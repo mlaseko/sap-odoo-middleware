@@ -1,0 +1,13 @@
+@model SapOdooMiddleware.Areas.Autohub.Pages.Documents.InvoiceTabs
+@{
+    string Cls(string tab) => tab == Model.Active ? "inv-tab active" : "inv-tab";
+    var id = Model.DocumentId;
+}
+@* Tab bar shared by the invoice pages. Counts are filled in by invoice-tabs.js from GET .../issues. *@
+<nav class="inv-tabs" id="inv-tabs" data-doc-id="@id" data-active="@Model.Active">
+    <a class="@Cls("lines")" href="/autohub/documents/@id">All lines <span class="tab-count" data-count="lines"></span></a>
+    <a class="@Cls("issues")" href="/autohub/documents/@id/issues">Issues <span class="tab-count warn" data-count="issues"></span></a>
+    <a class="@Cls("prices")" href="/autohub/documents/@id/prices">Prices <span class="tab-count warn" data-count="prices"></span></a>
+    <span class="inv-progress" data-count="progress"></span>
+</nav>
+<script src="~/js/autohub/invoice-tabs.js" asp-append-version="true"></script>

@@ -19,8 +19,11 @@ public sealed record LineNextAction(string NextAction, IReadOnlyList<LineIssue> 
     public bool IsDone => NextAction is "created" or "matched" or "skipped";
 }
 
-/// <summary>A line's price review state, for the "price" issue: approved | held | stale | none | error.</summary>
-public sealed record LinePriceState(string State, string? Error = null);
+/// <summary>
+/// A line's price review state, for the "price" issue: approved | held | stale | none | error. Pl03 is the
+/// price it would be created at: the approved PL03 when Pl03Approved, else the calculated one.
+/// </summary>
+public sealed record LinePriceState(string State, string? Error = null, decimal? Pl03 = null, bool Pl03Approved = false);
 
 /// <summary>
 /// Works out what each Autohub invoice line needs next. Pure: no I/O, so it is unit-tested directly.
@@ -130,7 +133,8 @@ public sealed record IssueLine(
     decimal? Quantity, decimal? UnitPriceForeign, string ReviewStatus, string NextAction,
     IReadOnlyList<LineIssue> Issues,
     string? MarqueSuggestion, string? SkuPrefix, int? ItemGroupCode,
-    string? SuggestedItemCode, string? MatchedPartName, string? MatchedPartSupplier);
+    string? SuggestedItemCode, string? MatchedPartName, string? MatchedPartSupplier,
+    string? PriceState, decimal? Pl03, bool Pl03Approved, IReadOnlyList<string> OemNumbers);
 
 /// <summary>
 /// Lines grouped by their next action. BulkActions are the action codes POST .../issues/bulk accepts for
@@ -239,7 +243,8 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
             {
                 var (title, help, bulk) = Groups[code];
                 return new IssueGroup(code, title, help, bulk,
-                    classified.Where(c => c.Next.NextAction == code).Select(c => ToIssueLine(c.Line, c.Next)).ToList());
+                    classified.Where(c => c.Next.NextAction == code)
+                        .Select(c => ToIssueLine(c.Line, c.Next, prices.GetValueOrDefault(c.Line.Id))).ToList());
             })
             .ToList();
 
@@ -251,14 +256,16 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
         return new InvoiceIssues(documentId, doc.Status, summary, groups);
     }
 
-    private static IssueLine ToIssueLine(PartsLineState l, LineNextAction next) => new(
+    private static IssueLine ToIssueLine(PartsLineState l, LineNextAction next, LinePriceState? price) => new(
         LineId: l.Id, LineNumber: l.LineNumber, ArticleNumber: l.SupplierArticleNumber, Description: l.Description,
         Brand: l.Brand, Quantity: l.Quantity, UnitPriceForeign: l.UnitPriceForeign, ReviewStatus: l.ReviewStatus,
         NextAction: next.NextAction, Issues: next.Issues,
         MarqueSuggestion: string.Equals(l.MarqueResolved, "true", StringComparison.OrdinalIgnoreCase)
             ? l.MarqueResolvedPrefix : l.MarqueTopCandidate,
         SkuPrefix: l.SkuPrefix, ItemGroupCode: l.ItemGroupCode,
-        SuggestedItemCode: l.SuggestedDonorItemCode, MatchedPartName: l.SelectedName, MatchedPartSupplier: l.SelectedSupplier);
+        SuggestedItemCode: l.SuggestedDonorItemCode, MatchedPartName: l.SelectedName, MatchedPartSupplier: l.SelectedSupplier,
+        PriceState: price?.State, Pl03: price?.Pl03, Pl03Approved: price?.Pl03Approved ?? false,
+        OemNumbers: l.OemNumbers ?? Array.Empty<string>());
 
     /// <summary>Price review state per line queued to create (the price review only covers those lines).</summary>
     private async Task<Dictionary<Guid, LinePriceState>> PriceStatesAsync(Guid documentId, CancellationToken ct)
@@ -267,12 +274,14 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
         var map = new Dictionary<Guid, LinePriceState>();
         foreach (var l in review?.Lines ?? Array.Empty<PriceReviewLine>())
         {
+            var approvedPl03 = l.Decision is { Stale: false, Status: "approved", FinalPl03: { } f } ? f : (decimal?)null;
+            var pl03 = approvedPl03 ?? l.FormulaPl03;
             map[l.LineId] = l.Decision switch
             {
-                { Stale: true } => new LinePriceState("stale"),
-                { Status: "approved" } => new LinePriceState("approved"),
-                { Status: "held" } => new LinePriceState("held"),
-                _ => l.Error is not null ? new LinePriceState("error", l.Error) : new LinePriceState("none"),
+                { Stale: true } => new LinePriceState("stale", null, pl03),
+                { Status: "approved" } => new LinePriceState("approved", null, pl03, approvedPl03 is not null),
+                { Status: "held" } => new LinePriceState("held", null, pl03),
+                _ => l.Error is not null ? new LinePriceState("error", l.Error) : new LinePriceState("none", null, pl03),
             };
         }
         return map;
