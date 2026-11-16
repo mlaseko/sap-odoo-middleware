@@ -305,6 +305,8 @@ builder.Services.AddScoped<IMarqueAssignmentService, MarqueAssignmentService>();
 builder.Services.AddScoped<IPartsLineStateRepository, PartsLineStateRepository>();       // Issues: line states
 builder.Services.AddScoped<IInvoiceIssuesService, InvoiceIssuesService>();               // Issues: next action + bulk
 builder.Services.AddScoped<IInvoiceActivityLog, InvoiceActivityLog>();                   // invoice history (invoice_activity)
+builder.Services.AddScoped<IAutohubPurchaseOrderRepository, AutohubPurchaseOrderRepository>();   // PO from a reviewed invoice
+builder.Services.AddScoped<IAutohubPurchaseOrderService, AutohubPurchaseOrderService>();
 builder.Services.AddScoped<SapOdooMiddleware.Controllers.AutohubActivityFilter>();       // records history after each change
 builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
 builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();

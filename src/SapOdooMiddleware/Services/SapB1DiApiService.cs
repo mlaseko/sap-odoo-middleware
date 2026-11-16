@@ -4876,6 +4876,9 @@ public class SapB1DiApiService : ISapB1Service, IDisposable
                 // Container link (OPOR UDFs from POST /api/admin/setup-sap-udfs); Copy To brings them to the GRPO.
                 SetPoUdf(po, "U_ShipRef", request.ShipRef, 50);
                 SetPoUdf(po, "U_OdooShipmentId", request.OdooShipmentId, 30);
+                SetPoUdf(po, "U_AppRef", request.AppRef, 40);
+                if (request.BplId is > 0)
+                    po.BPL_IDAssignedToInvoice = request.BplId.Value;   // OPOR.BPLId — mandatory with branches
 
                 for (int i = 0; i < request.Lines.Count; i++)
                 {

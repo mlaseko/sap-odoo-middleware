@@ -40,6 +40,12 @@ public class SapPurchaseOrderRequest
     /// <summary>Odoo container order reference → <c>OPOR.U_OdooShipmentId</c>.</summary>
     public string? OdooShipmentId { get; set; }
 
+    /// <summary>Branch (<c>OPOR.BPLId</c>); required in a company with branches (Autohub). Null = not set.</summary>
+    public int? BplId { get; set; }
+
+    /// <summary>Idempotency key → <c>OPOR.U_AppRef</c> (max 40); the Autohub invoice id. Null = not set.</summary>
+    public string? AppRef { get; set; }
+
     [Required]
     [MinLength(1)]
     public List<SapPurchaseOrderLineRequest> Lines { get; set; } = [];

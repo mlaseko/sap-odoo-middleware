@@ -108,6 +108,20 @@ public class GoodsReturnCreate
 // ── Listings / cancel ────────────────────────────────────────────────
 
 /// <summary>Customer picker row (OCRD, CardType C, not frozen).</summary>
+/// <summary>SAP vendor (OCRD CardType 'S') for the purchase order vendor picker.</summary>
+public class VendorSummary
+{
+    public string CardCode { get; set; } = "";
+    public string? CardName { get; set; }
+    /// <summary>OCRD.Currency: a currency code, or "##" for all currencies.</summary>
+    public string? Currency { get; set; }
+    /// <summary>True when the vendor is inactive (frozen) in SAP.</summary>
+    public bool Frozen { get; set; }
+}
+
+/// <summary>An item as a purchase order needs it: whether SAP lets it be purchased.</summary>
+public sealed record ItemPurchaseStatus(string ItemCode, bool PurchaseItem, bool Frozen);
+
 public class CustomerSummary
 {
     public string CardCode { get; set; } = "";
