@@ -24,4 +24,11 @@ public class TransactionHistoryItem
     public decimal NetMovement { get; set; }
     public decimal? OrderedQty { get; set; }
     public decimal? OpenQty { get; set; }
+    /// <summary>
+    /// OINM.TransNum: SAP's warehouse-journal sequence, increasing in the order the
+    /// movements were entered. Orders same-day movements exactly (a running stock
+    /// balance needs it). Null on Purchase Order rows, which move no stock.
+    /// Serialised as <c>trans_num</c>.
+    /// </summary>
+    public int? TransNum { get; set; }
 }

@@ -78,7 +78,8 @@ public class InventoryController : ControllerBase
     /// GET /api/inventory/transactionhistory?item_code=BM10001
     /// Returns the full inventory transaction history for a single item from the
     /// Autohub SAP B1 company (MOLAS_Live_2021). Combines OINM-based inventory
-    /// movements with open Purchase Orders, ordered by posting date.
+    /// movements with Purchase Orders, ordered by posting date then SAP entry order
+    /// (OINM.TransNum, returned as trans_num) so same-day movements are in sequence.
     /// </summary>
     /// <param name="itemCode">SAP ItemCode (required).</param>
     /// <param name="fromDate">Optional start date filter (YYYY-MM-DD).</param>
