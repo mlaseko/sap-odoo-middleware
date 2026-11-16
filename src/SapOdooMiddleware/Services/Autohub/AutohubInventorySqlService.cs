@@ -99,6 +99,24 @@ public interface IAutohubInventorySqlService
         string? cardCode, string? itemCode, CancellationToken ct);
 
     /// <summary>
+    /// The named GRPOs (OPDN) with their open lines, for an A/P invoice draft. GRPOs that
+    /// do not exist are simply absent from the result.
+    /// </summary>
+    Task<List<GrpoForInvoice>> GetGrposForInvoiceAsync(
+        IReadOnlyCollection<int> grpoDocEntries, CancellationToken ct);
+
+    /// <summary>Idempotency probe: the A/P invoice draft (ODRF, ObjType 18) carrying this U_AppRef, or null.</summary>
+    Task<PurchaseInvoiceDraftResult?> FindPurchaseInvoiceDraftByAppRefAsync(
+        string appRef, CancellationToken ct);
+
+    /// <summary>
+    /// Non-cancelled A/P invoices (OPCH) and open A/P invoice drafts (ODRF, ObjType 18) of the
+    /// supplier with this supplier invoice number (NumAtCard).
+    /// </summary>
+    Task<List<PurchaseInvoiceConflict>> FindPurchaseInvoicesByNumAtCardAsync(
+        string cardCode, string numAtCard, CancellationToken ct);
+
+    /// <summary>
     /// A customer's AR invoice item lines for the return-request copy screen, newest
     /// invoice first. <paramref name="openOnly"/> limits to open invoices; pass false
     /// to include closed (paid) ones, since returns often happen after payment. SAP
@@ -826,7 +844,8 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
             SELECT T0.DocEntry, T0.DocNum, T0.DocDate, T0.CardCode, T0.CardName,
                    T1.LineNum, T1.ItemCode,
                    I.ItemName, I.U_Article_No, I.U_ItemManufacturer,
-                   T1.Quantity, T1.OpenQty, T1.WhsCode
+                   T1.Quantity, T1.OpenQty, T1.WhsCode,
+                   T1.VendorNum, T0.DocCur, T0.DocRate
             FROM OPOR T0
             JOIN POR1 T1 ON T1.DocEntry = T0.DocEntry
             JOIN OITM I ON I.ItemCode = T1.ItemCode
@@ -861,7 +880,130 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 Quantity = (double)reader.GetDecimal(10),
                 OpenQty = (double)reader.GetDecimal(11),
                 WhsCode = reader.IsDBNull(12) ? "" : reader.GetString(12),
+                SupplierCatNum = reader.IsDBNull(13) || string.IsNullOrWhiteSpace(reader.GetString(13))
+                    ? null : reader.GetString(13).Trim(),
+                DocCurrency = reader.IsDBNull(14) ? "" : reader.GetString(14).Trim(),
+                DocRate = reader.IsDBNull(15) ? 0 : (double)reader.GetDecimal(15),
             });
+        }
+        return list;
+    }
+
+    // ── A/P invoice draft from GRPOs (Receive Shipment) ──────────────
+
+    // Past this many GRPOs the IN list would approach SQL Server's parameter limit; a
+    // shipment has a handful, so the controller refuses more than this.
+    internal const int MaxGrposPerDraft = 500;
+
+    /// <summary>
+    /// SQL for the named GRPO headers with their open lines (LEFT JOIN, so a GRPO with no
+    /// open line still comes back once with NULL line columns), one <c>@gN</c> parameter per
+    /// GRPO. Pure, so the text and parameters are unit-tested.
+    /// </summary>
+    internal static (string Sql, IReadOnlyList<(string Name, int Value)> Parameters)
+        BuildGrposForInvoiceSql(IReadOnlyList<int> grpoDocEntries)
+    {
+        var parameters = grpoDocEntries.Select((d, i) => ($"@g{i}", d)).ToList();
+        var sql = $"""
+            SELECT T0.DocEntry, T0.DocNum, T0.CardCode, T0.DocStatus, T0.CANCELED,
+                   T0.DocCur, T0.DocRate, T1.LineNum, T1.OpenQty
+            FROM OPDN T0
+            LEFT JOIN PDN1 T1 ON T1.DocEntry = T0.DocEntry
+                             AND T1.LineStatus = 'O' AND T1.OpenQty > 0
+            WHERE T0.DocEntry IN ({string.Join(", ", parameters.Select(p => p.Item1))})
+            ORDER BY T0.DocEntry, T1.LineNum;
+            """;
+        return (sql, parameters);
+    }
+
+    public async Task<List<GrpoForInvoice>> GetGrposForInvoiceAsync(
+        IReadOnlyCollection<int> grpoDocEntries, CancellationToken ct)
+    {
+        var distinct = grpoDocEntries.Distinct().ToList();
+        if (distinct.Count == 0)
+            return new List<GrpoForInvoice>();
+
+        var (sql, parameters) = BuildGrposForInvoiceSql(distinct);
+        var byEntry = new Dictionary<int, GrpoForInvoice>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        foreach (var (name, value) in parameters)
+            cmd.Parameters.AddWithValue(name, value);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            int docEntry = reader.GetInt32(0);
+            if (!byEntry.TryGetValue(docEntry, out var grpo))
+            {
+                grpo = new GrpoForInvoice
+                {
+                    DocEntry = docEntry,
+                    DocNum = reader.GetInt32(1),
+                    CardCode = reader.GetString(2),
+                    DocStatus = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                    Canceled = reader.IsDBNull(4) ? "N" : reader.GetString(4),
+                    DocCurrency = reader.IsDBNull(5) ? "" : reader.GetString(5).Trim(),
+                    DocRate = reader.IsDBNull(6) ? 0 : (double)reader.GetDecimal(6),
+                };
+                byEntry.Add(docEntry, grpo);
+            }
+            if (!reader.IsDBNull(7))
+                grpo.OpenLines.Add(new GrpoOpenLine(reader.GetInt32(7), (double)reader.GetDecimal(8)));
+        }
+        return byEntry.Values.ToList();
+    }
+
+    public async Task<PurchaseInvoiceDraftResult?> FindPurchaseInvoiceDraftByAppRefAsync(
+        string appRef, CancellationToken ct)
+    {
+        // The draft total in its own currency: DocTotalFC for foreign currency, DocTotal for local.
+        const string sql = """
+            SELECT TOP 1 D.DocEntry, D.DocNum, D.DocCur,
+                   CASE WHEN D.DocCur = (SELECT MainCurncy FROM OADM) THEN D.DocTotal ELSE D.DocTotalFC END,
+                   (SELECT COUNT(*) FROM DRF1 L WHERE L.DocEntry = D.DocEntry)
+            FROM ODRF D
+            WHERE D.ObjType = '18' AND D.U_AppRef = @appRef
+            ORDER BY D.DocEntry DESC;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.AddWithValue("@appRef", appRef);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        return new PurchaseInvoiceDraftResult
+        {
+            DraftDocEntry = reader.GetInt32(0),
+            DraftDocNum = reader.GetInt32(1),
+            DocCurrency = reader.IsDBNull(2) ? "" : reader.GetString(2).Trim(),
+            DocTotal = reader.IsDBNull(3) ? 0 : (double)reader.GetDecimal(3),
+            LineCount = reader.GetInt32(4),
+            AlreadyExisted = true,
+        };
+    }
+
+    public async Task<List<PurchaseInvoiceConflict>> FindPurchaseInvoicesByNumAtCardAsync(
+        string cardCode, string numAtCard, CancellationToken ct)
+    {
+        // Posted A/P invoices that are not cancelled, and open A/P invoice drafts.
+        const string sql = """
+            SELECT 'invoice', DocEntry, DocNum, U_AppRef FROM OPCH
+            WHERE CardCode = @card AND NumAtCard = @num AND CANCELED = 'N'
+            UNION ALL
+            SELECT 'draft', DocEntry, DocNum, U_AppRef FROM ODRF
+            WHERE ObjType = '18' AND DocStatus = 'O' AND CardCode = @card AND NumAtCard = @num;
+            """;
+        var list = new List<PurchaseInvoiceConflict>();
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.Parameters.Add("@card", System.Data.SqlDbType.NVarChar, 15).Value = cardCode;
+        cmd.Parameters.Add("@num", System.Data.SqlDbType.NVarChar, 100).Value = numAtCard;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            list.Add(new PurchaseInvoiceConflict(
+                reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
         return list;
     }

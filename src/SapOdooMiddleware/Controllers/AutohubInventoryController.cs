@@ -1245,6 +1245,12 @@ public class AutohubInventoryController : ControllerBase
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
 
+            // One currency and rate per GRPO: the GRPO takes its base POs' rate, so POs that
+            // differ cannot share a GRPO (the app sends one GRPO per PO).
+            var baseCurrency = ResolveGrpoBaseCurrency(request.Lines, openByRef, errors);
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
+
             // Destination bin handling per line, using each line's receiving warehouse.
             for (int i = 0; i < request.Lines.Count; i++)
             {
@@ -1270,7 +1276,7 @@ public class AutohubInventoryController : ControllerBase
             if (errors.Count > 0)
                 return BadRequest(ApiResponse<InventoryDocResult>.Fail(errors));
 
-            var result = await _sap.CreateGrpoAsync(request, _settings.GrpoSeries, ct);
+            var result = await _sap.CreateGrpoAsync(request, _settings.GrpoSeries, baseCurrency, ct);
             return Ok(ApiResponse<InventoryDocResult>.Ok(result));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("does not exist"))
@@ -1283,6 +1289,152 @@ public class AutohubInventoryController : ControllerBase
                 "GRPO creation failed (app_ref={AppRef}, card_code={CardCode})",
                 request.AppRef, request.CardCode);
             return StatusCode(500, ApiResponse<InventoryDocResult>.Fail(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// The currency and rate shared by the base purchase orders of a GRPO's lines, or null (with
+    /// an error added) when they differ. Rates are compared to 6 decimals, SAP's precision.
+    /// </summary>
+    internal static PurchaseDocCurrency? ResolveGrpoBaseCurrency(
+        IReadOnlyList<GrpoLineCreate> lines,
+        IReadOnlyDictionary<(int DocEntry, int LineNum), OpenPurchaseOrderLine> openByRef,
+        List<string> errors)
+    {
+        var pos = lines
+            .Select(l => openByRef[(l.PoDocEntry, l.PoLineNum)])
+            .GroupBy(l => l.DocEntry)
+            .Select(g => g.First())
+            .ToList();
+        var groups = pos
+            .GroupBy(p => (Currency: p.DocCurrency.Trim().ToUpperInvariant(), Rate: Math.Round(p.DocRate, 6)))
+            .ToList();
+        if (groups.Count > 1)
+        {
+            errors.Add(
+                "The lines are based on purchase orders in different currencies or exchange rates (" +
+                string.Join(", ", pos.Select(p => $"PO {p.DocNum}: {p.DocCurrency} at {p.DocRate:0.######}")) +
+                ") — post one GRPO per purchase order.");
+            return null;
+        }
+        return new PurchaseDocCurrency(groups[0].Key.Currency, groups[0].Key.Rate);
+    }
+
+    // ── A/P invoice draft from several GRPOs (Receive Shipment) ──────
+
+    /// <summary>
+    /// POST /api/autohub/inv/purchase-invoice-drafts
+    /// Creates one A/P invoice <b>draft</b> (ODRF, ObjType 18) copying every open line of the named
+    /// GRPOs of one supplier: quantities, prices, currency, rate and tax come from the GRPO lines.
+    /// Refuses 400 (nothing created) when a GRPO is missing, another supplier's, cancelled, closed,
+    /// or the GRPOs differ in currency or rate; 409 when the supplier already has an A/P invoice or
+    /// open draft with this <c>num_at_card</c> under another <c>app_ref</c>; 422 when
+    /// <c>expected_total</c> is given and SAP's total differs (the draft is deleted). Idempotent on
+    /// <c>app_ref</c> (ODRF.U_AppRef). Never adds the invoice: finance reviews and adds it in SAP.
+    /// </summary>
+    [HttpPost("purchase-invoice-drafts")]
+    [ProducesResponseType(typeof(ApiResponse<PurchaseInvoiceDraftResult>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ApiResponse<PurchaseInvoiceDraftResult>), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ApiResponse<PurchaseInvoiceDraftResult>), StatusCodes.Status409Conflict)]
+    [ProducesResponseType(typeof(ApiResponse<PurchaseInvoiceDraftResult>), StatusCodes.Status422UnprocessableEntity)]
+    [ProducesResponseType(typeof(ApiResponse<PurchaseInvoiceDraftResult>), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> CreatePurchaseInvoiceDraft(
+        [FromBody] PurchaseInvoiceDraftCreate request, CancellationToken ct)
+    {
+        var errors = new List<string>();
+        ValidateAppRef(request.AppRef, errors);
+        if (string.IsNullOrWhiteSpace(request.CardCode)) errors.Add("card_code is required.");
+        if (string.IsNullOrWhiteSpace(request.NumAtCard))
+            errors.Add("num_at_card (the supplier invoice number) is required.");
+        request.GrpoDocEntries ??= new List<int>();
+        if (request.GrpoDocEntries.Count == 0) errors.Add("grpo_doc_entries must name at least one GRPO.");
+        if (request.GrpoDocEntries.Any(d => d <= 0)) errors.Add("grpo_doc_entries must be positive DocEntries.");
+        var grpoEntries = request.GrpoDocEntries.Distinct().ToList();
+        if (grpoEntries.Count > AutohubInventorySqlService.MaxGrposPerDraft)
+            errors.Add($"At most {AutohubInventorySqlService.MaxGrposPerDraft} GRPOs per draft.");
+        if (request.ExpectedTotal is < 0) errors.Add("expected_total cannot be negative.");
+        if (errors.Count > 0)
+            return BadRequest(ApiResponse<PurchaseInvoiceDraftResult>.Fail(errors));
+
+        request.AppRef = request.AppRef.Trim();
+        request.CardCode = request.CardCode.Trim();
+        request.NumAtCard = request.NumAtCard.Trim();
+        if (request.NumAtCard.Length > 100) request.NumAtCard = request.NumAtCard[..100];
+        request.GrpoDocEntries = grpoEntries;
+
+        try
+        {
+            // Idempotency: a replay returns the draft already created for this app_ref.
+            var existing = await _sql.FindPurchaseInvoiceDraftByAppRefAsync(request.AppRef, ct);
+            if (existing is not null)
+            {
+                _logger.LogInformation(
+                    "A/P invoice draft app_ref={AppRef} already exists as DocEntry={DocEntry} — returning it.",
+                    request.AppRef, existing.DraftDocEntry);
+                existing.AlreadyExisted = true;
+                return Ok(ApiResponse<PurchaseInvoiceDraftResult>.Ok(existing));
+            }
+
+            // Every GRPO: exists, the supplier's, not cancelled, open with open lines.
+            var grpos = await _sql.GetGrposForInvoiceAsync(grpoEntries, ct);
+            var byEntry = grpos.ToDictionary(g => g.DocEntry);
+            foreach (var entry in grpoEntries)
+            {
+                if (!byEntry.TryGetValue(entry, out var g))
+                {
+                    errors.Add($"GRPO DocEntry {entry} does not exist.");
+                    continue;
+                }
+                if (!string.Equals(g.CardCode, request.CardCode, StringComparison.OrdinalIgnoreCase))
+                    errors.Add($"GRPO {g.DocNum} belongs to supplier {g.CardCode}, not {request.CardCode}.");
+                else if (g.Canceled != "N")
+                    errors.Add($"GRPO {g.DocNum} is cancelled.");
+                else if (g.DocStatus != "O" || g.OpenLines.Count == 0)
+                    errors.Add($"GRPO {g.DocNum} is closed (nothing left to invoice).");
+            }
+            if (errors.Count > 0)
+                return BadRequest(ApiResponse<PurchaseInvoiceDraftResult>.Fail(errors));
+
+            // One currency and rate for the whole draft.
+            var ordered = grpoEntries.Select(e => byEntry[e]).ToList();
+            var rateGroups = ordered
+                .GroupBy(g => (Currency: g.DocCurrency.Trim().ToUpperInvariant(), Rate: Math.Round(g.DocRate, 6)))
+                .ToList();
+            if (rateGroups.Count > 1)
+                return BadRequest(ApiResponse<PurchaseInvoiceDraftResult>.Fail(
+                    "The GRPOs differ in currency or exchange rate (" +
+                    string.Join(", ", ordered.Select(g => $"GRPO {g.DocNum}: {g.DocCurrency} at {g.DocRate:0.######}")) +
+                    ") — they cannot be merged into one invoice."));
+            var currency = new PurchaseDocCurrency(rateGroups[0].Key.Currency, rateGroups[0].Key.Rate);
+
+            // One A/P invoice per supplier invoice number.
+            var conflicts = (await _sql.FindPurchaseInvoicesByNumAtCardAsync(request.CardCode, request.NumAtCard, ct))
+                .Where(c => !string.Equals(c.AppRef?.Trim(), request.AppRef, StringComparison.Ordinal))
+                .ToList();
+            if (conflicts.Count > 0)
+                return Conflict(ApiResponse<PurchaseInvoiceDraftResult>.Fail(
+                    $"Supplier {request.CardCode} already has supplier invoice {request.NumAtCard} in SAP: " +
+                    string.Join(", ", conflicts.Select(c =>
+                        c.Kind == "invoice" ? $"A/P invoice {c.DocNum}" : $"open A/P invoice draft {c.DocNum} (DocEntry {c.DocEntry})")) +
+                    ". Nothing was created."));
+
+            var lines = ordered
+                .SelectMany(g => g.OpenLines.Select(l => (GrpoDocEntry: g.DocEntry, Line: l)))
+                .ToList();
+
+            var result = await _sap.CreatePurchaseInvoiceDraftAsync(request, lines, currency, ct);
+            return Ok(ApiResponse<PurchaseInvoiceDraftResult>.Ok(result));
+        }
+        catch (PurchaseInvoiceDraftTotalMismatchException ex)
+        {
+            return UnprocessableEntity(ApiResponse<PurchaseInvoiceDraftResult>.Fail(ex.Message));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "A/P invoice draft creation failed (app_ref={AppRef}, card_code={CardCode})",
+                request.AppRef, request.CardCode);
+            return StatusCode(500, ApiResponse<PurchaseInvoiceDraftResult>.Fail(ex.Message));
         }
     }
 

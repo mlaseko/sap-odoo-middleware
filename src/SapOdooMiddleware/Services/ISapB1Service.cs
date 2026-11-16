@@ -406,8 +406,11 @@ public interface ISapB1Service
     /// drawn from open purchase order lines: every line carries BaseType 22 +
     /// BaseEntry/BaseLine so SAP updates the PO's open quantities and vendor
     /// liability, closing fully received lines. Partial receipts supported.
+    /// <paramref name="baseCurrency"/> is the currency and rate shared by the base POs: when
+    /// foreign, the GRPO's DocCurrency/DocRate are set to them so its values match the PO.
     /// </summary>
-    Task<InventoryDocResult> CreateGrpoAsync(GrpoCreate request, int series, CancellationToken ct);
+    Task<InventoryDocResult> CreateGrpoAsync(
+        GrpoCreate request, int series, PurchaseDocCurrency? baseCurrency, CancellationToken ct);
 
     /// <summary>
     /// Sets the item's default bin across multiple warehouses in ONE
