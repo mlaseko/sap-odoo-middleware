@@ -45,6 +45,12 @@ public class PriceReviewServiceTests
 
     private static PriceReviewService Service(
         IReadOnlyList<PartsReviewLineRow> lines, string? currency = "USD", decimal? rate = 2700m,
+        IReadOnlyDictionary<Guid, PartsPriceDecision>? decisions = null) =>
+        Service(lines, out _, currency, rate, decisions);
+
+    private static PriceReviewService Service(
+        IReadOnlyList<PartsReviewLineRow> lines, out Mock<IPartsPriceReviewRepository> decisionRepoOut,
+        string? currency = "USD", decimal? rate = 2700m,
         IReadOnlyDictionary<Guid, PartsPriceDecision>? decisions = null)
     {
         var docs = new Mock<IStagingPartsDocumentRepository>();
@@ -56,6 +62,7 @@ public class PriceReviewServiceTests
         var decisionRepo = new Mock<IPartsPriceReviewRepository>();
         decisionRepo.Setup(r => r.GetByDocumentAsync(DocId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(decisions ?? new Dictionary<Guid, PartsPriceDecision>());
+        decisionRepoOut = decisionRepo;
 
         var forex = new Mock<IForexConversionService>();
         if (rate is { } r)
@@ -70,6 +77,8 @@ public class PriceReviewServiceTests
                 It.IsAny<IReadOnlyList<(decimal SupplierPriceTzs, string? Brand)>>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IReadOnlyList<(decimal SupplierPriceTzs, string? Brand)> ls, CancellationToken _) =>
                 ls.Select(l => Quote(l.SupplierPriceTzs, l.Brand)).ToList());
+        pricing.Setup(p => p.DeriveWholesaleAsync(It.IsAny<decimal>(), It.IsAny<decimal>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((decimal cost, decimal retail, CancellationToken _) => Math.Floor(retail - (retail - cost) / 2m));
 
         return new PriceReviewService(docs.Object, lineRepo.Object, decisionRepo.Object, forex.Object,
             pricing.Object, Options.Create(new AutohubPricingSettings()));
@@ -136,10 +145,13 @@ public class PriceReviewServiceTests
         var svc = Service(Array.Empty<PartsReviewLineRow>());
         var q = Quote(800m, "VIKA").Quote!;   // PL01 1000
 
-        Assert.Contains(svc.FlagsFor(q, 1000m, "VIKA"), f => f.Code == "below_cost");
-        Assert.Contains(svc.FlagsFor(q, 1100m, "VIKA"), f => f.Code == "margin_low");     // 9%
-        Assert.Empty(svc.FlagsFor(q, 2000m, "VIKA"));                                      // 50%
-        Assert.Contains(svc.FlagsFor(q, 20000m, "VIKA"), f => f.Code == "margin_high");   // 95%
+        IReadOnlyList<PriceReviewFlag> At(decimal pl03) =>
+            svc.FlagsFor(q.Cost, pl03, q.FloorApplied, q.Floor, q.RatioBrand, "VIKA");
+
+        Assert.Contains(At(1000m), f => f.Code == "below_cost");
+        Assert.Contains(At(1100m), f => f.Code == "margin_low");     // 9%
+        Assert.Empty(At(2000m));                                      // 50%
+        Assert.Contains(At(20000m), f => f.Code == "margin_high");   // 95%
     }
 
     private static PartsPriceDecision Decision(Guid lineId, decimal unit, decimal rate, decimal cif,
@@ -179,6 +191,128 @@ public class PriceReviewServiceTests
         Assert.Equal(1, review.Summary.Stale);
         Assert.Equal(1, review.Summary.Unreviewed);
         Assert.Equal(0, review.Summary.Approved);
+    }
+
+    // ── Step 2: live recalculation and decisions ──────────────────────────────
+
+    [Fact]
+    public async Task Preview_rederives_PL05_from_the_typed_PL03()
+    {
+        var line = Line(1, 10m);   // PL01 33750, formula PL03 67500, formula PL05 50625
+        var svc = Service(new[] { line });
+
+        var result = await svc.PreviewAsync(DocId, new[]
+        {
+            new PriceReviewPreviewRequestLine(line.Id, 80000m),
+            new PriceReviewPreviewRequestLine(line.Id, null),
+            new PriceReviewPreviewRequestLine(Guid.NewGuid(), 1000m),
+            new PriceReviewPreviewRequestLine(line.Id, 0m),
+        }, CancellationToken.None);
+        var typed = result!.Lines[0];
+
+        Assert.Equal(80000m, typed.Pl03);
+        Assert.Equal(56875m, typed.Pl05);                 // floor(80000 − (80000 − 33750) / 2)
+        Assert.True(typed.ChangedFromFormula);
+        Assert.Equal(0.5781m, typed.Margin);
+        Assert.Equal(67500m, result.Lines[1].Pl03);
+        Assert.False(result.Lines[1].ChangedFromFormula);
+        Assert.NotNull(result.Lines[2].Error);            // not on the document
+        Assert.Equal("PL03 must be greater than zero.", result.Lines[3].Error);
+    }
+
+    [Fact]
+    public async Task Approve_saves_recomputed_figures_not_caller_figures()
+    {
+        var line = Line(1, 10m, discount: 10m);   // CIF 24300, PL01 30375, formula PL03 60750
+        var svc = Service(new[] { line }, out var repo);
+        IReadOnlyList<PartsPriceDecision>? saved = null;
+        repo.Setup(r => r.UpsertAsync(It.IsAny<IReadOnlyList<PartsPriceDecision>>(), It.IsAny<CancellationToken>()))
+            .Callback((IReadOnlyList<PartsPriceDecision> d, CancellationToken _) => saved = d)
+            .Returns(Task.CompletedTask);
+
+        var result = await svc.DecideAsync(DocId,
+            new[] { new PriceReviewDecisionRequestLine(line.Id, "Approved", 70000m, " similar parts at 70k ") },
+            "Mohamed", CancellationToken.None);
+
+        Assert.Empty(result!.Errors);
+        Assert.Equal(1, result.Saved);
+        var d = Assert.Single(saved!);
+        Assert.Equal("approved", d.Status);
+        Assert.Equal(70000m, d.FinalPl03);
+        Assert.Equal(50187m, d.FinalPl05);               // floor(70000 − (70000 − 30375) / 2)
+        Assert.Equal(60750m, d.FormulaPl03);
+        Assert.Equal(24300m, d.CifTzs);
+        Assert.Equal(2700m, d.ForexRate);
+        Assert.Equal("USD", d.Currency);
+        Assert.Equal(10m, d.DiscountPct);
+        Assert.Equal("similar parts at 70k", d.Reason);
+        Assert.Equal("Mohamed", d.ReviewedBy);
+    }
+
+    [Fact]
+    public async Task Accepting_the_calculated_price_needs_no_reason()
+    {
+        var line = Line(1, 10m);
+        var svc = Service(new[] { line }, out var repo);
+        IReadOnlyList<PartsPriceDecision>? saved = null;
+        repo.Setup(r => r.UpsertAsync(It.IsAny<IReadOnlyList<PartsPriceDecision>>(), It.IsAny<CancellationToken>()))
+            .Callback((IReadOnlyList<PartsPriceDecision> d, CancellationToken _) => saved = d)
+            .Returns(Task.CompletedTask);
+
+        var result = await svc.DecideAsync(DocId,
+            new[] { new PriceReviewDecisionRequestLine(line.Id, "approved", null, null) }, "rev", CancellationToken.None);
+
+        Assert.Empty(result!.Errors);
+        var d = Assert.Single(saved!);
+        Assert.Equal(67500m, d.FinalPl03);
+        Assert.Equal(50625m, d.FinalPl05);
+        Assert.Null(d.Reason);
+    }
+
+    [Fact]
+    public async Task Any_invalid_line_saves_nothing_and_reports_every_problem()
+    {
+        var good = Line(1, 10m);
+        var noPrice = Line(2, null);
+        var other = Line(3, 10m, "matched");
+        var svc = Service(new[] { good, noPrice, other }, out var repo);
+
+        var result = await svc.DecideAsync(DocId, new[]
+        {
+            new PriceReviewDecisionRequestLine(good.Id, "approved", 90000m, null),   // changed, no reason
+            new PriceReviewDecisionRequestLine(noPrice.Id, "approved", null, null),  // cannot be priced
+            new PriceReviewDecisionRequestLine(other.Id, "approved", null, null),    // not waiting to be created
+            new PriceReviewDecisionRequestLine(good.Id, "approved", null, null),     // duplicate
+            new PriceReviewDecisionRequestLine(Guid.NewGuid(), "maybe", null, null), // bad status
+        }, "rev", CancellationToken.None);
+
+        Assert.Equal(0, result!.Saved);
+        Assert.Contains(result.Errors, e => e.LineId == good.Id && e.Error.Contains("reason is required"));
+        Assert.Contains(result.Errors, e => e.LineId == good.Id && e.Error.Contains("more than once"));
+        Assert.Contains(result.Errors, e => e.LineId == noPrice.Id && e.Error.Contains("cannot be priced"));
+        Assert.Contains(result.Errors, e => e.LineId == other.Id && e.Error.Contains("not waiting to be created"));
+        Assert.Contains(result.Errors, e => e.Error.Contains("'approved' or 'held'"));
+        repo.Verify(r => r.UpsertAsync(It.IsAny<IReadOnlyList<PartsPriceDecision>>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task Hold_keeps_the_reviewers_draft_price()
+    {
+        var line = Line(1, 10m);
+        var svc = Service(new[] { line }, out var repo);
+        IReadOnlyList<PartsPriceDecision>? saved = null;
+        repo.Setup(r => r.UpsertAsync(It.IsAny<IReadOnlyList<PartsPriceDecision>>(), It.IsAny<CancellationToken>()))
+            .Callback((IReadOnlyList<PartsPriceDecision> d, CancellationToken _) => saved = d)
+            .Returns(Task.CompletedTask);
+
+        var result = await svc.DecideAsync(DocId,
+            new[] { new PriceReviewDecisionRequestLine(line.Id, "held", 55000m, "check with supplier") },
+            "rev", CancellationToken.None);
+
+        Assert.Empty(result!.Errors);
+        Assert.Equal("held", saved!.Single().Status);
+        Assert.Equal(55000m, saved!.Single().FinalPl03);
     }
 
     [Fact]

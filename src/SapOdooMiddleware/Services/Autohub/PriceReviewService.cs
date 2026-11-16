@@ -39,7 +39,48 @@ public interface IPriceReviewService
     /// priced exactly as Bulk Create prices it. Null when the document does not exist. Writes nothing.
     /// </summary>
     Task<PriceReviewDocument?> GetReviewAsync(Guid documentId, CancellationToken ct);
+
+    /// <summary>
+    /// Live recalculation for prices a reviewer is typing: for each line, the PL05 the engine derives
+    /// from the given PL03 (or the calculated PL03 when none is given), the margin and the flags.
+    /// Writes nothing. Null when the document does not exist.
+    /// </summary>
+    Task<PriceReviewPreviewResult?> PreviewAsync(
+        Guid documentId, IReadOnlyList<PriceReviewPreviewRequestLine> lines, CancellationToken ct);
+
+    /// <summary>
+    /// Saves approve/hold decisions. Prices are recomputed here from the current figures, never taken
+    /// from the caller. All-or-nothing: if any line is invalid nothing is saved and every problem is
+    /// returned. Null when the document does not exist.
+    /// </summary>
+    Task<PriceReviewDecideResult?> DecideAsync(
+        Guid documentId, IReadOnlyList<PriceReviewDecisionRequestLine> lines, string reviewedBy, CancellationToken ct);
+
+    /// <summary>Removes a line's saved decision so it is unreviewed again. False when there was none.</summary>
+    Task<bool> ClearDecisionAsync(Guid documentId, Guid lineId, CancellationToken ct);
 }
+
+/// <summary>One line to recalculate: PL03 null means "the calculated PL03".</summary>
+public sealed record PriceReviewPreviewRequestLine(Guid LineId, decimal? Pl03);
+
+/// <summary>A recalculated line. Error is set when the line is not in the review or cannot be priced.</summary>
+public sealed record PriceReviewPreviewLine(
+    Guid LineId, decimal? Pl01, decimal? FormulaPl03, decimal? Pl03, decimal? Pl05, decimal? Margin,
+    bool ChangedFromFormula, IReadOnlyList<PriceReviewFlag> Flags, string? Error);
+
+public sealed record PriceReviewPreviewResult(IReadOnlyList<PriceReviewPreviewLine> Lines);
+
+/// <summary>
+/// One decision to save. Status is "approved" or "held". PL03 null means "the calculated PL03";
+/// a PL03 different from the calculated one needs a Reason.
+/// </summary>
+public sealed record PriceReviewDecisionRequestLine(Guid LineId, string Status, decimal? Pl03, string? Reason);
+
+/// <summary>A line that could not be saved, and why.</summary>
+public sealed record PriceReviewDecisionError(Guid LineId, string Error);
+
+/// <summary>Saved = number of decisions written; Errors non-empty means nothing was saved.</summary>
+public sealed record PriceReviewDecideResult(int Saved, IReadOnlyList<PriceReviewDecisionError> Errors, PriceReviewDocument? Review);
 
 /// <summary>
 /// Builds the read-only price review for an Autohub invoice (price review step 1). Uses the same cost
@@ -128,7 +169,8 @@ public sealed class PriceReviewService : IPriceReviewService
             // decision sets one, otherwise the engine's.
             var flags = quote is null
                 ? (IReadOnlyList<PriceReviewFlag>)Array.Empty<PriceReviewFlag>()
-                : FlagsFor(quote, decision is { Stale: false, FinalPl03: { } f } ? f : quote.Retail, line.Brand);
+                : FlagsFor(quote.Cost, decision is { Stale: false, FinalPl03: { } f } ? f : quote.Retail,
+                    quote.FloorApplied, quote.Floor, quote.RatioBrand, line.Brand);
 
             result.Add(new PriceReviewLine(
                 LineId: line.Id, LineNumber: line.LineNumber, ArticleNumber: line.SupplierArticleNumber,
@@ -146,6 +188,132 @@ public sealed class PriceReviewService : IPriceReviewService
 
         return new PriceReviewDocument(documentId, currency, rate, forexError, Summarise(result), result);
     }
+
+    // ── Live recalculation ──────────────────────────────────────────────────────
+
+    public async Task<PriceReviewPreviewResult?> PreviewAsync(
+        Guid documentId, IReadOnlyList<PriceReviewPreviewRequestLine> lines, CancellationToken ct)
+    {
+        var review = await GetReviewAsync(documentId, ct);
+        if (review is null) return null;
+        var byId = review.Lines.ToDictionary(l => l.LineId);
+
+        var result = new List<PriceReviewPreviewLine>(lines.Count);
+        foreach (var req in lines)
+        {
+            if (!byId.TryGetValue(req.LineId, out var line))
+            {
+                result.Add(PreviewError(req.LineId, NotInReview));
+                continue;
+            }
+            if (line.Error is not null || line.Pl01 is null || line.FormulaPl03 is null)
+            {
+                result.Add(PreviewError(req.LineId, line.Error ?? "Line cannot be priced."));
+                continue;
+            }
+            if (req.Pl03 is <= 0m)
+            {
+                result.Add(PreviewError(req.LineId, "PL03 must be greater than zero."));
+                continue;
+            }
+            var priced = await PriceAtAsync(line, req.Pl03, ct);
+            result.Add(new PriceReviewPreviewLine(
+                line.LineId, line.Pl01, line.FormulaPl03, priced.Pl03, priced.Pl05, MarginOf(line.Pl01.Value, priced.Pl03),
+                priced.Changed,
+                FlagsFor(line.Pl01.Value, priced.Pl03, line.FloorApplied, line.Floor, line.RatioBrand, line.Brand),
+                null));
+        }
+        return new PriceReviewPreviewResult(result);
+    }
+
+    private static PriceReviewPreviewLine PreviewError(Guid lineId, string error) =>
+        new(lineId, null, null, null, null, null, false, Array.Empty<PriceReviewFlag>(), error);
+
+    private const string NotInReview =
+        "Line is not on this document or is not waiting to be created (status must be create_new or create_failed).";
+
+    /// <summary>
+    /// The prices a line would be created at for a given PL03: the reviewer's PL03 verbatim with PL05
+    /// re-derived by the engine's wholesale rule (as Bulk Create does for a PL03 override), or the
+    /// calculated PL03/PL05 when no PL03 is given or it equals the calculated one.
+    /// </summary>
+    private async Task<(decimal Pl03, decimal Pl05, bool Changed)> PriceAtAsync(
+        PriceReviewLine line, decimal? pl03, CancellationToken ct)
+    {
+        var formula = line.FormulaPl03!.Value;
+        if (pl03 is null || pl03.Value == formula)
+            return (formula, line.FormulaPl05 ?? await _pricing.DeriveWholesaleAsync(line.Pl01!.Value, formula, ct), false);
+        return (pl03.Value, await _pricing.DeriveWholesaleAsync(line.Pl01!.Value, pl03.Value, ct), true);
+    }
+
+    // ── Decisions ───────────────────────────────────────────────────────────────
+
+    public async Task<PriceReviewDecideResult?> DecideAsync(
+        Guid documentId, IReadOnlyList<PriceReviewDecisionRequestLine> lines, string reviewedBy, CancellationToken ct)
+    {
+        var review = await GetReviewAsync(documentId, ct);
+        if (review is null) return null;
+        var byId = review.Lines.ToDictionary(l => l.LineId);
+
+        var errors = new List<PriceReviewDecisionError>();
+        var rows = new List<PartsPriceDecision>(lines.Count);
+        var now = DateTime.UtcNow;
+
+        if (lines.Count == 0)
+            errors.Add(new PriceReviewDecisionError(Guid.Empty, "No lines to save."));
+        foreach (var dup in lines.GroupBy(l => l.LineId).Where(g => g.Count() > 1))
+            errors.Add(new PriceReviewDecisionError(dup.Key, "Line appears more than once."));
+
+        foreach (var req in lines.DistinctBy(l => l.LineId))
+        {
+            var status = (req.Status ?? "").Trim().ToLowerInvariant();
+            if (status is not ("approved" or "held"))
+            {
+                errors.Add(new(req.LineId, "Status must be 'approved' or 'held'."));
+                continue;
+            }
+            if (!byId.TryGetValue(req.LineId, out var line))
+            {
+                errors.Add(new(req.LineId, NotInReview));
+                continue;
+            }
+            if (line.Error is not null || line.Pl01 is null || line.FormulaPl03 is null)
+            {
+                errors.Add(new(req.LineId, $"Line cannot be priced: {line.Error ?? "no price"}"));
+                continue;
+            }
+            if (req.Pl03 is <= 0m)
+            {
+                errors.Add(new(req.LineId, "PL03 must be greater than zero."));
+                continue;
+            }
+
+            var priced = await PriceAtAsync(line, req.Pl03, ct);
+            var reason = string.IsNullOrWhiteSpace(req.Reason) ? null : req.Reason.Trim();
+            if (priced.Changed && reason is null)
+            {
+                errors.Add(new(req.LineId, "A reason is required when PL03 differs from the calculated price."));
+                continue;
+            }
+
+            rows.Add(new PartsPriceDecision(
+                LineId: line.LineId, DocumentId: documentId, Status: status,
+                UnitPriceForeign: line.UnitPriceForeign, DiscountPct: line.DiscountPct,
+                Currency: review.Currency, ForexRate: review.ForexRate, CifTzs: line.CifTzs,
+                Pl01: line.Pl01, FormulaPl03: line.FormulaPl03, FormulaPl05: line.FormulaPl05,
+                FinalPl03: priced.Pl03, FinalPl05: priced.Pl05, Reason: reason,
+                ReviewedBy: reviewedBy, ReviewedAt: now));
+        }
+
+        if (errors.Count > 0)
+            return new PriceReviewDecideResult(0, errors, null);
+
+        await _decisions.UpsertAsync(rows, ct);
+        return new PriceReviewDecideResult(rows.Count, errors, await GetReviewAsync(documentId, ct));
+    }
+
+    public Task<bool> ClearDecisionAsync(Guid documentId, Guid lineId, CancellationToken ct) =>
+        _decisions.DeleteAsync(documentId, lineId, ct);
 
     // ── Cost (mirrors PartsItemProvisioningService) ────────────────────────────
 
@@ -167,20 +335,21 @@ public sealed class PriceReviewService : IPriceReviewService
 
     // ── Flags ───────────────────────────────────────────────────────────────────
 
-    internal IReadOnlyList<PriceReviewFlag> FlagsFor(PricingQuote quote, decimal pl03, string? brand)
+    internal IReadOnlyList<PriceReviewFlag> FlagsFor(
+        decimal pl01, decimal pl03, bool floorApplied, decimal? floor, string? ratioBrand, string? brand)
     {
         var flags = new List<PriceReviewFlag>();
-        var margin = MarginOf(quote.Cost, pl03);
+        var margin = MarginOf(pl01, pl03);
 
-        if (pl03 <= quote.Cost)
+        if (pl03 <= pl01)
             flags.Add(new("below_cost", "PL03 is at or below the landed cost (PL01)."));
         else if (margin is { } m && m < _settings.PriceReviewMarginLow)
             flags.Add(new("margin_low", $"Margin {m:P0} is below {_settings.PriceReviewMarginLow:P0}."));
         if (margin is { } mh && mh > _settings.PriceReviewMarginHigh)
             flags.Add(new("margin_high", $"Margin {mh:P0} is above {_settings.PriceReviewMarginHigh:P0}."));
-        if (quote.FloorApplied)
-            flags.Add(new("floor_bound", $"The brand's minimum price ({quote.Floor:N0}) set PL03, not the ratio."));
-        if (string.Equals(quote.RatioBrand, "DEFAULT", StringComparison.OrdinalIgnoreCase)
+        if (floorApplied)
+            flags.Add(new("floor_bound", $"The brand's minimum price ({floor:N0}) set PL03, not the ratio."));
+        if (string.Equals(ratioBrand, "DEFAULT", StringComparison.OrdinalIgnoreCase)
             && !string.IsNullOrWhiteSpace(brand)
             && !string.Equals(brand.Trim(), "DEFAULT", StringComparison.OrdinalIgnoreCase))
             flags.Add(new("no_brand_ratio", $"{brand.Trim()} has no ratio of its own; the DEFAULT ratio was used."));
