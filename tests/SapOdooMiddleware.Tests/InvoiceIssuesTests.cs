@@ -20,10 +20,12 @@ public class InvoiceIssuesTests
         string? source = "rapidapi_tecdoc_live", bool itemData = true, bool confirmationRequired = false,
         bool confirmed = false, bool needsReview = false, string? verdict = null,
         string? marqueResolved = null, string? marquePrefix = null, string? skuPrefix = "MB",
-        string? suggested = null, bool promo = false, string? error = null) =>
+        string? suggested = null, bool promo = false, string? error = null,
+        string? fit = null, string[]? oems = null, string? topCandidate = "BM") =>
         new(id ?? Guid.NewGuid(), n, $"ART{n}", $"Part {n}", "VIKA", qty, price, promo, status, error,
             source, itemData, confirmationRequired, confirmed, needsReview, verdict, "Generator", "BOSCH",
-            marqueResolved, marquePrefix, "BM", skuPrefix, 106, suggested, "VIKA", null, null, "1234", "TOPRAN");
+            marqueResolved, marquePrefix, topCandidate, skuPrefix, 106, suggested, "VIKA", null, null, "1234", "TOPRAN",
+            OemNumbers: oems, FitForAuto: fit);
 
     private static string Next(PartsLineState l, LinePriceState? p = null) => LineIssueClassifier.Classify(l, p).NextAction;
 
@@ -88,6 +90,70 @@ public class InvoiceIssuesTests
     {
         Assert.Equal("ready", Next(L("create_new", needsReview: true, confirmationRequired: true, confirmed: true)));
         Assert.Equal("queue", Next(L("pending", price: null, promo: true)));
+    }
+
+    // ── Marque rules (fix after live use: real prefixes no longer sent to "Pick the marque") ──
+
+    [Theory]
+    [InlineData("A4633307001-SK2", "MB")]       // supplier suffix ignored
+    [InlineData("A 463 330 70 01", "MB")]
+    [InlineData("5Q0 121 251 EL", "VAG")]        // spaced VAG number
+    [InlineData("11427953129", "BM")]
+    [InlineData("LR110708 LR079950", "LR")]      // cell with two numbers
+    [InlineData("WHT005154", "VAG")]
+    [InlineData("12345", null)]
+    public void OEM_structure_names_the_marque(string oem, string? marque)
+    {
+        Assert.Equal(marque, MarqueEvidence.FromOem(oem));
+    }
+
+    [Fact]
+    public void Fitment_names_the_marques()
+    {
+        Assert.Equal(new[] { "BM" }, MarqueEvidence.FromFitment("BMW 3 (E90) 320 d (VC11) BMW X1 (E84)"));
+        Assert.Equal(new[] { "MB" }, MarqueEvidence.FromFitment("MERCEDES-BENZ SPRINTER 3,5-t Bus (B906)"));
+        Assert.Equal(new[] { "LR", "VAG" }, MarqueEvidence.FromFitment("LAND ROVER DEFENDER; VW TOUAREG").OrderBy(x => x));
+        Assert.Empty(MarqueEvidence.FromFitment(null));
+    }
+
+    [Fact]
+    public void A_real_prefix_confirmed_by_fit_or_OEM_needs_nothing_even_if_the_DGX_vote_was_unsure()
+    {
+        // BMW fit, BM prefix, DGX unsure: ready.
+        Assert.Equal("ready", Next(L("create_new", skuPrefix: "BM", marqueResolved: "false", topCandidate: "VAG",
+            fit: "BMW 3 (E90) 320 d")));
+        // The reported line 64: MB prefix, DGX unsure (guess VAG), Mercedes OEM with a supplier suffix.
+        Assert.Equal("ready", Next(L("create_new", skuPrefix: "MB", marqueResolved: "false", topCandidate: "VAG",
+            oems: new[] { "A4633307001-SK2" })));
+    }
+
+    [Fact]
+    public void A_real_prefix_that_nothing_confirms_asks_to_confirm_it_not_to_pick_one()
+    {
+        var unsure = LineIssueClassifier.Classify(L("create_new", skuPrefix: "MB", marqueResolved: "false", topCandidate: "VAG"), null);
+        Assert.Equal("confirm_marque", unsure.NextAction);
+        Assert.Contains("Will be created under MB (Mercedes-Benz)", unsure.Issues[0].Text);
+        Assert.Contains("best guess VAG", unsure.Issues[0].Text);
+
+        var contradicted = LineIssueClassifier.Classify(L("create_new", skuPrefix: "MB", fit: "BMW 5 (F10)"), null);
+        Assert.Equal("confirm_marque", contradicted.NextAction);
+        Assert.Contains("points to BM (BMW)", contradicted.Issues[0].Text);
+
+        // Kept by the operator (resolved true with the same prefix): settled.
+        Assert.Equal("ready", Next(L("create_new", skuPrefix: "MB", marqueResolved: "true", marquePrefix: "MB")));
+        // No signal at all (older lines): nothing to do.
+        Assert.Equal("ready", Next(L("create_new", skuPrefix: "MB")));
+    }
+
+    [Fact]
+    public void Pick_the_marque_suggests_the_lines_own_evidence_before_the_DGX_guess()
+    {
+        var r = LineIssueClassifier.Classify(L("pending", skuPrefix: "GEN", marqueResolved: "false", topCandidate: "VAG",
+            fit: "BMW X5 (E70)"), null);
+        Assert.Equal("assign_marque", r.NextAction);
+        Assert.Contains("suggested: BM, from the part's fit / OEM number", r.Issues[0].Text);
+        Assert.Equal("BM", LineIssueClassifier.SuggestMarque(L("pending", skuPrefix: "GEN", topCandidate: "VAG", fit: "BMW X5")));
+        Assert.Equal("VAG", LineIssueClassifier.SuggestMarque(L("pending", skuPrefix: "GEN", topCandidate: "VAG")));
     }
 
     // ── Service ───────────────────────────────────────────────────────────────
@@ -224,6 +290,22 @@ public class InvoiceIssuesTests
         var assign = await svc.ApplyAsync(DocId, new IssueBulkRequest("assign_marque", new[] { b.Id, a.Id }, "BM", 105), "me", default);
         Assert.Equal(new[] { true, false }, assign!.Results.Select(x => x.Ok));
         Assert.Contains("could not resolve", assign.Results[1].Error);
+    }
+
+    [Fact]
+    public async Task Keep_marque_settles_lines_with_a_real_prefix()
+    {
+        var rig = new Rig();
+        var mb = L("create_new", n: 1, skuPrefix: "MB", marqueResolved: "false");
+        var gen = L("pending", n: 2, skuPrefix: "GEN", marqueResolved: "false");
+        rig.State = new() { mb, gen };
+        rig.Lines.Setup(r => r.KeepCurrentMarqueAsync(DocId, It.IsAny<IReadOnlyList<Guid>>(), "Mohamed", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { mb.Id });
+
+        var r = await rig.Build().ApplyAsync(DocId, new IssueBulkRequest("keep_marque", new[] { mb.Id, gen.Id }, null, null), "Mohamed", default);
+
+        Assert.Equal(new[] { true, false }, r!.Results.Select(x => x.Ok));
+        Assert.Contains("no marque to keep", r.Results[1].Error);
     }
 
     [Fact]

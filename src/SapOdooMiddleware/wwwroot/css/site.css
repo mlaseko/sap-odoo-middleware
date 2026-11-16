@@ -339,3 +339,52 @@ select.cell-input { appearance: auto; }
     background: var(--surface-2); color: var(--text); }
 .inv-tab .tab-count.warn { background: rgba(251,146,60,.18); color: #fdba74; }
 .inv-progress { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+
+/* ---- Autohub "choose the part" (donor) window — wwwroot/js/autohub/donor-picker.js ---------- */
+/* Donor-swap modal: wider window + card-per-candidate so every field (incl. the full OEM list) shows. */
+.modal.modal-wide { max-width: min(980px, 96vw); width: min(980px, 96vw); }
+.dc-title { margin: 0 0 4px; }
+.donor-head-note { color: var(--muted); font-size: 13px; margin: 0 0 14px; line-height: 1.5; }
+.donor-list { max-height: 64vh; overflow-y: auto; padding-right: 4px; display:flex; flex-direction:column; gap:10px; }
+.dc { display:flex; gap:14px; align-items:flex-start; padding:12px 14px; border:1px solid var(--border); border-radius:10px; cursor:pointer; transition: border-color .12s, background .12s; }
+.dc:hover { background: rgba(255,255,255,.03); }
+.dc:has(> input:checked) { border-color: var(--primary, #7c6cff); background: rgba(124,108,255,.09); box-shadow: 0 0 0 1px var(--primary, #7c6cff) inset; }
+.dc > input { margin-top:5px; flex:0 0 auto; accent-color: var(--primary, #7c6cff); }
+.dc-wrong { opacity:.82; }
+.donor-img { flex:0 0 auto; width:60px; height:60px; display:flex; align-items:center; justify-content:center; background:#fff; border-radius:8px; overflow:hidden; border:1px solid var(--border); }
+.donor-img img { width:60px; height:60px; object-fit:contain; }
+.donor-img.noimg::after { content:'no image'; font-size:9px; color:#999; }
+.dc-main { flex:1 1 auto; min-width:0; }
+.dc-top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.dc-art { font-weight:700; font-size:14px; }
+.dc-cur { font-size:11px; color: var(--muted); font-style:italic; }
+.dc-chip { display:inline-block; padding:1px 7px; border-radius:5px; font-size:11px; }
+.dc-chip-code { background: rgba(255,255,255,.08); color: var(--muted); font-family: ui-monospace, monospace; }
+.dc-verdict { font-size:10px; font-weight:700; letter-spacing:.4px; padding:2px 9px; border-radius:20px; }
+.dc-verdict.v-match { background: rgba(52,199,89,.16); color:#37c85a; }
+.dc-verdict.v-unc   { background: rgba(255,204,0,.16); color:#e6b800; }
+.dc-verdict.v-diff  { background: rgba(255,69,58,.16); color:#ff6961; }
+.dc-hand { font-size:13px; }
+.dc-name { margin-top:6px; font-size:13px; }
+.dc-sup { color: var(--muted); }
+.dc-meta { margin-top:3px; font-size:11px; color: var(--muted); }
+.dc-oems { margin-top:9px; display:flex; gap:8px; align-items:baseline; }
+.dc-oems-lbl { flex:0 0 auto; font-size:11px; font-weight:700; color: var(--text-strong); text-transform:uppercase; letter-spacing:.4px; }
+.dc-oems-wrap { display:flex; flex-wrap:wrap; gap:4px; max-height:108px; overflow:auto; }
+.oem-chip { font-family: ui-monospace, monospace; font-size:11px; padding:2px 7px; border-radius:5px; background: rgba(120,140,255,.14); color:#aab6ff; white-space:nowrap; }
+.oem-more { font-size:11px; padding:2px 4px; color: var(--muted); align-self:center; }
+.dc-xref { margin-top:7px; font-size:11px; color: var(--muted); opacity:.85; }
+.dc-dim { color: var(--muted); }
+/* Find-more (extended TecDoc search) additions */
+.donor-more-bar { display:flex; align-items:center; gap:10px; margin:0 0 12px; }
+#donor-more-status { font-size:12px; }
+.dc-chip-api { background: rgba(120,140,255,.18); color:#aab6ff; font-weight:600; }
+.dc-oem-expand { flex:0 0 auto; align-self:flex-start; background:none; border:1px solid var(--border); color: var(--muted);
+                 font-size:11px; padding:2px 8px; border-radius:5px; cursor:pointer; }
+.dc-oem-expand:hover { color: var(--text-strong); border-color: var(--primary, #7c6cff); }
+.dc-oem-expand:disabled { opacity:.6; cursor:default; }
+
+/* Placeholder where a part has no picture, or its picture cannot be loaded. */
+.no-pic { display: inline-flex; align-items: center; justify-content: center; min-width: 120px; min-height: 60px; padding: 6px 10px;
+          border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; float: right; margin-left: 8px; }
+.line-detail .no-pic { float: none; }

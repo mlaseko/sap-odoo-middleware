@@ -38,11 +38,78 @@ public static class LineIssueClassifier
     public static readonly IReadOnlyList<string> Order = new[]
     {
         "create_failed", "fix_data", "confirm_match", "check_part", "manual", "awaiting_enrichment",
-        "assign_marque", "accept_marque", "sku_range_full", "confirm_borrow", "queue", "price",
+        "assign_marque", "accept_marque", "confirm_marque", "sku_range_full", "confirm_borrow", "queue", "price",
     };
 
     private static readonly Dictionary<string, int> Rank =
         Order.Select((code, i) => (code, i)).ToDictionary(x => x.code, x => x.i);
+
+    /// <summary>
+    /// The marque rules. The item is created under SkuPrefix; the DGX's manufacturer vote (MarqueResolved /
+    /// MarqueResolvedPrefix) and the line's own evidence (fitment makes, OEM-number structure) check it.
+    /// <list type="bullet">
+    /// <item>No usable prefix (blank / GEN), or held for a marque: accept_marque when the DGX resolved one,
+    /// otherwise assign_marque, suggesting the evidence's marque before the DGX's guess.</item>
+    /// <item>A real prefix that the evidence or the DGX confirms: nothing to do.</item>
+    /// <item>A real prefix that nothing confirms while some signal exists (an unsure or different DGX vote,
+    /// or evidence pointing elsewhere): confirm_marque. Bulk Create would still create it under the prefix.</item>
+    /// <item>A real prefix with no signal at all (older lines): nothing to do.</item>
+    /// </list>
+    /// </summary>
+    private static void AddMarqueIssue(PartsLineState l, Action<string, string> add)
+    {
+        var prefixMissing = PartsItemProvisioningService.IsUnresolvedPrefix(l.SkuPrefix);
+        var resolvedTrue = string.Equals(l.MarqueResolved, "true", StringComparison.OrdinalIgnoreCase);
+        var dgxPrefix = string.IsNullOrWhiteSpace(l.MarqueResolvedPrefix) ? null : l.MarqueResolvedPrefix.Trim().ToUpperInvariant();
+        var evidence = EvidenceOf(l);
+        var suggestion = SuggestMarque(l);
+
+        if (prefixMissing || l.ReviewStatus == "needs_manufacturer")
+        {
+            if (!prefixMissing)
+                add("assign_marque", $"Held for a marque: confirm {l.SkuPrefix!.Trim().ToUpperInvariant()} or pick another so it can be created.");
+            else if (!l.HasItemData && l.ReviewStatus != "needs_manufacturer")
+                return;   // not looked up yet: nothing to decide
+            else if (resolvedTrue && dgxPrefix is not null)
+                add("accept_marque", $"The DGX worked out the marque as {dgxPrefix} ({MarqueEvidence.Label(dgxPrefix)}): confirm it.");
+            else
+                add("assign_marque", "The manufacturer (marque) could not be worked out: pick it so an item code can be generated" +
+                    (suggestion is null ? "." : $" (suggested: {suggestion}, {SuggestionSource(l, suggestion)})."));
+            return;
+        }
+
+        var prefix = l.SkuPrefix!.Trim().ToUpperInvariant();
+        var evidenceAgrees = evidence.Contains(prefix);
+        var dgxAgrees = resolvedTrue && dgxPrefix == prefix;
+        if (evidenceAgrees || dgxAgrees) return;
+        if (l.MarqueResolved is null && evidence.Count == 0) return;   // no signal at all
+
+        string why;
+        if (evidence.Count > 0)
+            why = $"the part's fit / OEM number points to {string.Join(" or ", evidence.Select(e => $"{e} ({MarqueEvidence.Label(e)})"))}";
+        else if (resolvedTrue && dgxPrefix is not null)
+            why = $"the DGX's marque check says {dgxPrefix}";
+        else
+            why = "nothing confirms it (no vehicle fit; the DGX's marque check was unsure" +
+                  (string.IsNullOrWhiteSpace(l.MarqueTopCandidate) ? ")" : $", best guess {l.MarqueTopCandidate})");
+        add("confirm_marque", $"Will be created under {prefix} ({MarqueEvidence.Label(prefix)}), but {why}. Keep {prefix}, or assign another.");
+    }
+
+    private static IReadOnlySet<string> EvidenceOf(PartsLineState l) =>
+        MarqueEvidence.For(l.FitForAuto, (l.OemNumbers ?? Array.Empty<string>()).Concat(l.PartOems ?? Array.Empty<string>()));
+
+    /// <summary>The marque to suggest: the line's own evidence when it names one, else the DGX's resolved marque, else its best guess.</summary>
+    public static string? SuggestMarque(PartsLineState l)
+    {
+        var evidence = EvidenceOf(l);
+        if (evidence.Count == 1) return evidence.First();
+        if (string.Equals(l.MarqueResolved, "true", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(l.MarqueResolvedPrefix))
+            return l.MarqueResolvedPrefix.Trim().ToUpperInvariant();
+        return string.IsNullOrWhiteSpace(l.MarqueTopCandidate) ? null : l.MarqueTopCandidate.Trim().ToUpperInvariant();
+    }
+
+    private static string SuggestionSource(PartsLineState l, string suggestion) =>
+        EvidenceOf(l).Contains(suggestion) ? "from the part's fit / OEM number" : "the DGX's best guess";
 
     public static LineNextAction Classify(PartsLineState l, LinePriceState? price)
     {
@@ -85,15 +152,7 @@ public static class LineIssueClassifier
         if (l.ReviewStatus == "pending" && l.EnrichmentSource is null && !l.IsPromotional)
             Add("awaiting_enrichment", "Waiting for the DGX to look the part up.");
 
-        var prefixMissing = PartsItemProvisioningService.IsUnresolvedPrefix(l.SkuPrefix);
-        var resolvedTrue = string.Equals(l.MarqueResolved, "true", StringComparison.OrdinalIgnoreCase);
-        if (l.ReviewStatus == "needs_manufacturer"
-            || string.Equals(l.MarqueResolved, "false", StringComparison.OrdinalIgnoreCase)
-            || (l.HasItemData && prefixMissing && !resolvedTrue))
-            Add("assign_marque", "The manufacturer (marque) could not be worked out: pick it so an item code can be generated" +
-                (string.IsNullOrWhiteSpace(l.MarqueTopCandidate) ? "." : $" (DGX's best guess: {l.MarqueTopCandidate})."));
-        else if (resolvedTrue && prefixMissing)
-            Add("accept_marque", $"The DGX resolved the marque as {l.MarqueResolvedPrefix ?? "?"}: confirm it.");
+        AddMarqueIssue(l, Add);
 
         if (l.ReviewStatus == "prefix_exhausted")
             Add("sku_range_full", $"No item codes left for prefix {l.SkuPrefix ?? "?"}: extend the SKU range, then create again.");
@@ -180,7 +239,7 @@ public sealed record FinishSummary(
     int PartNotChecked,
     int StillOpen, IReadOnlyList<FinishCount> StillOpenBy, int SkippableOpen,
     bool CanComplete, IReadOnlyList<FinishCount> CompleteBlockers,
-    Guid? RunningJobId);
+    Guid? RunningJobId, int MarqueNotConfirmed = 0);
 
 /// <summary>
 /// An invoice's progress for the invoice list. Done = created + matched + skipped; Ready = queued with
@@ -191,6 +250,12 @@ public sealed record InvoiceProgress(int Total, int Done, int Ready, int Attenti
 
 public interface IInvoiceIssuesService
 {
+    /// <summary>
+    /// Marque decisions left on the invoice, by the Issues rules: ToConfirm = accept_marque + confirm_marque,
+    /// ToPick = assign_marque. Shown in the invoice page's review bar.
+    /// </summary>
+    Task<(int ToConfirm, int ToPick)> GetMarqueCountsAsync(Guid documentId, CancellationToken ct);
+
     /// <summary>Progress of several invoices in one query (no price review: prices are not considered).</summary>
     Task<IReadOnlyDictionary<Guid, InvoiceProgress>> GetProgressAsync(IReadOnlyList<Guid> documentIds, CancellationToken ct);
 
@@ -225,7 +290,8 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
             ["manual"] = ("Needs manual handling", "No usable catalogue match. Match it to an SAP item, choose a part, or skip it.", new[] { "queue", "skip" }),
             ["awaiting_enrichment"] = ("Waiting for lookup", "The DGX has not looked these parts up yet. They update automatically.", Array.Empty<string>()),
             ["assign_marque"] = ("Pick the marque", "The manufacturer could not be worked out. Pick it so an item code can be generated.", new[] { "assign_marque", "skip" }),
-            ["accept_marque"] = ("Confirm the marque", "The DGX resolved the manufacturer. Confirm it, or assign another.", new[] { "accept_marque", "assign_marque" }),
+            ["accept_marque"] = ("Accept the DGX marque", "The DGX worked out the manufacturer. Accept it, or assign another.", new[] { "accept_marque", "assign_marque" }),
+            ["confirm_marque"] = ("Confirm the marque", "These will be created under the marque shown, but nothing confirms it. Keep it, or assign another.", new[] { "keep_marque", "assign_marque" }),
             ["sku_range_full"] = ("SKU range full", "No item codes left for the prefix. Extend the SKU range, then create again.", Array.Empty<string>()),
             ["confirm_borrow"] = ("Confirm borrowed part", "Details are borrowed from another supplier's part. Confirm before creating.", new[] { "confirm_and_queue", "skip" }),
             ["queue"] = ("Ready to queue", "Looked up with no problems. Mark them to create, or skip them.", new[] { "queue", "skip" }),
@@ -234,7 +300,7 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
 
     private static readonly HashSet<string> Actions = new(StringComparer.Ordinal)
     {
-        "skip", "queue", "confirm_and_queue", "use_suggested_match", "accept_marque", "assign_marque", "retry_create",
+        "skip", "queue", "confirm_and_queue", "use_suggested_match", "accept_marque", "keep_marque", "assign_marque", "retry_create",
     };
 
     private readonly IStagingPartsDocumentRepository _docs;
@@ -297,8 +363,7 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
         LineId: l.Id, LineNumber: l.LineNumber, ArticleNumber: l.SupplierArticleNumber, Description: l.Description,
         Brand: l.Brand, Quantity: l.Quantity, UnitPriceForeign: l.UnitPriceForeign, ReviewStatus: l.ReviewStatus,
         NextAction: next.NextAction, Issues: next.Issues,
-        MarqueSuggestion: string.Equals(l.MarqueResolved, "true", StringComparison.OrdinalIgnoreCase)
-            ? l.MarqueResolvedPrefix : l.MarqueTopCandidate,
+        MarqueSuggestion: LineIssueClassifier.SuggestMarque(l),
         SkuPrefix: l.SkuPrefix, ItemGroupCode: l.ItemGroupCode,
         SuggestedItemCode: l.SuggestedDonorItemCode, MatchedPartName: l.SelectedName, MatchedPartSupplier: l.SelectedSupplier,
         PriceState: price?.State, Pl03: price?.Pl03, Pl03Approved: price?.Pl03Approved ?? false,
@@ -322,6 +387,18 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
             };
         }
         return map;
+    }
+
+    public async Task<(int ToConfirm, int ToPick)> GetMarqueCountsAsync(Guid documentId, CancellationToken ct)
+    {
+        int confirm = 0, pick = 0;
+        foreach (var l in await _lines.ListAsync(documentId, ct))
+        {
+            var issues = LineIssueClassifier.Classify(l, null).Issues;
+            if (issues.Any(i => i.Code == "assign_marque")) pick++;
+            else if (issues.Any(i => i.Code is "accept_marque" or "confirm_marque")) confirm++;
+        }
+        return (confirm, pick);
     }
 
     // ── Invoice list progress ───────────────────────────────────────────────────
@@ -367,7 +444,7 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
         var reviewed = review?.Lines.ToDictionary(r => r.LineId) ?? new Dictionary<Guid, PriceReviewLine>();
         var required = _pricing.RequirePriceReview;
 
-        int approvedCustom = 0, approvedCalculated = 0, unreviewed = 0, held = 0, notApproved = 0, partNotChecked = 0;
+        int approvedCustom = 0, approvedCalculated = 0, unreviewed = 0, held = 0, notApproved = 0, partNotChecked = 0, marqueNotConfirmed = 0;
         var blocked = new Dictionary<string, int>();
         var open = new Dictionary<string, int>();
         foreach (var l in lines)
@@ -393,6 +470,7 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
             else if (rl?.Decision is { Stale: false, Status: "approved" }) approvedCalculated++;
             else unreviewed++;
             if (next.Issues.Any(i => i.Code == "check_part")) partNotChecked++;
+            if (next.Issues.Any(i => i.Code == "confirm_marque")) marqueNotConfirmed++;
         }
 
         FinishCount Group(string code, int n) => new(code, Groups.TryGetValue(code, out var g) ? g.Title : code, n,
@@ -432,7 +510,8 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
             SkippableOpen: lines.Count(l => l.ReviewStatus is "pending" or "needs_manual"),
             CanComplete: doc.Status == "extracted" && completeBlockers.Count == 0,
             CompleteBlockers: completeBlockers,
-            RunningJobId: _jobs.GetRunningForDocument(documentId)?.JobId);
+            RunningJobId: _jobs.GetRunningForDocument(documentId)?.JobId,
+            MarqueNotConfirmed: marqueNotConfirmed);
     }
 
     // ── Bulk ───────────────────────────────────────────────────────────────────
@@ -528,6 +607,16 @@ public sealed class InvoiceIssuesService : IInvoiceIssuesService
                     results.Add(updated.Contains(l.Id)
                         ? new(l.Id, true, null, "create_new")
                         : Fail(l.Id, "No DGX-resolved marque to accept on this line."));
+                break;
+            }
+
+            case "keep_marque":
+            {
+                var kept = (await _lines.KeepCurrentMarqueAsync(documentId, present.Select(l => l.Id).ToList(), requestedBy, ct)).ToHashSet();
+                foreach (var l in present)
+                    results.Add(kept.Contains(l.Id)
+                        ? new(l.Id, true, null, l.ReviewStatus)
+                        : Fail(l.Id, "The line has no marque to keep (assign one instead)."));
                 break;
             }
 

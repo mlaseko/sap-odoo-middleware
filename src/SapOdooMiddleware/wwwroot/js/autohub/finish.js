@@ -66,6 +66,9 @@
         if (s.part_not_checked > 0)
             html += '<p class="sub">⚠ ' + s.part_not_checked + ' of them have a matched part that was never confirmed. ' +
                 '<a href="' + page + '/issues#group=check_part">Check them first →</a></p>';
+        if (s.marque_not_confirmed > 0)
+            html += '<p class="sub">⚠ ' + s.marque_not_confirmed + ' of them will be created under a marque nothing confirms. ' +
+                '<a href="' + page + '/issues#group=confirm_marque">Confirm them first →</a></p>';
         html += '<p class="sub">' + (s.require_price_review
             ? 'Price review is required: only approved lines are created.'
             : 'Lines approved in Price review use their approved PL03; held lines are skipped; lines not reviewed use the calculated PL03.') + '</p>';

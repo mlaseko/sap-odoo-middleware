@@ -25,7 +25,7 @@
     const NEXT_LABEL = {
         create_failed: 'Creation failed', fix_data: 'Missing price / quantity', confirm_match: 'Confirm SAP match',
         check_part: 'Check the matched part', manual: 'Needs manual handling', awaiting_enrichment: 'Waiting for lookup',
-        assign_marque: 'Pick the marque', accept_marque: 'Confirm the marque', sku_range_full: 'SKU range full',
+        assign_marque: 'Pick the marque', accept_marque: 'Accept the DGX marque', confirm_marque: 'Confirm the marque', sku_range_full: 'SKU range full',
         confirm_borrow: 'Confirm borrowed part', queue: 'Ready to queue', price: 'Price not approved',
         ready: 'Ready to create', created: 'Created', matched: 'Matched', skipped: 'Skipped',
     };
@@ -87,7 +87,7 @@
             });
             const want = nextSel.value || nextSel.dataset.want || '';
             const order = ['create_failed', 'fix_data', 'confirm_match', 'check_part', 'manual', 'awaiting_enrichment', 'assign_marque',
-                'accept_marque', 'sku_range_full', 'confirm_borrow', 'queue', 'price', 'ready', 'created', 'matched', 'skipped'];
+                'accept_marque', 'confirm_marque', 'sku_range_full', 'confirm_borrow', 'queue', 'price', 'ready', 'created', 'matched', 'skipped'];
             nextSel.innerHTML = '<option value="">Anything needed</option>' + order.filter(c => counts[c])
                 .map(c => '<option value="' + c + '">' + esc(NEXT_LABEL[c] || c) + ' (' + counts[c] + ')</option>').join('');
             if (want && counts[want]) nextSel.value = want;
@@ -114,6 +114,7 @@
             '<button type="button" class="btn btn-sm btn-primary" data-act="queue" title="Mark looked-up lines to create">Mark to create</button>' +
             '<button type="button" class="btn btn-sm" data-act="confirm_and_queue" title="Confirm the matched / borrowed part and mark to create">Confirm part</button>' +
             '<button type="button" class="btn btn-sm" data-act="accept_marque" title="Apply the DGX\'s resolved marque">Accept DGX marque</button>' +
+            '<button type="button" class="btn btn-sm" data-act="keep_marque" title="Keep the marque the line will be created under">Keep marque</button>' +
             '<input class="mq" id="ln-mq" placeholder="Marque" maxlength="10"><button type="button" class="btn btn-sm" data-act="assign_marque">Assign marque</button>' +
             '<button type="button" class="btn btn-sm" data-act="skip">Skip</button>' +
             '<button type="button" class="btn btn-sm" data-act="clear">Clear</button>';

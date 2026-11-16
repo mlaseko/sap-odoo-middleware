@@ -60,10 +60,10 @@
             return ({ check_part: 'Part is correct, confirm', confirm_match: 'Create a new item instead',
                       confirm_borrow: 'Confirm borrowed part' })[group] || 'Confirm and mark to create';
         return ({ skip: 'Skip', queue: 'Mark to create', use_suggested_match: 'Use suggested SAP item',
-                  accept_marque: 'Accept DGX marque', assign_marque: 'Assign marque…', retry_create: 'Retry creating',
+                  accept_marque: 'Accept DGX marque', keep_marque: 'Keep this marque', assign_marque: 'Assign marque…', retry_create: 'Retry creating',
                   open_prices: 'Open price review' })[action] || action;
     }
-    const PRIMARY = new Set(['confirm_and_queue', 'queue', 'accept_marque', 'use_suggested_match', 'retry_create']);
+    const PRIMARY = new Set(['confirm_and_queue', 'queue', 'accept_marque', 'keep_marque', 'use_suggested_match', 'retry_create']);
     // Groups where choosing another part (the donor window on the invoice) is a sensible fix.
     const PART_GROUPS = new Set(['check_part', 'manual', 'confirm_borrow', 'confirm_match']);
 
@@ -169,7 +169,7 @@
                     esc(actionLabel(a, g.code)) + '</button>';
             });
             if (PART_GROUPS.has(g.code))
-                actions += '<a class="btn btn-sm" href="' + invoiceUrl + '#line-' + l.line_id + '/donor">Choose another part…</a>';
+                actions += '<button type="button" class="btn btn-sm" data-choose-part="1">Choose another part…</button>';
             if (g.code === 'fix_data')
                 actions += '<a class="btn btn-sm btn-primary" href="' + invoiceUrl + '#line-' + l.line_id + '">Edit the line</a>';
         }
@@ -237,7 +237,10 @@
             const oems = (d.filtered_oems || []).map(o => lineOems.has(normOem(o))
                 ? '<span class="oem-hit" title="Also on the invoice line">' + esc(o) + '</span>' : esc(o)).join(', ');
             const fit = splitFitment(d.fit_for_auto);
-            part = '<div><h4>Matched part</h4>' + (d.image_url ? '<img src="' + esc(d.image_url) + '" alt="">' : '') +
+            const pic = enr.picture_url || d.image_url;
+            part = '<div><h4>Matched part</h4>' + (pic
+                    ? '<img src="' + esc(pic) + '" alt="" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'no-pic\',textContent:\'Picture could not be loaded\'}))">'
+                    : '<div class="no-pic">No picture for this part</div>') +
                 '<table class="kv">' +
                 '<tr><th>Name</th><td>' + esc(d.primary_description || (sel && sel.selected_name) || '–') + '</td></tr>' +
                 (sel && sel.selected_supplier ? '<tr><th>Supplier</th><td>' + esc(sel.selected_supplier) + '</td></tr>' : '') +
@@ -332,6 +335,7 @@
             return;
         }
         const tr = ev.target.closest('tr.is-row');
+        if (ev.target.closest('[data-choose-part]') && tr) { choosePart(tr.dataset.lineId); return; }
         const one = ev.target.closest('[data-one]');
         if (one && tr) {
             if (one.dataset.one === 'assign_marque') {
@@ -370,6 +374,44 @@
         const input = document.getElementById('is-mq-code');
         if (firstSel && firstSel.marque_suggestion && !input.value) input.value = marqueDraft.code = firstSel.marque_suggestion;
         input.focus();
+    }
+
+    // ---- choose another part: the shared donor window (donor-picker.js), opened here ----
+    const overlay = document.getElementById('modal-overlay');
+    const mBody = document.getElementById('modal-body');
+    const mActions = document.getElementById('modal-actions');
+    const mBox = overlay ? overlay.querySelector('.modal') : null;
+    function openModal(html, actions) {
+        if (mBox) mBox.classList.remove('modal-wide');
+        mBody.innerHTML = html;
+        mActions.innerHTML = '';
+        actions.forEach(a => {
+            const b = document.createElement('button');
+            b.className = 'btn ' + (a.primary ? 'btn-primary' : '');
+            b.textContent = a.label;
+            b.onclick = a.onClick;
+            mActions.appendChild(b);
+        });
+        overlay.style.display = 'flex';
+    }
+    function closeModal() { overlay.style.display = 'none'; }
+    if (overlay) {
+        overlay.addEventListener('mousedown', e => { if (e.target === overlay) closeModal(); });
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && overlay.style.display !== 'none') closeModal(); });
+    }
+    const donorPicker = overlay && window.AutohubDonorPicker
+        ? window.AutohubDonorPicker({ api, esc, openModal, closeModal, mBody, mBox, base, apiKey: API_KEY })
+        : null;
+
+    async function choosePart(lineId) {
+        if (!donorPicker) { location.href = invoiceUrl + '#line-' + lineId + '/donor'; return; }
+        const l = (currentGroup()?.lines || []).find(x => x.line_id === lineId);
+        await donorPicker.open(lineId, async res => {
+            delete enrCache[lineId];
+            showMessage('Line ' + (l ? l.line_number : '') + ': part changed to ' + esc(res && res.swapped_to || 'the chosen part') +
+                (res && res.supplier ? ' (' + esc(res.supplier) + ')' : '') + '.');
+            await load(true);
+        });
     }
 
     // ---- start ----

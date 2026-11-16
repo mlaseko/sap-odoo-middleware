@@ -224,7 +224,7 @@
         return '<table class="rel"><thead><tr><th></th><th>Item</th><th>Part</th><th>Brand / tier</th><th>Article · supplier</th>' +
             '<th class="num">Stock</th><th class="num">PL03</th><th class="num">PL05</th><th class="num">Ours vs this</th><th>Shared OEMs</th></tr></thead><tbody>' +
             parts.map(p => '<tr>' +
-                '<td>' + (p.image_url ? '<img loading="lazy" src="' + esc(p.image_url) + '" alt="">' : '') + '</td>' +
+                '<td>' + (p.image_url ? '<img loading="lazy" src="' + esc(p.image_url) + '" alt="" onerror="this.remove()">' : '') + '</td>' +
                 '<td>' + esc(p.item_code) + '</td>' +
                 '<td>' + esc(p.name || p.item_name || '') + (p.part_component ? '<div class="sub">' + esc(p.part_component) + (p.vehicles_count ? ' · fits ' + p.vehicles_count + ' vehicles' : '') + '</div>' : '') + '</td>' +
                 '<td>' + esc(p.brand || '') + '<div class="sub">' + esc(p.tier) + (p.tier_mapped ? '' : ' (not mapped)') + '</div></td>' +
