@@ -13,8 +13,13 @@ namespace SapOdooMiddleware.Controllers;
 public sealed class AutohubPriceReviewController : ControllerBase
 {
     private readonly IPriceReviewService _review;
+    private readonly IPriceReviewComparablesService _comparables;
 
-    public AutohubPriceReviewController(IPriceReviewService review) => _review = review;
+    public AutohubPriceReviewController(IPriceReviewService review, IPriceReviewComparablesService comparables)
+    {
+        _review = review;
+        _comparables = comparables;
+    }
 
     /// <summary>
     /// GET /api/autohub/documents/{documentId}/price-review
@@ -95,6 +100,21 @@ public sealed class AutohubPriceReviewController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Clear(Guid documentId, Guid lineId, CancellationToken ct) =>
         await _review.ClearDecisionAsync(documentId, lineId, ct) ? NoContent() : NotFound();
+
+    /// <summary>
+    /// GET /api/autohub/documents/{documentId}/price-review/lines/{lineId}/comparables
+    /// Related parts for one line, with their SAP PL03 / PL05, stock and average cost: same part and
+    /// same quality tier first, other tiers for reference. Includes the PL03 spread (min / median /
+    /// max), how far the line's PL03 is from the median, and an invoice-cost check. Read-only.
+    /// </summary>
+    [HttpGet("{documentId:guid}/price-review/lines/{lineId:guid}/comparables")]
+    [ProducesResponseType(typeof(PriceReviewComparables), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Comparables(Guid documentId, Guid lineId, CancellationToken ct)
+    {
+        var result = await _comparables.GetAsync(documentId, lineId, ct);
+        return result is null ? NotFound() : Ok(result);
+    }
 
     private const int MaxLines = 500;
 

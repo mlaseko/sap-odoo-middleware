@@ -37,4 +37,10 @@ public sealed class AutohubPricingSettings
 
     /// <summary>Price review: a margin above this is flagged. Default 0.90.</summary>
     public decimal PriceReviewMarginHigh { get; set; } = 0.90m;
+
+    /// <summary>
+    /// Price review: a PL03 more than this fraction above or below the median PL03 of related parts
+    /// is shown as "above" / "below" them. Default 0.25 (25%).
+    /// </summary>
+    public decimal PriceReviewComparableBand { get; set; } = 0.25m;
 }
