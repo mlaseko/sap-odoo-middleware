@@ -17,6 +17,10 @@ public sealed class AutohubBulkCreateJob
     public int NeedsConfirmation { get; set; }
     public int Held { get; set; }
     public int Failed { get; set; }
+    /// <summary>Lines left to create: no current price approval while RequirePriceReview is on.</summary>
+    public int NotPriceApproved { get; set; }
+    /// <summary>Lines left to create: held in the price review.</summary>
+    public int PriceHeld { get; set; }
     public string? Error { get; set; }
     public IReadOnlyList<PartsBulkCreateFailure> Failures { get; set; } = Array.Empty<PartsBulkCreateFailure>();
 
@@ -81,6 +85,8 @@ public sealed class AutohubBulkCreateJobService
             job.NeedsConfirmation = result.NeedsConfirmation;
             job.Held = result.Held;
             job.Failed = result.Failed;
+            job.NotPriceApproved = result.NotPriceApproved;
+            job.PriceHeld = result.PriceHeld;
             job.Failures = result.Failures;
             job.FinishedAt = DateTime.UtcNow;
             job.Status = "done";

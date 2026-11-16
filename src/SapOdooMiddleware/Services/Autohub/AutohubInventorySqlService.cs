@@ -11,6 +11,13 @@ namespace SapOdooMiddleware.Services.Autohub;
 /// All reads go through direct SQL (fast, no DI API license seat); all writes
 /// stay on the DI API via <see cref="IAutohubSapB1Service"/>.
 /// </summary>
+/// <summary>
+/// A related part's prices as SAP holds them, for the price review (details come from Neon). TZS; null
+/// when not set. AvgCost is SAP's average cost, used for the invoice-cost check. Active is false when
+/// the item is inactive (frozen) in SAP.
+/// </summary>
+public sealed record ComparableSapItem(string ItemCode, decimal? AvgCost, decimal? Pl03, decimal? Pl05, bool Active);
+
 public interface IAutohubInventorySqlService
 {
     /// <summary>All warehouses with their bin-activation flag (cached ~5 min).</summary>
@@ -171,6 +178,13 @@ public interface IAutohubInventorySqlService
     /// <summary>ITM1 prices on one price list for the given items; items without a row are absent.</summary>
     Task<Dictionary<string, decimal>> GetItemPricesAsync(
         IReadOnlyCollection<string> itemCodes, int priceList, CancellationToken ct);
+
+    /// <summary>
+    /// Prices for related parts in the price review, in one query per 1,000 codes: PL03, PL05, the SAP
+    /// average cost and whether the item is active. Items not in SAP are absent.
+    /// </summary>
+    Task<Dictionary<string, ComparableSapItem>> GetComparableItemsAsync(
+        IReadOnlyCollection<string> itemCodes, CancellationToken ct);
 
     /// <summary>OINC.CountDate of one counting, or null when the counting does not exist.</summary>
     Task<DateTime?> GetCountingCountDateAsync(int docEntry, CancellationToken ct);
@@ -1439,6 +1453,45 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                 prices[reader.GetString(0)] = reader.GetDecimal(1);
         }
         return prices;
+    }
+
+    public async Task<Dictionary<string, ComparableSapItem>> GetComparableItemsAsync(
+        IReadOnlyCollection<string> itemCodes, CancellationToken ct)
+    {
+        var items = new Dictionary<string, ComparableSapItem>(StringComparer.OrdinalIgnoreCase);
+        var codes = itemCodes.Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => c.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (codes.Count == 0) return items;
+
+        await using var conn = await OpenAsync(ct);
+        // SQL Server allows 2,100 parameters per command.
+        foreach (var chunk in codes.Chunk(1000))
+        {
+            var names = chunk.Select((_, i) => $"@c{i}").ToList();
+            var sql = $"""
+                SELECT I.ItemCode, I.AvgPrice, P3.Price, P5.Price, ISNULL(I.frozenFor, 'N')
+                FROM OITM I
+                LEFT JOIN ITM1 P3 ON P3.ItemCode = I.ItemCode AND P3.PriceList = 3
+                LEFT JOIN ITM1 P5 ON P5.ItemCode = I.ItemCode AND P5.PriceList = 5
+                WHERE I.ItemCode IN ({string.Join(", ", names)});
+                """;
+            await using var cmd = new SqlCommand(sql, conn);
+            for (int i = 0; i < chunk.Length; i++) cmd.Parameters.AddWithValue(names[i], chunk[i]);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                decimal? Positive(int i) =>
+                    reader.IsDBNull(i) ? null : Convert.ToDecimal(reader.GetValue(i)) is var v && v > 0m ? v : null;
+                var code = reader.GetString(0);
+                items[code] = new ComparableSapItem(
+                    ItemCode: code,
+                    AvgCost: Positive(1),
+                    Pl03: Positive(2),
+                    Pl05: Positive(3),
+                    Active: reader.GetString(4) != "Y");   // frozenFor = 'Y' means inactive in SAP
+            }
+        }
+        return items;
     }
 
     // ── Posting at current stock ─────────────────────────────────────

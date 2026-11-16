@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Options;
+using SapOdooMiddleware.Configuration;
 using SapOdooMiddleware.Persistence;
 
 namespace SapOdooMiddleware.Services.Autohub;
@@ -7,6 +9,11 @@ namespace SapOdooMiddleware.Services.Autohub;
 /// not tolerate concurrent writes), continues past individual failures, and applies a per-item
 /// timeout so one slow enrich/create can't hang the batch. Per-line outcomes are persisted by the
 /// provisioning service. Mirrors the Lubes InvoiceItemCreationService.
+///
+/// Price review (parts_price_review): a line approved in the price review is created at its approved
+/// PL03 (PL05 re-derived); a line held there is not created. A line with no current decision (none,
+/// or one whose figures changed since) is created at the calculated price, unless
+/// AutohubPricing:RequirePriceReview is on, in which case it is left to create until approved.
 /// </summary>
 public sealed class PartsItemCreationService
 {
@@ -15,17 +22,23 @@ public sealed class PartsItemCreationService
     private readonly IPartsItemProvisioningService _provisioning;
     private readonly IPartsReviewRepository _review;
     private readonly IStagingPartsDocumentRepository _docs;
+    private readonly IPriceReviewService _priceReview;
+    private readonly AutohubPricingSettings _pricingSettings;
     private readonly ILogger<PartsItemCreationService> _logger;
 
     public PartsItemCreationService(
         IPartsItemProvisioningService provisioning,
         IPartsReviewRepository review,
         IStagingPartsDocumentRepository docs,
+        IPriceReviewService priceReview,
+        IOptions<AutohubPricingSettings> pricingSettings,
         ILogger<PartsItemCreationService> logger)
     {
         _provisioning = provisioning;
         _review = review;
         _docs = docs;
+        _priceReview = priceReview;
+        _pricingSettings = pricingSettings.Value;
         _logger = logger;
     }
 
@@ -38,8 +51,14 @@ public sealed class PartsItemCreationService
 
         var toCreate = await _review.ListCreateNewAsync(documentId, ct);
 
-        int created = 0, needsConfirmation = 0, held = 0;
+        int created = 0, needsConfirmation = 0, held = 0, notPriceApproved = 0, priceHeld = 0;
         var failures = new List<PartsBulkCreateFailure>();
+
+        // Price review decisions, read with the current figures so an approval whose figures changed
+        // (stale) does not count. Read before any SAP write: if this fails, nothing is created.
+        var required = _pricingSettings.RequirePriceReview;
+        var review = await _priceReview.GetReviewAsync(documentId, ct);
+        var reviewed = review?.Lines.ToDictionary(l => l.LineId) ?? new Dictionary<Guid, PriceReviewLine>();
 
         // The price review gate posts a specific list of reviewed lines (with optional
         // per-line price overrides); legacy callers send no list and get every eligible
@@ -48,7 +67,17 @@ public sealed class PartsItemCreationService
         List<(PartsProvisioningLine Line, PartsLineOverride? Override)> work;
         if (selections is null)
         {
-            work = toCreate.Select(l => (l, (PartsLineOverride?)null)).ToList();
+            work = new List<(PartsProvisioningLine, PartsLineOverride?)>(toCreate.Count);
+            foreach (var line in toCreate)
+            {
+                var (action, priceOverride) = ApplyPriceReview(reviewed.GetValueOrDefault(line.Id), required);
+                switch (action)
+                {
+                    case PriceReviewAction.Create: work.Add((line, priceOverride)); break;
+                    case PriceReviewAction.Held: priceHeld++; break;
+                    default: notPriceApproved++; break;
+                }
+            }
         }
         else
         {
@@ -56,11 +85,14 @@ public sealed class PartsItemCreationService
             work = new List<(PartsProvisioningLine, PartsLineOverride?)>(selections.Count);
             foreach (var s in selections)
             {
-                if (eligible.TryGetValue(s.LineId, out var line))
-                    work.Add((line, s.PriceOverride));
-                else
+                if (!eligible.TryGetValue(s.LineId, out var line))
                     failures.Add(new PartsBulkCreateFailure(s.LineId, null,
                         "Line not found on this document or not eligible (ReviewStatus must be create_new/create_failed)."));
+                else if (required && ApplyPriceReview(reviewed.GetValueOrDefault(s.LineId), true).Action != PriceReviewAction.Create)
+                    failures.Add(new PartsBulkCreateFailure(s.LineId, line.SupplierArticleNumber,
+                        "Line is not approved in the price review (AutohubPricing:RequirePriceReview is on)."));
+                else
+                    work.Add((line, s.PriceOverride));
             }
         }
 
@@ -101,17 +133,49 @@ public sealed class PartsItemCreationService
             }
         }
 
-        var attempted = selections?.Count ?? toCreate.Count;
+        var attempted = selections?.Count ?? work.Count;
         _logger.LogInformation(
-            "Autohub bulk-create for {Id}: attempted {Attempted}, created {Created}, needsConfirmation {Needs}, held {Held}, failed {Failed}.",
-            documentId, attempted, created, needsConfirmation, held, failures.Count);
+            "Autohub bulk-create for {Id}: attempted {Attempted}, created {Created}, needsConfirmation {Needs}, held {Held}, failed {Failed}, not price-approved {NotApproved}, held in price review {PriceHeld} (review required: {Required}).",
+            documentId, attempted, created, needsConfirmation, held, failures.Count, notPriceApproved, priceHeld, required);
 
-        return new PartsBulkCreateResult(attempted, created, needsConfirmation, held, failures.Count, failures);
+        return new PartsBulkCreateResult(attempted, created, needsConfirmation, held, failures.Count, failures,
+            notPriceApproved, priceHeld);
+    }
+
+    internal enum PriceReviewAction { Create, Held, NotApproved }
+
+    /// <summary>
+    /// What Bulk Create does with a line given its price review state. A current approval creates the
+    /// line at its approved PL03 (an override only when it differs from the calculated PL03, so an
+    /// unchanged price leaves no override record); a current hold skips it; no current decision
+    /// creates it at the calculated price, or skips it when review is required.
+    /// </summary>
+    internal static (PriceReviewAction Action, PartsLineOverride? Override) ApplyPriceReview(
+        PriceReviewLine? line, bool required)
+    {
+        var d = line?.Decision;
+        if (d is null || d.Stale)
+            return required ? (PriceReviewAction.NotApproved, null) : (PriceReviewAction.Create, null);
+        if (d.Status == "held")
+            return (PriceReviewAction.Held, null);
+        if (d.Status != "approved")
+            return required ? (PriceReviewAction.NotApproved, null) : (PriceReviewAction.Create, null);
+
+        var changed = d.FinalPl03 is { } final && line!.FormulaPl03 is { } formula && final != formula;
+        return changed
+            ? (PriceReviewAction.Create, new PartsLineOverride(null, null, d.FinalPl03, d.Reason, d.ReviewedBy))
+            : (PriceReviewAction.Create, null);
     }
 }
 
 /// <summary>One reviewed line the gate asks Bulk Create to post, with its price decision.</summary>
 public sealed record BulkCreateLineSelection(Guid LineId, PartsLineOverride? PriceOverride);
 
-public record PartsBulkCreateResult(int Attempted, int Created, int NeedsConfirmation, int Held, int Failed, List<PartsBulkCreateFailure> Failures);
+/// <summary>
+/// NotPriceApproved: lines left to create because they have no current price approval and
+/// RequirePriceReview is on. PriceHeld: lines left to create because they are held in the price review.
+/// </summary>
+public record PartsBulkCreateResult(
+    int Attempted, int Created, int NeedsConfirmation, int Held, int Failed, List<PartsBulkCreateFailure> Failures,
+    int NotPriceApproved = 0, int PriceHeld = 0);
 public record PartsBulkCreateFailure(Guid LineId, string? ArticleNumber, string Error);

@@ -299,6 +299,8 @@ builder.Services.AddHostedService<AutoMatchWorker>();
 builder.Services.AddScoped<IPartsReviewRepository, PartsReviewRepository>();
 builder.Services.AddScoped<IPartsPriceReviewRepository, PartsPriceReviewRepository>();   // price review decisions
 builder.Services.AddScoped<IPriceReviewService, PriceReviewService>();
+builder.Services.AddScoped<IPartsComparablesRepository, PartsComparablesRepository>();  // related parts (parts_catalog)
+builder.Services.AddScoped<IPriceReviewComparablesService, PriceReviewComparablesService>();
 builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
 builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();
 builder.Services.AddScoped<PartsItemCreationService>();

@@ -787,6 +787,8 @@ public class AutohubDocumentsController : ControllerBase
             needsConfirmation = result.NeedsConfirmation,
             held = result.Held,
             failed = result.Failed,
+            notPriceApproved = result.NotPriceApproved,
+            priceHeld = result.PriceHeld,
             failures = result.Failures.Select(f => new { lineId = f.LineId, articleNumber = f.ArticleNumber, error = f.Error })
         });
     }

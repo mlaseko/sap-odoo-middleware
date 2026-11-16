@@ -166,7 +166,8 @@
 
 @if (Model.ShowReview)
 {
-    <div id="review-banner" class="review-banner" data-doc-id="@Model.Doc.Id" data-editable="@Model.IsEditable.ToString().ToLowerInvariant()">
+    <div id="review-banner" class="review-banner" data-doc-id="@Model.Doc.Id" data-editable="@Model.IsEditable.ToString().ToLowerInvariant()"
+         data-require-price-review="@Model.RequirePriceReview.ToString().ToLowerInvariant()">
         <div class="review-counts" id="review-counts">
             📋 Review:
             <span class="rc">@Model.Count("matched") matched</span> ·
@@ -193,6 +194,8 @@
                 <button id="btn-markpending" class="btn btn-sm" type="button">Mark all pending as Create New</button>
                 <button id="btn-skip-pending" class="btn btn-sm" type="button">Skip All Pending (<span id="cnt-skip-pending">@(Model.Count("pending") + Model.Count("needs_manual"))</span>)</button>
                 <button id="btn-reopen-skipped" class="btn btn-sm" type="button">Reopen Skipped (<span id="cnt-reopen-skipped">@Model.Count("skip")</span>)</button>
+                <a id="btn-price-review" class="btn btn-sm" href="/autohub/documents/@Model.Doc.Id/prices"
+                   title="Review and adjust the prices calculated for the lines to be created, with related parts for comparison">Price review</a>
                 <button id="btn-bulkcreate" class="btn btn-sm" type="button">Bulk Create (<span id="cnt-createnew">@(Model.Count("create_new") + Model.Count("create_failed"))</span>)</button>
                 <button id="btn-confirm-create" class="btn btn-sm" type="button">Confirm all &amp; Create</button>
                 <button id="btn-complete" class="btn btn-sm btn-primary" type="button">Complete Review</button>
@@ -1205,10 +1208,14 @@
             ]);
     });
 
+    const PRICE_NOTE = '<p class="hint">' + (banner.dataset.requirePriceReview === 'true'
+        ? 'Price review is required: only lines approved in <a href="/autohub/documents/' + docId + '/prices">Price review</a> are created, at their approved PL03. Other lines stay to create.'
+        : 'Lines approved in <a href="/autohub/documents/' + docId + '/prices">Price review</a> are created at their approved PL03; held lines are skipped; lines not yet reviewed use the calculated price.') + '</p>';
+
     document.getElementById('btn-bulkcreate').addEventListener('click', () => {
         const n = document.getElementById('cnt-createnew').textContent;
         openModal(
-            '<h3>Bulk create items</h3><p>You are about to create <strong>' + n + '</strong> item(s) in SAP (including any previously failed lines, which will be retried). This is irreversible. Borrowed-enrichment lines that were not confirmed will be flagged for confirmation rather than created. Continue?</p>',
+            '<h3>Bulk create items</h3><p>You are about to create up to <strong>' + n + '</strong> item(s) in SAP (including any previously failed lines, which will be retried). This is irreversible. Borrowed-enrichment lines that were not confirmed will be flagged for confirmation rather than created. Continue?</p>' + PRICE_NOTE,
             [
                 { label: 'Cancel', onClick: closeModal },
                 { label: 'Create ' + n + ' item(s)', primary: true, onClick: runBulkCreate }
@@ -1219,7 +1226,7 @@
         openModal(
             '<h3>Confirm all &amp; create</h3><p>This confirms <strong>every</strong> create-new line — including ' +
             'any cross-supplier <em>borrowed</em> enrichments — without per-line review, then creates them in SAP. ' +
-            'Review borrowed lines first if unsure. Continue?</p>',
+            'Review borrowed lines first if unsure. Continue?</p>' + PRICE_NOTE,
             [
                 { label: 'Cancel', onClick: closeModal },
                 { label: 'Confirm all & create', primary: true, onClick: async () => {
@@ -1291,6 +1298,9 @@
                 return;
             }
             let html = '<h3>Bulk create complete</h3><p>Created ' + job.created + ' of ' + job.attempted + '. Needs confirmation: ' + (job.needs_confirmation || 0) + '. Failed: ' + job.failed + '.</p>';
+            if (job.not_price_approved > 0 || job.price_held > 0)
+                html += '<p>Left to create by <a href="/autohub/documents/' + docId + '/prices">Price review</a>: ' +
+                        (job.not_price_approved || 0) + ' not approved, ' + (job.price_held || 0) + ' held.</p>';
             if (job.needs_confirmation > 0) html += '<p class="hint">Needs-confirmation lines are cross-supplier borrowed enrichments — review them, or use “Confirm all &amp; Create” to sign off and create them.</p>';
             if (job.failures && job.failures.length) {
                 html += '<ul class="failure-list">';

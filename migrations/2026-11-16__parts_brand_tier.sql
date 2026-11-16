@@ -1,0 +1,140 @@
+-- parts_brand_tier — quality tier per selling brand, for the price review's related parts.
+--
+-- Related parts are compared within one tier, so a genuine part is not judged against economy
+-- copies. Tiers: genuine (OE / vehicle-maker brands), branded (OE suppliers and established
+-- aftermarket brands), economy (value / house brands). A brand not listed counts as economy
+-- and is shown as "not mapped" so it can be added here.
+--
+-- brand_key is the brand upper-cased with single spaces (SAP U_MdlTEST or the invoice brand).
+-- For a compound brand such as "VIKA DPA" the first word is tried when the whole name is not
+-- listed. Seeded from the DGX price gate's tiers.py (2026-09-27); edit rows to correct it.
+-- Additive and idempotent: re-running never changes a row you have edited.
+-- Run against the Autohub Neon (Parts_Catalog) database.
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.parts_brand_tier (
+    brand_key   VARCHAR(100) PRIMARY KEY,
+    tier        VARCHAR(20)  NOT NULL CHECK (tier IN ('genuine', 'branded', 'economy')),
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+INSERT INTO public.parts_brand_tier (brand_key, tier) VALUES
+    ('OE', 'genuine'),
+    ('FOMOCO', 'genuine'),
+    ('MOTORCRAFT', 'genuine'),
+    ('LAND ROVER', 'genuine'),
+    ('JAGUAR', 'genuine'),
+    ('BMW', 'genuine'),
+    ('MINI', 'genuine'),
+    ('MERCEDES', 'genuine'),
+    ('MERCEDES-BENZ', 'genuine'),
+    ('VW', 'genuine'),
+    ('VOLKSWAGEN', 'genuine'),
+    ('AUDI', 'genuine'),
+    ('SKODA', 'genuine'),
+    ('SEAT', 'genuine'),
+    ('PORSCHE', 'genuine'),
+    ('FORD', 'genuine'),
+    ('VOLVO', 'genuine'),
+    ('TOYOTA', 'genuine'),
+    ('NISSAN', 'genuine'),
+    ('HONDA', 'genuine'),
+    ('MITSUBISHI', 'genuine'),
+    ('LEXUS', 'genuine'),
+    ('BOSCH', 'branded'),
+    ('FEBI BILSTEIN', 'branded'),
+    ('FEBI', 'branded'),
+    ('MEYLE', 'branded'),
+    ('ELRING', 'branded'),
+    ('HENGST', 'branded'),
+    ('MAHLE', 'branded'),
+    ('MANN', 'branded'),
+    ('MANN-FILTER', 'branded'),
+    ('VIKTOR REINZ', 'branded'),
+    ('VICTOR REINZ', 'branded'),
+    ('GATES', 'branded'),
+    ('TEXTAR', 'branded'),
+    ('TRW', 'branded'),
+    ('LEMFORDER', 'branded'),
+    ('LEMFOERDER', 'branded'),
+    ('CONTINENTAL', 'branded'),
+    ('CONTITECH', 'branded'),
+    ('DELPHI', 'branded'),
+    ('VALEO', 'branded'),
+    ('KOLBENSCHMIDT', 'branded'),
+    ('SACHS', 'branded'),
+    ('HELLA', 'branded'),
+    ('NISSENS', 'branded'),
+    ('BREMBO', 'branded'),
+    ('CORTECO', 'branded'),
+    ('INA', 'branded'),
+    ('BILSTEIN', 'branded'),
+    ('PAYEN', 'branded'),
+    ('LIQUI MOLY', 'branded'),
+    ('SKF', 'branded'),
+    ('LUK', 'branded'),
+    ('NGK', 'branded'),
+    ('DAYCO', 'branded'),
+    ('PIERBURG', 'branded'),
+    ('ATE', 'branded'),
+    ('SWAG', 'branded'),
+    ('BLUE PRINT', 'branded'),
+    ('TOPRAN', 'branded'),
+    ('VAICO', 'branded'),
+    ('TRUCKTEC', 'branded'),
+    ('TRUCKTEC AUTOMOTIVE', 'branded'),
+    ('METZGER', 'branded'),
+    ('BREMI', 'branded'),
+    ('VEMO', 'branded'),
+    ('AJUSA', 'branded'),
+    ('BEHR', 'branded'),
+    ('DENSO', 'branded'),
+    ('NTN', 'branded'),
+    ('SNR', 'branded'),
+    ('FAG', 'branded'),
+    ('MONROE', 'branded'),
+    ('KYB', 'branded'),
+    ('LEMFÖRDER', 'branded'),
+    ('GOETZE', 'branded'),
+    ('GLYCO', 'branded'),
+    ('ZF', 'branded'),
+    ('VIKA', 'economy'),
+    ('DPA', 'economy'),
+    ('BORSEHUNG', 'economy'),
+    ('GERMAX', 'economy'),
+    ('BMTSR', 'economy'),
+    ('AUTOSTAR', 'economy'),
+    ('BRYMAN', 'economy'),
+    ('MAXPART', 'economy'),
+    ('RIDEX', 'economy'),
+    ('KARL', 'economy'),
+    ('MAYER', 'economy'),
+    ('FEBEST', 'economy'),
+    ('SCHNIEDER', 'economy'),
+    ('GTX', 'economy'),
+    ('STARK', 'economy'),
+    ('STARK AUTOMOTIVE', 'economy'),
+    ('NTY', 'economy'),
+    ('TIBAO', 'economy'),
+    ('ABAKUS', 'economy'),
+    ('DR MOTOR', 'economy'),
+    ('MAXGEAR', 'economy'),
+    ('NTA', 'economy'),
+    ('TOP DRIVE', 'economy'),
+    ('BSG', 'economy'),
+    ('BRITPART', 'economy'),
+    ('GSP', 'economy'),
+    ('FREY', 'economy'),
+    ('JP GROUP', 'economy'),
+    ('ABS', 'economy'),
+    ('AKS DASIS', 'economy'),
+    ('GST', 'economy'),
+    ('TALBRO', 'economy'),
+    ('THERMOTECH', 'economy')
+
+ON CONFLICT (brand_key) DO NOTHING;
+
+-- GRANT SELECT ON public.parts_brand_tier TO <app_role>;
+
+COMMIT;
