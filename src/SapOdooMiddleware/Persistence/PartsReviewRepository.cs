@@ -19,7 +19,9 @@ public sealed record PartsReviewLineRow(
     bool HasDonorCandidates,
     // True when DGX couldn't auto-resolve the marque (manufacturer_resolution.resolved = false) — the line
     // will need a marque assignment before it can mint. Absent block → false.
-    bool NeedsMarque);
+    bool NeedsMarque,
+    // The picture of the part the line points to: its catalogue (oitm) row's image, else the stored image.
+    string? PictureUrl = null);
 
 /// <summary>A 'create_new' line reduced to what provisioning needs (incl. the persisted enrichment).</summary>
 public sealed record PartsProvisioningLine(
@@ -148,7 +150,12 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         "COALESCE(CASE WHEN jsonb_typeof(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}') = 'array' " +
         "THEN jsonb_array_length(\"EnrichmentPayloadJson\"#>'{audit,bridge_candidates_ranked}') END, 0) > 0," +
         // NeedsMarque — DGX couldn't resolve the manufacturer. Text compare only (shape-tolerant, never cast).
-        "COALESCE((\"EnrichmentPayloadJson\"#>>'{manufacturer_resolution,resolved}') = 'false', false)";
+        "COALESCE((\"EnrichmentPayloadJson\"#>>'{manufacturer_resolution,resolved}') = 'false', false)," +
+        // PictureUrl — the part's catalogue picture (oitm.image_url via neon_oitm_id), else item_data.image_url.
+        // The id is only cast when it is all digits (shape-tolerant, as above).
+        "COALESCE((SELECT NULLIF(btrim(o.image_url), '') FROM oitm o WHERE o.id = CASE " +
+        "WHEN (\"EnrichmentPayloadJson\"->>'neon_oitm_id') ~ '^[0-9]{1,18}$' THEN (\"EnrichmentPayloadJson\"->>'neon_oitm_id')::bigint END), " +
+        "NULLIF(btrim(\"EnrichmentPayloadJson\"#>>'{item_data,image_url}'), ''))";
 
     private readonly ICompanyContext _company;
     public PartsReviewRepository(ICompanyContext company) => _company = company;
@@ -690,7 +697,8 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         SelectedName:            r.IsDBNull(28) ? null : r.GetString(28),
         SelectedSupplier:        r.IsDBNull(29) ? null : r.GetString(29),
         HasDonorCandidates:      !r.IsDBNull(30) && r.GetBoolean(30),
-        NeedsMarque:             !r.IsDBNull(31) && r.GetBoolean(31));
+        NeedsMarque:             !r.IsDBNull(31) && r.GetBoolean(31),
+        PictureUrl:              r.IsDBNull(32) ? null : r.GetString(32));
 
     private static List<string> ParseOems(NpgsqlDataReader r, int ordinal)
     {

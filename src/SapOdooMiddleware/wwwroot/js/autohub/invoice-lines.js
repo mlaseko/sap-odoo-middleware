@@ -334,7 +334,7 @@ function reloadKeepingPlace() {
         html += '</table>';
         const pic = enr.picture_url || d.image_url;
         html += pic
-            ? '<div style="margin-top:8px;"><img src="' + esc(pic) + '" alt="" class="ld-img" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'no-pic\',textContent:\'Picture could not be loaded\'}))"/></div>'
+            ? '<div style="margin-top:8px;"><img src="' + esc(pic) + '" alt="" class="ld-img" data-zoom="' + esc(pic) + '" title="Click to enlarge" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'no-pic\',textContent:\'Picture could not be loaded\'}))"/></div>'
             : '<div class="no-pic" style="margin-top:8px;">No picture for this part</div>';
         return html;
     }
@@ -460,6 +460,24 @@ function reloadKeepingPlace() {
         box.appendChild(div);
     }
 
+    // The list's small picture follows the line's current part (e.g. after "Choose another part").
+    // Only for lines not in SAP yet (not matched or created).
+    function setRowThumb(lineId, url, reviewStatus) {
+        const cell = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"] .col-desc');
+        if (!cell || ['matched', 'created'].includes(reviewStatus)) return;
+        let img = cell.querySelector('.ln-thumb');
+        if (!url) { if (img) img.parentElement.remove(); return; }
+        if (!img) {
+            const wrap = document.createElement('span');
+            wrap.className = 'ln-pic'; wrap.dataset.noexpand = '1';
+            img = document.createElement('img');
+            img.className = 'ln-thumb'; img.alt = ''; img.title = 'Click to enlarge';
+            img.onerror = () => wrap.remove();
+            wrap.appendChild(img); cell.prepend(wrap);
+        }
+        if (img.getAttribute('src') !== url) { img.src = url; img.dataset.zoom = url; }
+    }
+
     async function loadEnrichment(lineId, detail) {
         const box = detail.querySelector('.ld-enrichment');
         if (!box || box.dataset.loaded === 'true') return;
@@ -470,6 +488,7 @@ function reloadKeepingPlace() {
             if (!r.ok) throw new Error('HTTP ' + r.status);
             const reviewStatus = document.querySelector('#lines-table tr.line-row[data-line-id="' + lineId + '"]')?.dataset.reviewStatus || '';
             const enr = await r.json();
+            setRowThumb(lineId, enr.picture_url || (enr.item_data && enr.item_data.image_url), reviewStatus);
             GROUP_NAMES = await loadGroupNames();
             box.innerHTML = enrichmentHtml(enr, reviewStatus, lineId);
             wireMarqueResolve(lineId, box);
