@@ -26,6 +26,13 @@ public class CountingLineCount
 public class CountingRecalcRequest
 {
     public List<CountingLineCount> LineCounts { get; set; } = new();
+    /// <summary>
+    /// Bin transfers (DocNum) the app posted to correct where stock is booked, not to
+    /// move it: a count found an item short in one bin and over in another and the
+    /// reviewer converted the pair to a transfer. Their movements are left out of the
+    /// carry-forward, since the counter's counts already reflect the physical position.
+    /// </summary>
+    public List<string> PaperTransfers { get; set; } = new();
 }
 
 /// <summary>One stock movement into or out of a counted bin (OILM + OBTL).</summary>
@@ -110,4 +117,12 @@ public class CountingRecalcResult
     public DateTime? CountDate { get; set; }
     public DateTime? CalculatedAt { get; set; }
     public List<CountingRecalcLine> Lines { get; set; } = new();
+    /// <summary>
+    /// True on a middleware that leaves paper transfers out of the carry-forward. The app
+    /// refuses to convert a count pair to a bin transfer, or to post a counting that has
+    /// one, unless this is true: an older middleware would count the move twice.
+    /// </summary>
+    public bool PaperTransfersSupported { get; set; } = true;
+    /// <summary>The paper transfers (DocNum) this calculation left out, as requested.</summary>
+    public List<string> PaperTransfers { get; set; } = new();
 }
