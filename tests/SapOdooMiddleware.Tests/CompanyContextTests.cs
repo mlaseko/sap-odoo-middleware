@@ -68,7 +68,7 @@ public class CompanyContextTests
         ctx.SetCompany("Lubes");
 
         Assert.Equal("Lubes", ctx.CurrentCompanyKey);
-        Assert.Equal(LubesConn, ctx.Current.Neon.ConnectionString);
+        Assert.Equal(NeonSettings.Harden(LubesConn), ctx.Current.Neon.ConnectionString);
         Assert.Equal("/extract_invoice", ctx.Current.VisionEndpoint);
     }
 
@@ -79,7 +79,7 @@ public class CompanyContextTests
         ctx.SetCompany("Autohub");
 
         Assert.Equal("Autohub", ctx.CurrentCompanyKey);
-        Assert.Equal(PartsConn, ctx.Current.Neon.ConnectionString);
+        Assert.Equal(NeonSettings.Harden(PartsConn), ctx.Current.Neon.ConnectionString);
         Assert.Equal("/extract_parts_invoice", ctx.Current.VisionEndpoint);
     }
 
@@ -90,7 +90,7 @@ public class CompanyContextTests
         ctx.SetCompany("Bogus");
 
         Assert.Equal("Lubes", ctx.CurrentCompanyKey);
-        Assert.Equal(LubesConn, ctx.Current.Neon.ConnectionString);
+        Assert.Equal(NeonSettings.Harden(LubesConn), ctx.Current.Neon.ConnectionString);
     }
 
     [Fact]
@@ -99,9 +99,9 @@ public class CompanyContextTests
         var ctx = Build();
 
         ctx.SetCompany("Autohub");
-        Assert.Equal(PartsConn, ctx.Current.Neon.ConnectionString);
+        Assert.Equal(NeonSettings.Harden(PartsConn), ctx.Current.Neon.ConnectionString);
 
         ctx.SetCompany("Lubes");
-        Assert.Equal(LubesConn, ctx.Current.Neon.ConnectionString);
+        Assert.Equal(NeonSettings.Harden(LubesConn), ctx.Current.Neon.ConnectionString);
     }
 }

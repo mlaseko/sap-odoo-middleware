@@ -55,14 +55,19 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
     private readonly INeonBridgeService _bridge;
     private readonly IPartsReviewRepository _review;
     private readonly IPricingOverrideRepository _overrides;
+    private readonly IAutohubInventorySqlService _sapSql;
     private readonly ILogger<PartsItemProvisioningService> _logger;
+
+    /// <summary>How long the Neon catalogue fallback of the duplicate check may take before it is skipped.</summary>
+    internal static readonly TimeSpan CatalogueLookupTimeout = TimeSpan.FromSeconds(8);
 
     public PartsItemProvisioningService(
         IEnrichmentService enrichment, IForexConversionService forex, IPricingCalculationService pricing,
         ISkuGenerationService sku, IOemFilterService filter, IAutohubSapB1Service sap, INeonBridgeService bridge,
-        IPartsReviewRepository review, IPricingOverrideRepository overrides,
+        IPartsReviewRepository review, IPricingOverrideRepository overrides, IAutohubInventorySqlService sapSql,
         ILogger<PartsItemProvisioningService> logger)
     {
+        _sapSql = sapSql;
         _enrichment = enrichment;
         _forex = forex;
         _pricing = pricing;
@@ -85,6 +90,24 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         PartsProvisioningLine line, string? currency, CancellationToken ct,
         PartsLineOverride? priceOverride = null)
     {
+        // One log line per item with the time of each step, so a slow step (SAP, DGX, Neon) is visible.
+        var timer = new StepTimer();
+        PartsProvisioningOutcome? outcome = null;
+        try
+        {
+            return outcome = await ProvisionCoreAsync(line, currency, ct, priceOverride, timer);
+        }
+        finally
+        {
+            _logger.LogInformation("Bulk Create line {LineId} ({Article}): {Outcome} in {Total} ms [{Steps}]",
+                line.Id, line.SupplierArticleNumber, outcome?.Status ?? "error/timeout", timer.TotalMs, timer);
+        }
+    }
+
+    private async Task<PartsProvisioningOutcome> ProvisionCoreAsync(
+        PartsProvisioningLine line, string? currency, CancellationToken ct,
+        PartsLineOverride? priceOverride, StepTimer timer)
+    {
         var article = line.SupplierArticleNumber?.Trim();
         if (string.IsNullOrWhiteSpace(article))
             return await Fail(line.Id, "Line has no supplier article number.", ct);
@@ -101,28 +124,23 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
                 return await Fail(line.Id, "Document currency is unknown; cannot convert cost.", ct);
         }
 
-        // Idempotency guard: if a SAP item already exists for this (supplier, article), match it instead of
-        // minting a duplicate. Protects against a re-upload / re-run of the same invoice, and against two
-        // lines for the same part in one batch (the first mirrors to oitm, the second matches it).
-        // The Neon code is only trusted when it ALSO exists in SAP — a mirror row whose SAP item was never
-        // durably created (old-build bug) or was later removed must NOT short-circuit to a phantom match;
-        // in that case fall through and create a real item.
-        if (await FindExistingItemCodeAsync(article!, line.Brand, ct) is { } existingCode)
+        // Duplicate guard: an item for this (supplier, article) may already exist — earlier on this invoice,
+        // from another invoice, or from an earlier run that timed out after its SAP write. SAP is asked first:
+        // it is the system of record, sits next to the middleware and sees items whose catalogue card is
+        // missing. The Neon catalogue is only a fallback, bounded and never fatal (a slow or dropped Neon
+        // connection used to fail the line here with "Exception while reading from stream").
+        var existingCode = await FindExistingAsync(article!, line.Brand, timer, ct);
+        if (existingCode is not null)
         {
-            if (await _sap.ItemExistsAsync(existingCode))
-            {
-                _logger.LogInformation(
-                    "Line {LineId}: SAP item {Code} already exists for {Article}/{Supplier}; matching instead of creating a duplicate.",
-                    line.Id, existingCode, article, line.Brand);
-                await _review.SetReviewStatusAsync(line.Id, "matched", existingCode, ct);
-                return new PartsProvisioningOutcome("created", existingCode, null);
-            }
-            _logger.LogWarning(
-                "Line {LineId}: Neon mirror has {Code} for {Article}/{Supplier} but it is NOT in SAP (phantom); creating a real item instead of matching.",
+            _logger.LogInformation(
+                "Line {LineId}: SAP item {Code} already exists for {Article}/{Supplier}; matching instead of creating a duplicate.",
                 line.Id, existingCode, article, line.Brand);
+            await _review.SetReviewStatusAsync(line.Id, "matched", existingCode, ct);
+            return new PartsProvisioningOutcome("created", existingCode, null);
         }
 
         var filtered = _filter.Filter(line.OemNumbers, article, line.Brand).CleanOems;
+        timer.Mark("filter");
 
         // Prefer the enrichment persisted at review time (what the operator saw/confirmed); only
         // re-call DGX if the line was never enriched (e.g. created straight from a quick match).
@@ -153,6 +171,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             }
         }
 
+        timer.Mark("enrichment");
         if (enr.ItemData is null)
             return await Fail(line.Id, "Enrichment returned no item data.", ct);
         // Only a GENUINE cross-supplier borrow (another supplier's data applied to our item) needs operator
@@ -212,6 +231,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             rate = Math.Round(costTzs / effectiveUnit, 6, MidpointRounding.AwayFromZero);
         }
 
+        timer.Mark("forex");
         PricingQuote quote;
         try
         {
@@ -232,6 +252,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         if (prices.Cost <= 0m)
             return await Fail(line.Id, "Computed price-list 01 (cost) is zero — check the forex rate and pricing config before creating the SAP item.", ct);
 
+        timer.Mark("pricing");
         // Allocate the final ItemCode. NOTE: the counter is atomic but burns a number even if the
         // SAP write below fails — gaps in SAP item codes are acceptable; we never reuse/duplicate.
         // A counter at its MaxAllowed ceiling is a hold (operator extends the range), never a silent overrun.
@@ -248,6 +269,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         // cross-references — reference_type='oem' ONLY, never aftermarket/IAM equivalents — up to five,
         // then the supplier article. The invoice usually lists a single OEM, so without these the item
         // would show just one.
+        timer.Mark("item_code");
         var donorOems = enr.NeonOitmId is { } oemDonorId
             ? await _bridge.GetOemCrossReferencesAsync(oemDonorId, ct)
             : (IReadOnlyList<string>)Array.Empty<string>();
@@ -255,6 +277,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         var altArticles = await _bridge.GetGermaxAlternateArticleNumbersAsync(article!, ct);
         var itemName = BuildItemName(MergeOems(filtered, donorOems), article!, altArticles);
 
+        timer.Mark("item_name");
         var sapReq = new SapAutohubItemRequest(
             ItemCode: itemCode,
             ItemName: itemName,
@@ -274,6 +297,13 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         {
             return await Fail(line.Id, $"SAP item write failed: {ex.Message}", ct);
         }
+        timer.Mark("sap_create");
+
+        // The SAP item exists from here on: the remaining steps (price-change record, catalogue card, the
+        // line's "created" record) must finish whatever the per-item time limit says, or the line would read
+        // "Timed out" while its item is in SAP — and a retry would create a duplicate. The catalogue card has
+        // its own bounded DGX call (NeonBridgeService.MintTimeout).
+        var done = CancellationToken.None;
 
         // Audit every reviewer override next to the formula's answer (pricing_overrides)
         // — recorded only after the SAP commit, best effort (never fails the line).
@@ -317,16 +347,16 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
                     // invoices for this (brand, article) auto-match instead of minting another duplicate.
                     var newId = await _bridge.CreateOwnIdentityRowAsync(
                         neonOitmId, itemCode, EnrichmentStrategies.ResolveOwnIdentitySource(line.MatchStrategy),
-                        line.SupplierArticleNumber, line.Brand, ct);
+                        line.SupplierArticleNumber, line.Brand, done);
                     if (newId is { } nid)
-                        await _review.UpdateNeonOitmIdAsync(line.Id, nid, ct);
+                        await _review.UpdateNeonOitmIdAsync(line.Id, nid, done);
                     else
                         _logger.LogWarning(
-                            "SAP item {ItemCode} created but donor oitm {OitmId} missing; own-identity row not minted.",
+                            "SAP item {ItemCode} created but no own-identity row was returned (donor oitm {OitmId} missing, or the DGX was still minting it).",
                             itemCode, neonOitmId);
                 }
                 else if (DecideBridge(
-                             (await _bridge.GetOitmRowAsync(neonOitmId, ct))?.ArticleNumber, line.SupplierArticleNumber)
+                             (await _bridge.GetOitmRowAsync(neonOitmId, done))?.ArticleNumber, line.SupplierArticleNumber)
                          == BridgeAction.OwnCard)
                 {
                     // The enrichment's card is a related part (a kit's component, a left/right twin, a
@@ -334,8 +364,8 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
                     // with the OEM numbers its SAP item name carries.
                     var ownId = await _bridge.CreateArticleRowAsync(
                         itemCode, line.SupplierArticleNumber!, line.Brand, OwnCardSource,
-                        MergeOems(filtered, donorOems), ct);
-                    await _review.UpdateNeonOitmIdAsync(line.Id, ownId, ct);
+                        MergeOems(filtered, donorOems), done);
+                    await _review.UpdateNeonOitmIdAsync(line.Id, ownId, done);
                     _logger.LogWarning(
                         "SAP item {ItemCode} (article {Article}): enrichment card oitm {OitmId} is another article; " +
                         "own card oitm {OwnId} created instead of stamping it.",
@@ -343,7 +373,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
                 }
                 else
                 {
-                    var link = await _bridge.LinkAsync(neonOitmId, itemCode, ct);
+                    var link = await _bridge.LinkAsync(neonOitmId, itemCode, done);
                     if (link.Status == NeonBridgeLinkStatus.BlockedByExisting)
                         _logger.LogError(
                             "SAP item {ItemCode} created but oitm id {OitmId} was already linked to '{Existing}' — likely a duplicate SAP item; reconcile.",
@@ -372,7 +402,7 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             {
                 var supplier = string.IsNullOrWhiteSpace(line.Brand) ? null : line.Brand;
                 await _bridge.CreateFreshRowAsync(itemCode, article!, supplier, filtered, "enrichment_no_donor",
-                    data.PrimaryDescription ?? line.Description, ct);
+                    data.PrimaryDescription ?? line.Description, done);
             }
             catch (Exception ex)
             {
@@ -382,7 +412,9 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
             }
         }
 
-        await _review.RecordCreatedAsync(line.Id, itemCode, prices.Cost, prices.Retail, prices.Wholesale, rate, ct);
+        timer.Mark("catalogue");
+        await _review.RecordCreatedAsync(line.Id, itemCode, prices.Cost, prices.Retail, prices.Wholesale, rate, done);
+        timer.Mark("record");
         return new PartsProvisioningOutcome("created", itemCode, null);
     }
 
@@ -410,10 +442,24 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         return name;
     }
 
-    /// <summary>
-    /// The line's invoice OEM(s) first, then the enrichment cross-reference OEMs (filtered_oems),
-    /// de-duplicated (case-insensitive, order preserved). <see cref="BuildItemName"/> keeps up to five.
-    /// </summary>
+    /// <summary>Milliseconds per step of one item, for the log ("sap_lookup=120 pricing=40 sap_create=2100 …").</summary>
+    internal sealed class StepTimer
+    {
+        private readonly System.Diagnostics.Stopwatch _sw = System.Diagnostics.Stopwatch.StartNew();
+        private readonly List<string> _steps = new();
+        private long _last;
+
+        public void Mark(string step)
+        {
+            var now = _sw.ElapsedMilliseconds;
+            _steps.Add($"{step}={now - _last}");
+            _last = now;
+        }
+
+        public long TotalMs => _sw.ElapsedMilliseconds;
+        public override string ToString() => string.Join(" ", _steps);
+    }
+
     /// <summary>oitm.source of a card made because the enrichment's card was another article.</summary>
     internal const string OwnCardSource = "molas_article_mismatch";
 
@@ -427,6 +473,10 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
     internal static BridgeAction DecideBridge(string? cardArticle, string? lineArticle) =>
         ArticleNumbers.Differ(cardArticle, lineArticle) ? BridgeAction.OwnCard : BridgeAction.Link;
 
+    /// <summary>
+    /// The line's invoice OEM(s) first, then the enrichment cross-reference OEMs (filtered_oems),
+    /// de-duplicated (case-insensitive, order preserved). <see cref="BuildItemName"/> keeps up to five.
+    /// </summary>
     private static List<string> MergeOems(IReadOnlyList<string> lineOems, IReadOnlyList<string>? enrichedOems)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -464,6 +514,40 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
                 await Task.Delay(delay, ct);
                 delay = TimeSpan.FromTicks(delay.Ticks * 2);
             }
+        }
+    }
+
+    /// <summary>
+    /// The SAP item already created for this (supplier, article), or null. SAP first (fast, authoritative);
+    /// when SAP cannot be asked, the Neon catalogue with a short limit, its code trusted only if SAP has it.
+    /// Never throws for a lookup problem: a failed lookup must not fail the line.
+    /// </summary>
+    private async Task<string?> FindExistingAsync(string article, string? brand, StepTimer timer, CancellationToken ct)
+    {
+        try
+        {
+            var code = await _sapSql.FindItemCodeByArticleAsync(article, brand, ct);
+            timer.Mark("sap_lookup");
+            return code;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "SAP duplicate check failed for {Article}/{Brand}; trying the Neon catalogue.", article, brand);
+        }
+
+        try
+        {
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            limit.CancelAfter(CatalogueLookupTimeout);
+            var code = await FindExistingItemCodeAsync(article, brand, limit.Token);
+            timer.Mark("catalogue_lookup");
+            return code is not null && await _sap.ItemExistsAsync(code) ? code : null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Neon catalogue duplicate check failed for {Article}/{Brand}; creating.", article, brand);
+            timer.Mark("catalogue_lookup_failed");
+            return null;
         }
     }
 
