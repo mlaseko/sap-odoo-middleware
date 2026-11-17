@@ -279,9 +279,29 @@
             (openRel.has(l.line_id) ? '<tr class="rel-row" data-rel-for="' + l.line_id + '"><td colspan="12">' + relHtml(l) + '</td></tr>' : '');
     }
 
+    // Sort by calculated PL03: null (invoice order) → 'asc' → 'desc' → null. Lines without a PL03 go last.
+    let sortDir = null;
+    const sortTh = document.getElementById('pr-sort-calc');
+    function sorted(rows) {
+        if (!sortDir) return rows;
+        const sign = sortDir === 'asc' ? 1 : -1;
+        return rows.slice().sort((a, b) => {
+            const x = a.formula_pl03, y = b.formula_pl03;
+            if (x == null || y == null) return (x == null) - (y == null) || a.line_number - b.line_number;
+            return sign * (Number(x) - Number(y)) || a.line_number - b.line_number;
+        });
+    }
+    if (sortTh) sortTh.addEventListener('click', () => {
+        sortDir = sortDir === null ? 'asc' : sortDir === 'asc' ? 'desc' : null;
+        sortTh.classList.toggle('sorted', !!sortDir);
+        sortTh.querySelector('.sort-arrow').textContent = sortDir === 'asc' ? '▲' : sortDir === 'desc' ? '▼' : '';
+        sortTh.setAttribute('aria-sort', sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none');
+        render();
+    });
+
     function render() {
         renderCounts();
-        const rows = review.lines.filter(visible);
+        const rows = sorted(review.lines.filter(visible));
         body.innerHTML = rows.length
             ? rows.map(rowHtml).join('')
             : '<tr><td colspan="12">' + (review.lines.length ? 'No lines match this filter.' : 'No lines are waiting to be created on this invoice.') + '</td></tr>';

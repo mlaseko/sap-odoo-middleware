@@ -55,7 +55,13 @@
     .fit-panel .fit-v { font-size:12.5px; padding:4px 0; border-bottom:1px solid var(--border-soft); }
     .fit-panel .fit-oems { display:flex; flex-wrap:wrap; gap:4px; }
     .fit-panel .fit-oems span { font-size:12px; padding:1px 7px; border-radius:6px; background:var(--surface-2); border:1px solid var(--border); }
-    .pr-scroll { overflow-x:auto; }
+    /* The table scrolls in its own window-high area so its header row stays pinned on long invoices. */
+    .pr-scroll { overflow:auto; max-height:calc(100vh - 150px); border-radius:var(--radius); }
+    #pr-table { overflow:visible; }
+    #pr-table > thead > tr > th { position:sticky; top:0; z-index:3; box-shadow:inset 0 -1px 0 var(--border); }
+    #pr-table > thead > tr > th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
+    #pr-table > thead > tr > th.sortable:hover, #pr-table > thead > tr > th.sorted { color:var(--text-strong); }
+    #pr-table > thead > tr > th .sort-arrow { display:inline-block; width:12px; color:var(--accent); }
 
     #pr-table tr.line-error td { opacity:.7; }
     .flag { display:inline-block; margin:0 4px 3px 0; }
@@ -130,7 +136,7 @@
             <th class="num">Qty</th>
             <th class="num">Invoice price</th>
             <th class="num">Cost CIF / PL01 (TZS)</th>
-            <th class="num">Calculated PL03</th>
+            <th class="num sortable" id="pr-sort-calc" title="Sort by calculated PL03: lowest first, highest first, invoice order"><span class="sort-arrow"></span>Calculated PL03</th>
             <th class="num">PL03 to create</th>
             <th class="num">PL05</th>
             <th class="num">Margin</th>
