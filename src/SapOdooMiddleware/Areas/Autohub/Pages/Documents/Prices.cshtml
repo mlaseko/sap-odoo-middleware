@@ -27,10 +27,42 @@
     #pr-table td.num, #pr-table th.num { text-align:right; white-space:nowrap; }
     #pr-table .desc { min-width:220px; }
     #pr-table .sub { color:var(--muted); font-size:12px; }
-    #pr-table input.pl03 { width:110px; text-align:right; }
-    #pr-table input.reason { display:block; width:200px; margin:4px 0 0 auto; font-size:12px; }
-    .pr-scroll { overflow-x:auto; }
-    #pr-table tr.changed input.pl03 { border-color:var(--warning); }
+    /* PL03 box: accounting format, TZS label, no spinner; amber when changed from the calculated PL03. */
+    #pr-table .money { display:inline-flex; align-items:center; width:150px; height:34px; padding:0 8px; cursor:text;
+                       border:1px solid var(--border); border-radius:8px; background:var(--surface-2); }
+    #pr-table .money:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+    #pr-table .money.changed { border-color:var(--warning); }
+    #pr-table .money span { color:var(--muted); font-size:11px; letter-spacing:.04em; margin-right:6px; }
+    #pr-table .money input.pl03 { border:0; background:transparent; outline:none; padding:0; width:100%; text-align:right;
+                                  color:var(--text-strong); font-size:14px; font-weight:600; font-variant-numeric:tabular-nums; }
+    #pr-table .money-note { color:var(--muted); font-size:11.5px; margin-top:3px; font-variant-numeric:tabular-nums; }
+    #pr-table input.reason { display:block; width:150px; margin:5px 0 0 auto; font-size:12px; }
+    /* OEM numbers (first 3) and the vehicle pill under the part name; both open the side panel. */
+    #pr-table .oem-line { font-size:12px; color:var(--muted); margin-top:3px; }
+    #pr-table .oem-line a { color:var(--accent); cursor:pointer; white-space:nowrap; }
+    #pr-table .fit-pill { display:inline-flex; align-items:center; gap:4px; margin-top:6px; padding:2px 10px; font-size:12px;
+                          color:var(--text); background:var(--surface-2); border:1px solid var(--border); border-radius:999px; cursor:pointer; }
+    #pr-table .fit-pill:hover { border-color:var(--accent); }
+    #pr-table .fit-pill b { color:var(--text-strong); }
+    .fit-panel { position:fixed; top:0; right:0; bottom:0; width:420px; max-width:92vw; z-index:60; overflow:auto;
+                 background:var(--surface); border-left:1px solid var(--border); box-shadow:var(--shadow-pop); padding:20px 20px 28px; }
+    .fit-panel h3 { margin:0 28px 2px 0; }
+    .fit-panel .sub { color:var(--muted); font-size:12px; }
+    .fit-panel .fit-close { position:absolute; top:14px; right:14px; width:30px; height:30px; border-radius:50%; cursor:pointer;
+                            background:transparent; color:var(--text); border:1px solid var(--border); }
+    .fit-panel .fit-filter { width:100%; margin:12px 0 4px; }
+    .fit-panel .fit-mk { margin:14px 0 4px; font-weight:650; font-size:13px; color:var(--text-strong); }
+    .fit-panel .fit-v { font-size:12.5px; padding:4px 0; border-bottom:1px solid var(--border-soft); }
+    .fit-panel .fit-oems { display:flex; flex-wrap:wrap; gap:4px; }
+    .fit-panel .fit-oems span { font-size:12px; padding:1px 7px; border-radius:6px; background:var(--surface-2); border:1px solid var(--border); }
+    /* The table scrolls in its own window-high area so its header row stays pinned on long invoices. */
+    .pr-scroll { overflow:auto; max-height:calc(100vh - 150px); border-radius:var(--radius); }
+    #pr-table { overflow:visible; }
+    #pr-table > thead > tr > th { position:sticky; top:0; z-index:3; box-shadow:inset 0 -1px 0 var(--border); }
+    #pr-table > thead > tr > th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
+    #pr-table > thead > tr > th.sortable:hover, #pr-table > thead > tr > th.sorted { color:var(--text-strong); }
+    #pr-table > thead > tr > th .sort-arrow { display:inline-block; width:12px; color:var(--accent); }
+
     #pr-table tr.line-error td { opacity:.7; }
     .flag { display:inline-block; margin:0 4px 3px 0; }
     .pr-actions { display:flex; gap:6px; flex-wrap:nowrap; }
@@ -104,7 +136,7 @@
             <th class="num">Qty</th>
             <th class="num">Invoice price</th>
             <th class="num">Cost CIF / PL01 (TZS)</th>
-            <th class="num">Calculated PL03</th>
+            <th class="num sortable" id="pr-sort-calc" title="Sort by calculated PL03: lowest first, highest first, invoice order"><span class="sort-arrow"></span>Calculated PL03</th>
             <th class="num">PL03 to create</th>
             <th class="num">PL05</th>
             <th class="num">Margin</th>
