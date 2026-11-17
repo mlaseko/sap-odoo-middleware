@@ -22,7 +22,8 @@ public sealed record PriceReviewLine(
     decimal? UnitPriceForeign, decimal? DiscountPct, decimal? EffectiveUnitPrice,
     decimal? CifTzs, decimal? Pl01, decimal? FormulaPl03, decimal? FormulaPl05, decimal? FormulaMargin,
     decimal? Ratio, string? RatioBrand, bool FloorApplied, decimal? Floor, int? RetailRoundingStep,
-    IReadOnlyList<PriceReviewFlag> Flags, string? Error, PriceReviewDecisionView? Decision);
+    IReadOnlyList<PriceReviewFlag> Flags, string? Error, PriceReviewDecisionView? Decision,
+    string? PictureUrl = null);
 
 /// <summary>Counts for the review header. Unreviewed includes lines whose decision went stale.</summary>
 public sealed record PriceReviewSummary(int Total, int Approved, int Held, int Stale, int Unreviewed, int Flagged, int Errors);
@@ -183,7 +184,8 @@ public sealed class PriceReviewService : IPriceReviewService
                 Ratio: quote?.Ratio, RatioBrand: quote?.RatioBrand,
                 FloorApplied: quote?.FloorApplied ?? false, Floor: quote?.Floor,
                 RetailRoundingStep: quote?.RetailRoundingStep,
-                Flags: flags, Error: error, Decision: decision));
+                Flags: flags, Error: error, Decision: decision,
+                PictureUrl: line.PictureUrl));
         }
 
         return new PriceReviewDocument(documentId, currency, rate, forexError, Summarise(result), result);

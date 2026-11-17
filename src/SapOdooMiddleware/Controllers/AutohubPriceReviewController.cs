@@ -117,6 +117,21 @@ public sealed class AutohubPriceReviewController : ControllerBase
         return result is null ? NotFound() : Ok(result);
     }
 
+    /// <summary>
+    /// GET /api/autohub/documents/{documentId}/price-review/comparables
+    /// Related parts for every line of the price review in one call, for the page to show them as soon as
+    /// it opens: the same content as the per-line route, per line, plus <c>errors</c> for any line whose
+    /// related parts could not be read. Read-only.
+    /// </summary>
+    [HttpGet("{documentId:guid}/price-review/comparables")]
+    [ProducesResponseType(typeof(PriceReviewComparablesBatch), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> AllComparables(Guid documentId, CancellationToken ct)
+    {
+        var result = await _comparables.GetForDocumentAsync(documentId, ct);
+        return result is null ? NotFound() : Ok(result);
+    }
+
     private const int MaxLines = 500;
 
     public sealed class PreviewRequest

@@ -44,6 +44,13 @@
     table.rel { width:100%; font-size:12.5px; margin:6px 0 10px; }
     table.rel img { width:44px; height:44px; object-fit:contain; background:#fff; border-radius:4px; }
     details.other-tiers > summary { cursor:pointer; color:var(--muted); margin:6px 0; }
+    table.rel img[data-zoom] { cursor:zoom-in; }
+    /* The line's own part picture, as on All lines; click opens it full size (pic-zoom.js). */
+    #pr-table .ln-pic { float:left; margin:0 8px 0 0; }
+    #pr-table .ln-thumb { width:44px; height:44px; object-fit:contain; background:#fff; border:1px solid var(--border);
+                          border-radius:4px; cursor:zoom-in; display:block; }
+    #pr-table .ln-thumb:hover { border-color:var(--primary, #7c6cff); }
+    #pr-table td.rel-cell { white-space:nowrap; min-width:120px; }
 </style>
 
 @if (!Model.IsEditable)
@@ -65,6 +72,10 @@
 <div class="pr-bar" id="pr-bar" data-doc-id="@Model.Doc.Id" data-editable="@Model.IsEditable.ToString().ToLowerInvariant()">
     <span id="pr-counts">Loading…</span>
     <span class="spacer"></span>
+    <span>
+        <button class="btn btn-sm" id="pr-rel-open" type="button" title="Show the related parts of every line that has some">Expand related</button>
+        <button class="btn btn-sm" id="pr-rel-close" type="button" title="Hide every related-parts list">Collapse related</button>
+    </span>
     <span class="pr-filter" id="pr-filter">
         <button class="btn btn-sm active" data-f="all" type="button">All</button>
         <button class="btn btn-sm" data-f="todo" type="button">To review</button>
@@ -97,11 +108,12 @@
             <th class="num">Margin</th>
             <th>Warnings</th>
             <th>Decision</th>
-            <th></th>
+            <th>Related parts</th>
         </tr>
     </thead>
     <tbody id="pr-body"><tr><td colspan="12">Loading…</td></tr></tbody>
 </table>
 </div>
 
+<script src="~/js/autohub/pic-zoom.js" asp-append-version="true"></script>
 <script src="~/js/autohub/prices.js" asp-append-version="true"></script>
