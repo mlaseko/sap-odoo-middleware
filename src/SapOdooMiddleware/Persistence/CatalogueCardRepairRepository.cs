@@ -18,8 +18,17 @@ public sealed record CardRepairRecord(
     long Id, Guid RunId, string ItemCode, string Action, long WrongOitmId, long? CorrectOitmId, long? NewOitmId,
     string SapArticle, DateTime? UndoneAt);
 
+/// <summary>A card made by the middleware that has no 'oem' cross-reference.</summary>
+public sealed record CardWithoutOems(long OitmId, string ItemCode, string? Article);
+
 public interface ICatalogueCardRepairRepository
 {
+    /// <summary>Cards made by the middleware (repair or Bulk Create's own card) with an item code and no OEM number.</summary>
+    Task<IReadOnlyList<CardWithoutOems>> ListCardsWithoutOemsAsync(CancellationToken ct);
+
+    /// <summary>Adds the OEM numbers to the card (skipping any it has, and any internal item code). Returns how many were added.</summary>
+    Task<int> AddOemsAsync(long oitmId, IReadOnlyList<string> oems, CancellationToken ct);
+
     /// <summary>Mislinked cards whose SAP brand's first word is one of <paramref name="brands"/> (all brands when empty).</summary>
     Task<IReadOnlyList<MislinkedCard>> ListMislinkedAsync(IReadOnlyCollection<string> brands, CancellationToken ct);
 
@@ -182,6 +191,54 @@ public sealed class CatalogueCardRepairRepository : ICatalogueCardRepairReposito
         await RecordAsync(conn, tx, runId, card, "created", null, newId, sapArticle, oems.Count, user, ct);
         await tx.CommitAsync(ct);
         return newId;
+    }
+
+    public async Task<IReadOnlyList<CardWithoutOems>> ListCardsWithoutOemsAsync(CancellationToken ct)
+    {
+        const string sql = """
+            SELECT o.id, o.item_code, o.article_number FROM public.oitm o
+            WHERE o.source IN ('molas_card_repair', 'molas_article_mismatch')
+              AND COALESCE(o.item_code, '') <> ''
+              AND NOT EXISTS (SELECT 1 FROM public.oitm_cross_reference x WHERE x.oitm_id = o.id AND x.reference_type = 'oem')
+            ORDER BY o.item_code;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new NpgsqlCommand(sql, conn);
+        var list = new List<CardWithoutOems>();
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        while (await r.ReadAsync(ct))
+            list.Add(new CardWithoutOems(r.GetInt64(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2)));
+        return list;
+    }
+
+    public async Task<int> AddOemsAsync(long oitmId, IReadOnlyList<string> oems, CancellationToken ct)
+    {
+        await using var conn = await OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        int added;
+        await using (var cmd = new NpgsqlCommand("""
+            INSERT INTO public.oitm_cross_reference (oitm_id, oem_number, reference_type)
+            SELECT @id, t, 'oem' FROM unnest(@oems::text[]) t
+            WHERE NOT EXISTS (SELECT 1 FROM public.oitm o WHERE o.item_code = t)
+              AND NOT EXISTS (SELECT 1 FROM public.oitm_cross_reference x
+                              WHERE x.oitm_id = @id AND x.reference_type = 'oem' AND upper(x.oem_number) = upper(t));
+            """, conn, tx))
+        {
+            cmd.Parameters.AddWithValue("id", oitmId);
+            cmd.Parameters.AddWithValue("oems", oems.ToArray());
+            added = await cmd.ExecuteNonQueryAsync(ct);
+        }
+        // Keep the repair record's count in step for cards the repair made.
+        await using (var cmd = new NpgsqlCommand("""
+            UPDATE public.catalogue_card_repair SET oem_count = oem_count + @n WHERE new_oitm_id = @id AND undone_at IS NULL;
+            """, conn, tx))
+        {
+            cmd.Parameters.AddWithValue("n", added);
+            cmd.Parameters.AddWithValue("id", oitmId);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        await tx.CommitAsync(ct);
+        return added;
     }
 
     public async Task<int> UndoRunAsync(Guid runId, CancellationToken ct)

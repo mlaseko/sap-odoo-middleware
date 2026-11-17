@@ -136,4 +136,56 @@ public class CatalogueCardRepairTests
         Assert.Equal("skipped", report.Items.Single(i => i.ItemCode == "VAG10613").Result);
         repo.Verify(r => r.MoveToCorrectCardAsync(report.RunId!.Value, It.IsAny<MislinkedCard>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    // ── Reading OEM numbers from real SAP Item Descriptions (the 11 cards left without OEMs) ──
+
+    [Theory]
+    [InlineData("B10045/5Q0411303P/5Q0411303L/5Q0411303S", "B10045", "5Q0411303P|5Q0411303L|5Q0411303S", "")]
+    [InlineData("B10218/06K115225C/06K109507G/06H105209AT", "B10218", "06K115225C|06K109507G|06H105209AT", "")]
+    [InlineData("B10207/03H109503kit/03H109507/03H109465", "B10207", "03H109503|03H109507|03H109465", "")]
+    [InlineData("B10220/06K198228Ckit/06H109158M/06H109467AR", "B10220", "06K198228C|06H109158M|06H109467AR", "")]
+    [InlineData("1K0412303M/5Q0413175C/B1002803", "B10028", "1K0412303M|5Q0413175C", "")]
+    [InlineData("4M0853651Q RN4/88531790102", "88531790102", "4M0853651Q", "")]
+    [InlineData("99061388401/038906051C/7L6145795R/1J0145770L/04E906051", "99061388401", "038906051C|7L6145795R|1J0145770L|04E906051", "")]
+    [InlineData("180121367/1K0121367A/1K0121367F1KD121367D1Z0121367AK11789601", "K11789601",
+        "180121367|1K0121367A", "1K0121367F1KD121367D1Z0121367AK11789601")]
+    public void Description_OEMs_are_read_in_any_order(string description, string article, string oems, string unreadable)
+    {
+        var r = CatalogueCardRepairService.ReadDescription(description, article);
+        Assert.Equal(oems, string.Join("|", r.Oems));
+        Assert.Equal(unreadable, string.Join("|", r.Unreadable));
+    }
+
+    [Fact]
+    public async Task Oem_fill_adds_the_description_OEMs_to_cards_without_any()
+    {
+        var repo = new Mock<ICatalogueCardRepairRepository>();
+        repo.Setup(r => r.ListCardsWithoutOemsAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[]
+        {
+            new CardWithoutOems(9001, "VAG10335", "B10045"),
+            new CardWithoutOems(9002, "VAG99999", "X1"),
+        });
+        repo.Setup(r => r.AddOemsAsync(9001, It.IsAny<IReadOnlyList<string>>(), It.IsAny<CancellationToken>())).ReturnsAsync(3);
+        var sap = new Mock<IAutohubInventorySqlService>();
+        sap.Setup(s => s.GetComparableItemsAsync(It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<CancellationToken>()))
+           .ReturnsAsync(new Dictionary<string, ComparableSapItem>(StringComparer.OrdinalIgnoreCase)
+           {
+               ["VAG10335"] = new("VAG10335", null, null, null, true, "B10045", "B10045/5Q0411303P/5Q0411303L/5Q0411303S"),
+               ["VAG99999"] = new("VAG99999", null, null, null, true, "X1", "PLAIN TEXT NAME"),
+           });
+        var svc = new CatalogueCardRepairService(repo.Object, sap.Object, NullLogger<CatalogueCardRepairService>.Instance);
+
+        var preview = await svc.PreviewOemFillAsync(CancellationToken.None);
+        Assert.False(preview.Applied);
+        Assert.Equal(1, preview.WithOems);
+        Assert.Equal(1, preview.StillNone);
+        repo.Verify(r => r.AddOemsAsync(It.IsAny<long>(), It.IsAny<IReadOnlyList<string>>(), It.IsAny<CancellationToken>()), Times.Never);
+
+        var applied = await svc.ApplyOemFillAsync(CancellationToken.None);
+        Assert.Equal(3, applied.Added);
+        Assert.Equal("done", applied.Items.Single(i => i.ItemCode == "VAG10335").Result);
+        Assert.Equal("none found", applied.Items.Single(i => i.ItemCode == "VAG99999").Result);
+        repo.Verify(r => r.AddOemsAsync(9001, It.Is<IReadOnlyList<string>>(o => o.SequenceEqual(new[] { "5Q0411303P", "5Q0411303L", "5Q0411303S" })),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
 }
