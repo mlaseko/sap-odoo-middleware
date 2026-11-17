@@ -705,7 +705,8 @@ public class AutohubInventoryController : ControllerBase
 
             var open = lines.Where(l => l.LineStatus != "C" && l.Counted).ToList();
             var (recalc, countDate) = await RecalculateLinesAsync(
-                docEntry, open, request?.LineCounts ?? new List<CountingLineCount>(), ct);
+                docEntry, open, request?.LineCounts ?? new List<CountingLineCount>(), ct,
+                request?.PaperTransfers);
             // A line that matched the count date can differ now, so the review needs
             // every line's posting price, not only the count-date differences'.
             var prices = await _sql.GetItemPricesAsync(
@@ -718,6 +719,8 @@ public class AutohubInventoryController : ControllerBase
                 CountDate = countDate,
                 CalculatedAt = CountingRecalculator.ToMinute(NowInSapZone()),
                 Lines = open.Select(l => recalc[l.LineNum]).ToList(),
+                PaperTransfers = (request?.PaperTransfers ?? new List<string>())
+                    .Where(r => !string.IsNullOrWhiteSpace(r)).Select(r => r.Trim()).Distinct().ToList(),
             }));
         }
         catch (Exception ex)
@@ -2256,7 +2259,8 @@ public class AutohubInventoryController : ControllerBase
     {
         var byLineNum = lines.ToDictionary(l => l.LineNum);
         var selected = postLines.Select(p => byLineNum[p.LineNum]).ToList();
-        var (recalc, _) = await RecalculateLinesAsync(request.CountingDocEntry, selected, request.LineCounts, ct);
+        var (recalc, _) = await RecalculateLinesAsync(
+            request.CountingDocEntry, selected, request.LineCounts, ct, request.PaperTransfers);
 
         var conflicts = selected
             .Select(l => recalc[l.LineNum])
@@ -2424,7 +2428,7 @@ public class AutohubInventoryController : ControllerBase
     /// <summary>Recalculates the given counted lines at the current moment, keyed by LineNum.</summary>
     private async Task<(Dictionary<int, CountingRecalcLine> Lines, DateTime? CountDate)> RecalculateLinesAsync(
         int docEntry, IReadOnlyList<CountingLineDetail> lines, IReadOnlyCollection<CountingLineCount> appCounts,
-        CancellationToken ct)
+        CancellationToken ct, IReadOnlyCollection<string>? paperTransfers = null)
     {
         var result = new Dictionary<int, CountingRecalcLine>();
         var countDate = await _sql.GetCountingCountDateAsync(docEntry, ct);
@@ -2441,7 +2445,8 @@ public class AutohubInventoryController : ControllerBase
         // From the count date too, so the review can show what moved before each count.
         var since = points.Values.Min(p => p.From).Date;
         if (countDate is DateTime counted && counted.Date < since) since = counted.Date;
-        var movements = await _sql.GetCountingMovementsAsync(docEntry, since, ct);
+        var movements = CountingRecalculator.ExcludePaperTransfers(
+            await _sql.GetCountingMovementsAsync(docEntry, since, ct), paperTransfers);
         var stockNow = await _sql.GetCountingStockNowAsync(docEntry, ct);
         var costs = await _sql.GetCountingCostsAsync(docEntry, ct);
         foreach (var line in lines)

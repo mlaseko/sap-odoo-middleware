@@ -87,6 +87,46 @@ public class AutohubPostAtCurrentStockTests
     // ── The calculation ───────────────────────────────────────────────
 
     [Fact]
+    public void ExcludePaperTransfers_DropsOnlyThoseTransfers()
+    {
+        // Count found 1 short in BSKT21 and 1 over in BSKT24; the reviewer converted the
+        // pair to bin transfer 13500. A real transfer (13501) and a delivery stay in.
+        var at = new DateTime(2026, 11, 17, 10, 0, 0);
+        var movements = new List<CountingLineMovement>
+        {
+            new() { LineNum = 1, TransType = 67, BaseRef = "13500", CreatedAt = at, QtyOut = 1 },
+            new() { LineNum = 2, TransType = 67, BaseRef = "13500", CreatedAt = at, QtyIn = 1 },
+            new() { LineNum = 1, TransType = 67, BaseRef = "13501", CreatedAt = at, QtyOut = 2 },
+            new() { LineNum = 2, TransType = 15, BaseRef = "13500", CreatedAt = at, QtyOut = 1 },
+        };
+
+        var kept = CountingRecalculator.ExcludePaperTransfers(movements, new[] { " 13500 " });
+
+        Assert.Equal(2, kept.Count);
+        Assert.Contains(kept, m => m.TransType == 67 && m.BaseRef == "13501");
+        Assert.Contains(kept, m => m.TransType == 15 && m.BaseRef == "13500");
+        Assert.Equal(4, CountingRecalculator.ExcludePaperTransfers(movements, null).Count);
+    }
+
+    [Fact]
+    public void PaperTransfer_LeavesOnlyTheRemainderToPost()
+    {
+        // SAP 3 in BSKT21, counted 0 (short 3). Converted 2 to BSKT24 at 10:05 (paper move).
+        // Carry-forward ignores the transfer: updated stays 0, stock now 1, adjustment −1.
+        var line = new CountingLineDetail { LineNum = 1, ItemCode = "VAG13340", SystemQty = 3, CountedQty = 0 };
+        var moves = CountingRecalculator.ExcludePaperTransfers(new List<CountingLineMovement>
+        {
+            new() { LineNum = 1, TransType = 67, BaseRef = "13500", CreatedAt = new DateTime(2026, 11, 17, 10, 5, 0), QtyOut = 2 },
+        }, new[] { "13500" });
+
+        var r = CountingRecalculator.Recalculate(line, 0m, new DateTime(2026, 11, 17, 9, 0, 0), true, 1m, moves);
+
+        Assert.Equal(0m, r.UpdatedQty);
+        Assert.Equal(-1m, r.Adjustment);
+        Assert.Equal(CountingRecalculator.StatusPost, r.Status);
+    }
+
+    [Fact]
     public void EntryMoment_ReadsHhmm()
     {
         Assert.Equal(new DateTime(2026, 10, 28, 14, 29, 0), CountingRecalculator.EntryMoment(new DateTime(2026, 10, 28), 1429));

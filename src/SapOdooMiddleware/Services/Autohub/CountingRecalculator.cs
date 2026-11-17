@@ -91,6 +91,25 @@ public static class CountingRecalculator
     }
 
     /// <summary>
+    /// Leaves out the movements of the given inventory transfers (TransType 67, by DocNum).
+    /// These are bin transfers the app posted to correct where stock is booked after a
+    /// count (short in one bin, over in another): the counts already reflect the physical
+    /// position, so carrying the transfer forward would count the move twice.
+    /// </summary>
+    public static List<CountingLineMovement> ExcludePaperTransfers(
+        IEnumerable<CountingLineMovement> movements, IEnumerable<string>? paperTransfers)
+    {
+        var refs = new HashSet<string>(
+            (paperTransfers ?? Enumerable.Empty<string>())
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Select(r => r.Trim()),
+            StringComparer.Ordinal);
+        return refs.Count == 0
+            ? movements.ToList()
+            : movements.Where(m => !(m.TransType == 67 && m.BaseRef is string b && refs.Contains(b.Trim()))).ToList();
+    }
+
+    /// <summary>
     /// Marks a line SAP would refuse with 10001287 "Item cost not found": it takes stock
     /// out (adjustment &lt; 0) of a moving-average item whose warehouse and item cost are
     /// both 0 (VAG14320 on counting 27). Stock going out is valued at that cost, not the

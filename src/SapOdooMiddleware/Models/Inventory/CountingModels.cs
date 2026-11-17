@@ -156,6 +156,8 @@ public class PostingCreate
     /// Lines without one are measured from the counting's count date.
     /// </summary>
     public List<CountingLineCount> LineCounts { get; set; } = new();
+    /// <summary>Bin transfers (DocNum) left out of the carry-forward; see CountingRecalcRequest.PaperTransfers.</summary>
+    public List<string> PaperTransfers { get; set; } = new();
 }
 
 /// <summary>One posting line handed to the DI API (built server-side from the counting lines).</summary>
