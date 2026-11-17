@@ -294,11 +294,7 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
     }
 
     /// <summary>Article number for comparison: letters and digits only, upper case. Null when empty.</summary>
-    internal static string? NormArticle(string? article)
-    {
-        var s = Regex.Replace((article ?? "").ToUpperInvariant(), "[^A-Z0-9]", "");
-        return s.Length == 0 ? null : s;
-    }
+    internal static string? NormArticle(string? article) => ArticleNumbers.Normalize(article);
 
     /// <summary>Lower-case, letters/digits/spaces only, single spaces. Null when empty.</summary>
     internal static string? NormPart(string? name)

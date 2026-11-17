@@ -325,6 +325,22 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
                             "SAP item {ItemCode} created but donor oitm {OitmId} missing; own-identity row not minted.",
                             itemCode, neonOitmId);
                 }
+                else if (DecideBridge(
+                             (await _bridge.GetOitmRowAsync(neonOitmId, ct))?.ArticleNumber, line.SupplierArticleNumber)
+                         == BridgeAction.OwnCard)
+                {
+                    // The enrichment's card is a related part (a kit's component, a left/right twin, a
+                    // neighbouring variant), not this one: leave it alone and give the item its own card,
+                    // with the OEM numbers its SAP item name carries.
+                    var ownId = await _bridge.CreateArticleRowAsync(
+                        itemCode, line.SupplierArticleNumber!, line.Brand, OwnCardSource,
+                        MergeOems(filtered, donorOems), ct);
+                    await _review.UpdateNeonOitmIdAsync(line.Id, ownId, ct);
+                    _logger.LogWarning(
+                        "SAP item {ItemCode} (article {Article}): enrichment card oitm {OitmId} is another article; " +
+                        "own card oitm {OwnId} created instead of stamping it.",
+                        itemCode, line.SupplierArticleNumber, neonOitmId, ownId);
+                }
                 else
                 {
                     var link = await _bridge.LinkAsync(neonOitmId, itemCode, ct);
@@ -398,6 +414,19 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
     /// The line's invoice OEM(s) first, then the enrichment cross-reference OEMs (filtered_oems),
     /// de-duplicated (case-insensitive, order preserved). <see cref="BuildItemName"/> keeps up to five.
     /// </summary>
+    /// <summary>oitm.source of a card made because the enrichment's card was another article.</summary>
+    internal const string OwnCardSource = "molas_article_mismatch";
+
+    internal enum BridgeAction { Link, OwnCard }
+
+    /// <summary>
+    /// Stamp the new item code on the enrichment's card only when that card is this part: its article
+    /// number is the invoice line's (compared on letters and digits). A card of another article gets
+    /// OwnCard. When either article is unknown the card is linked as before.
+    /// </summary>
+    internal static BridgeAction DecideBridge(string? cardArticle, string? lineArticle) =>
+        ArticleNumbers.Differ(cardArticle, lineArticle) ? BridgeAction.OwnCard : BridgeAction.Link;
+
     private static List<string> MergeOems(IReadOnlyList<string> lineOems, IReadOnlyList<string>? enrichedOems)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

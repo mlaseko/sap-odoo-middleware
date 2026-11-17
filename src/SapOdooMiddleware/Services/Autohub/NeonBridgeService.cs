@@ -67,6 +67,16 @@ public interface INeonBridgeService
         string? articleNumber, string? supplierName, CancellationToken ct);
 
     /// <summary>
+    /// A minimal parts_catalog card for a SAP item whose part has no card of its own: article number,
+    /// supplier, item code and source, plus the given OEM numbers as 'oem' cross-references (never one
+    /// that is an internal item code). Nothing is copied from any other card, so a related part's name,
+    /// picture or specs never end up on it. When a card already carries this item code with this article,
+    /// that card is returned instead of a second one. Returns the card's id.
+    /// </summary>
+    Task<long> CreateArticleRowAsync(string sapItemCode, string articleNumber, string? supplierName, string source,
+        IReadOnlyList<string> oemNumbers, CancellationToken ct);
+
+    /// <summary>
     /// Links a freshly-created SAP item back to its pre-enriched parts_catalog row by stamping the SAP
     /// ItemCode onto <c>oitm</c> (only WHERE item_code IS NULL — never overwrites a populated value).
     /// This is the middleware's ONLY write to the catalog; the enrichment service (DGX) owns row
@@ -318,6 +328,71 @@ public sealed class NeonBridgeService : INeonBridgeService
         _logger.LogWarning(
             "Cross-supplier: DGX mint unavailable — minted SHALLOW own-identity oitm {NewId} (supplier {Supplier}, ItemCode {Code}); copied OEMs from donor {Donor}. Deep tables pending a DGX backfill.",
             newId, supplierName, sapItemCode, donorOitmId);
+        return newId;
+    }
+
+    public async Task<long> CreateArticleRowAsync(string sapItemCode, string articleNumber, string? supplierName,
+        string source, IReadOnlyList<string> oemNumbers, CancellationToken ct)
+    {
+        await using var conn = new NpgsqlConnection(ConnectionString);
+        await conn.OpenAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+
+        // Re-running for the same item and article reuses its card.
+        const string existing = """
+            SELECT id FROM oitm
+            WHERE item_code = @code
+              AND upper(regexp_replace(COALESCE(article_number, ''), '[^A-Za-z0-9]', '', 'g'))
+                = upper(regexp_replace(@article, '[^A-Za-z0-9]', '', 'g'))
+            ORDER BY id LIMIT 1;
+            """;
+        await using (var cmd = new NpgsqlCommand(existing, conn, tx))
+        {
+            cmd.Parameters.AddWithValue("code", sapItemCode);
+            cmd.Parameters.AddWithValue("article", articleNumber);
+            if (await cmd.ExecuteScalarAsync(ct) is long found)
+            {
+                await tx.CommitAsync(ct);
+                return found;
+            }
+        }
+
+        long newId;
+        const string insert = """
+            INSERT INTO oitm (article_number, supplier_name, item_code, source)
+            VALUES (@article, @supplier, @code, @source)
+            RETURNING id;
+            """;
+        await using (var cmd = new NpgsqlCommand(insert, conn, tx))
+        {
+            cmd.Parameters.AddWithValue("article", articleNumber.Trim());
+            cmd.Parameters.AddWithValue("supplier", (object?)supplierName?.Trim() ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("code", sapItemCode);
+            cmd.Parameters.AddWithValue("source", source);
+            newId = Convert.ToInt64(await cmd.ExecuteScalarAsync(ct));
+        }
+
+        // The item's own OEM numbers, so related-part search keeps working. Namespace guard as elsewhere:
+        // never an internal item code.
+        var oems = oemNumbers.Where(o => !string.IsNullOrWhiteSpace(o)).Select(o => o.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (oems.Length > 0)
+        {
+            const string xref = """
+                INSERT INTO oitm_cross_reference (oitm_id, oem_number, reference_type)
+                SELECT @id, t, 'oem' FROM unnest(@oems::text[]) t
+                WHERE NOT EXISTS (SELECT 1 FROM oitm o WHERE o.item_code = t);
+                """;
+            await using var cmd = new NpgsqlCommand(xref, conn, tx);
+            cmd.Parameters.AddWithValue("id", newId);
+            cmd.Parameters.AddWithValue("oems", oems);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+
+        await tx.CommitAsync(ct);
+        _logger.LogInformation(
+            "Neon bridge: own card oitm {NewId} for {Code} (article {Article}, {Oems} OEMs, source {Source}).",
+            newId, sapItemCode, articleNumber, oems.Length, source);
         return newId;
     }
 

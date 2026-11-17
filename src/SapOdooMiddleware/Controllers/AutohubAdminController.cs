@@ -11,11 +11,53 @@ public class AutohubAdminController : ControllerBase
 {
     private readonly AutohubSapSetupVerifier _verifier;
     private readonly PartsSapReconciliationService _reconcile;
+    private readonly ICatalogueCardRepairService _cardRepair;
 
-    public AutohubAdminController(AutohubSapSetupVerifier verifier, PartsSapReconciliationService reconcile)
+    public AutohubAdminController(AutohubSapSetupVerifier verifier, PartsSapReconciliationService reconcile,
+        ICatalogueCardRepairService cardRepair)
     {
         _verifier = verifier;
         _reconcile = reconcile;
+        _cardRepair = cardRepair;
+    }
+
+    private static readonly string[] DefaultRepairBrands = { "VIKA", "DPA", "BORSEHUNG" };
+
+    // "VIKA,DPA" → those brands; "all" → every brand; empty → VIKA, DPA, BORSEHUNG.
+    private static IReadOnlyCollection<string> RepairBrands(string? brands) =>
+        string.IsNullOrWhiteSpace(brands) ? DefaultRepairBrands
+        : brands.Trim().Equals("all", StringComparison.OrdinalIgnoreCase) ? Array.Empty<string>()
+        : brands.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    /// <summary>
+    /// GET /api/autohub/catalogue-card-repair?brands=VIKA,DPA,BORSEHUNG
+    /// Preview of the catalogue card repair: every SAP item whose catalogue card describes another part,
+    /// and what the repair would do (link / create / duplicate / skip). Changes nothing.
+    /// </summary>
+    [HttpGet("catalogue-card-repair")]
+    public async Task<IActionResult> CatalogueCardRepairPreview([FromQuery] string? brands, CancellationToken ct) =>
+        Ok(await _cardRepair.PreviewAsync(RepairBrands(brands), ct));
+
+    /// <summary>
+    /// POST /api/autohub/catalogue-card-repair  body: { "brands": "VIKA,DPA,BORSEHUNG", "confirm": true }
+    /// Applies the repair (links and creates; duplicates and skips are left). Returns the run id to undo it.
+    /// </summary>
+    [HttpPost("catalogue-card-repair")]
+    public async Task<IActionResult> CatalogueCardRepairApply([FromBody] CardRepairRequest? body, CancellationToken ct)
+    {
+        if (body?.Confirm != true)
+            return BadRequest(new { error = "Send \"confirm\": true to apply. GET the same URL first to preview." });
+        var user = HttpContext.User?.Identity?.Name is { Length: > 0 } n ? n : "operator";
+        return Ok(await _cardRepair.ApplyAsync(RepairBrands(body.Brands), user, ct));
+    }
+
+    /// <summary>POST /api/autohub/catalogue-card-repair/undo  body: { "run_id": "…" } — puts a repair run back.</summary>
+    [HttpPost("catalogue-card-repair/undo")]
+    public async Task<IActionResult> CatalogueCardRepairUndo([FromBody] CardRepairUndoRequest? body, CancellationToken ct)
+    {
+        if (body?.RunId is not { } runId || runId == Guid.Empty)
+            return BadRequest(new { error = "run_id is required." });
+        return Ok(new { run_id = runId, restored = await _cardRepair.UndoAsync(runId, ct) });
     }
 
     /// <summary>
@@ -49,3 +91,5 @@ public class AutohubAdminController : ControllerBase
 }
 
 public sealed record ReconcileMissingRequest(List<string> ItemCodes);
+public sealed record CardRepairRequest(string? Brands, bool? Confirm);
+public sealed record CardRepairUndoRequest(Guid? RunId);
