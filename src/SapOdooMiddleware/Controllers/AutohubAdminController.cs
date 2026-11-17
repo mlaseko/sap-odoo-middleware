@@ -51,6 +51,23 @@ public class AutohubAdminController : ControllerBase
         return Ok(await _cardRepair.ApplyAsync(RepairBrands(body.Brands), user, ct));
     }
 
+    /// <summary>
+    /// GET /api/autohub/catalogue-card-repair/oems — cards made by the middleware that have no OEM number, and
+    /// the OEM numbers their SAP Item Description gives (plus any part too garbled to read). Changes nothing.
+    /// </summary>
+    [HttpGet("catalogue-card-repair/oems")]
+    public async Task<IActionResult> CatalogueCardOemPreview(CancellationToken ct) =>
+        Ok(await _cardRepair.PreviewOemFillAsync(ct));
+
+    /// <summary>POST /api/autohub/catalogue-card-repair/oems  body: { "confirm": true } — adds those OEM numbers.</summary>
+    [HttpPost("catalogue-card-repair/oems")]
+    public async Task<IActionResult> CatalogueCardOemApply([FromBody] CardRepairRequest? body, CancellationToken ct)
+    {
+        if (body?.Confirm != true)
+            return BadRequest(new { error = "Send \"confirm\": true to apply. GET the same URL first to preview." });
+        return Ok(await _cardRepair.ApplyOemFillAsync(ct));
+    }
+
     /// <summary>POST /api/autohub/catalogue-card-repair/undo  body: { "run_id": "…" } — puts a repair run back.</summary>
     [HttpPost("catalogue-card-repair/undo")]
     public async Task<IActionResult> CatalogueCardRepairUndo([FromBody] CardRepairUndoRequest? body, CancellationToken ct)

@@ -18,8 +18,25 @@ public sealed record CardRepairReport(
     Guid? RunId, bool Applied, IReadOnlyList<string> Brands, int Link, int Create, int Duplicate, int Skip,
     int Done, int Failed, IReadOnlyList<CardRepairItem> Items);
 
+/// <summary>
+/// OEM numbers to add to a card made by the middleware (repair or Bulk Create's own card) that has none,
+/// read from the SAP Item Description. Unreadable: parts left out because several numbers run together.
+/// </summary>
+public sealed record CardOemFill(
+    long OitmId, string ItemCode, string? Article, string? ItemDescription,
+    IReadOnlyList<string> Oems, IReadOnlyList<string> Unreadable, string? Result = null, int Added = 0);
+
+public sealed record CardOemFillReport(bool Applied, int Cards, int WithOems, int StillNone, int Added,
+    IReadOnlyList<CardOemFill> Items);
+
 public interface ICatalogueCardRepairService
 {
+    /// <summary>Cards made by the middleware with no OEM number, and the OEMs their SAP description gives. Changes nothing.</summary>
+    Task<CardOemFillReport> PreviewOemFillAsync(CancellationToken ct);
+
+    /// <summary>Adds those OEM numbers (never removes any).</summary>
+    Task<CardOemFillReport> ApplyOemFillAsync(CancellationToken ct);
+
     /// <summary>What the repair would do for the brands (first word of the SAP brand). Changes nothing.</summary>
     Task<CardRepairReport> PreviewAsync(IReadOnlyCollection<string> brands, CancellationToken ct);
 
@@ -96,6 +113,46 @@ public sealed class CatalogueCardRepairService : ICatalogueCardRepairService
 
     public Task<int> UndoAsync(Guid runId, CancellationToken ct) => _repo.UndoRunAsync(runId, ct);
 
+    public async Task<CardOemFillReport> PreviewOemFillAsync(CancellationToken ct) =>
+        FillReport(false, await PlanOemFillAsync(ct));
+
+    public async Task<CardOemFillReport> ApplyOemFillAsync(CancellationToken ct)
+    {
+        var done = new List<CardOemFill>();
+        foreach (var item in await PlanOemFillAsync(ct))
+        {
+            if (item.Oems.Count == 0) { done.Add(item with { Result = "none found" }); continue; }
+            try
+            {
+                var added = await _repo.AddOemsAsync(item.OitmId, item.Oems, ct);
+                done.Add(item with { Result = "done", Added = added });
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Adding OEMs to card {OitmId} ({ItemCode}) failed.", item.OitmId, item.ItemCode);
+                done.Add(item with { Result = "failed: " + ex.Message });
+            }
+        }
+        return FillReport(true, done);
+    }
+
+    private async Task<List<CardOemFill>> PlanOemFillAsync(CancellationToken ct)
+    {
+        var cards = await _repo.ListCardsWithoutOemsAsync(ct);
+        var sap = await _sap.GetComparableItemsAsync(cards.Select(c => c.ItemCode).Distinct().ToList(), ct);
+        return cards.Select(c =>
+        {
+            sap.TryGetValue(c.ItemCode, out var s);
+            var article = s?.ArticleNumber ?? c.Article ?? "";
+            var read = ReadDescription(s?.ItemName, article);
+            return new CardOemFill(c.OitmId, c.ItemCode, article, s?.ItemName, read.Oems, read.Unreadable);
+        }).ToList();
+    }
+
+    private static CardOemFillReport FillReport(bool applied, IReadOnlyList<CardOemFill> items) =>
+        new(applied, items.Count, items.Count(i => i.Oems.Count > 0), items.Count(i => i.Oems.Count == 0),
+            items.Sum(i => i.Added), items);
+
     private async Task<List<CardRepairItem>> PlanAsync(IReadOnlyCollection<string> brands, CancellationToken ct)
     {
         var cards = await _repo.ListMislinkedAsync(brands, ct);
@@ -133,22 +190,46 @@ public sealed class CatalogueCardRepairService : ICatalogueCardRepairService
             oems.Count == 0 ? "No OEM number in the SAP item name: the new card has none." : null, oems);
     }
 
+    /// <summary>The OEM numbers of a SAP item, and the parts of its description that could not be read safely.</summary>
+    public sealed record DescriptionOems(IReadOnlyList<string> Oems, IReadOnlyList<string> Unreadable);
+
+    /// <summary>A part longer than this is several numbers run together without "/" (e.g. "1K0121367F1KD121367D…").</summary>
+    internal const int MaxOemLength = 20;
+
     /// <summary>
-    /// The OEM numbers in a SAP item name built by Bulk Create ("OEM1/OEM2/…/article[/alternate]"): the parts
-    /// before the article, each at least 5 characters with a digit. Names that do not contain the article give none.
+    /// The OEM numbers in a SAP Item Description (OITM.ItemName), which holds the OEM numbers and the article
+    /// separated by "/" in any order ("B10045/5Q0411303P/…" or "…/06J115105AC/B12698"). Each part: its first
+    /// word ("4M0853651Q RN4" → 4M0853651Q), without a trailing "kit" ("03H109503kit" → 03H109503); kept when
+    /// it has at least 5 characters and a digit. Left out: the article and anything starting with it (a variant
+    /// such as B1002803 for B10028). A part longer than <see cref="MaxOemLength"/> is several numbers run
+    /// together: not guessed at, returned as Unreadable so the description can be fixed in SAP.
     /// </summary>
-    internal static IReadOnlyList<string> OemsFromItemName(string? itemName, string article)
+    internal static DescriptionOems ReadDescription(string? description, string article)
     {
-        if (string.IsNullOrWhiteSpace(itemName)) return Array.Empty<string>();
-        var parts = itemName.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var target = ArticleNumbers.Normalize(article);
-        int at = Array.FindIndex(parts, p => ArticleNumbers.Normalize(p) == target);
-        if (at <= 0) return Array.Empty<string>();
-        return parts.Take(at)
-            .Where(p => p.Length >= 5 && p.Any(char.IsDigit) && !p.Contains(' '))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        if (string.IsNullOrWhiteSpace(description))
+            return new(Array.Empty<string>(), Array.Empty<string>());
+        var art = ArticleNumbers.Normalize(article);
+        var oems = new List<string>();
+        var unreadable = new List<string>();
+        foreach (var part in description.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var word = part.Split(' ', StringSplitOptions.RemoveEmptyEntries)[0];
+            if (word.Length > 8 && word.EndsWith("kit", StringComparison.OrdinalIgnoreCase))
+                word = word[..^3];
+            var n = ArticleNumbers.Normalize(word);
+            if (n is null) continue;
+            if (art is not null && n.StartsWith(art, StringComparison.Ordinal)) continue;
+            if (word.Length > MaxOemLength) { unreadable.Add(part); continue; }
+            if (word.Length < 5 || !word.Any(char.IsDigit) || !word.All(c => char.IsLetterOrDigit(c) || c is '-' or '.')) continue;
+            var oem = word.ToUpperInvariant();
+            if (!oems.Contains(oem)) oems.Add(oem);
+        }
+        return new(oems, unreadable);
     }
+
+    /// <summary>The OEM numbers of <see cref="ReadDescription"/>.</summary>
+    internal static IReadOnlyList<string> OemsFromItemName(string? itemName, string article) =>
+        ReadDescription(itemName, article).Oems;
 
     private static CardRepairReport Report(Guid? runId, bool applied, IReadOnlyCollection<string> brands, IReadOnlyList<CardRepairItem> items) =>
         new(runId, applied, brands.ToList(),
