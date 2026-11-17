@@ -23,7 +23,7 @@ public sealed record PriceReviewLine(
     decimal? CifTzs, decimal? Pl01, decimal? FormulaPl03, decimal? FormulaPl05, decimal? FormulaMargin,
     decimal? Ratio, string? RatioBrand, bool FloorApplied, decimal? Floor, int? RetailRoundingStep,
     IReadOnlyList<PriceReviewFlag> Flags, string? Error, PriceReviewDecisionView? Decision,
-    string? PictureUrl = null);
+    string? PictureUrl = null, IReadOnlyList<string>? OemNumbers = null, string? FitForAuto = null);
 
 /// <summary>Counts for the review header. Unreviewed includes lines whose decision went stale.</summary>
 public sealed record PriceReviewSummary(int Total, int Approved, int Held, int Stale, int Unreviewed, int Flagged, int Errors);
@@ -185,10 +185,29 @@ public sealed class PriceReviewService : IPriceReviewService
                 FloorApplied: quote?.FloorApplied ?? false, Floor: quote?.Floor,
                 RetailRoundingStep: quote?.RetailRoundingStep,
                 Flags: flags, Error: error, Decision: decision,
-                PictureUrl: line.PictureUrl));
+                PictureUrl: line.PictureUrl,
+                OemNumbers: OemsOf(line), FitForAuto: string.IsNullOrWhiteSpace(line.FitForAuto) ? null : line.FitForAuto.Trim()));
         }
 
         return new PriceReviewDocument(documentId, currency, rate, forexError, Summarise(result), result);
+    }
+
+    /// <summary>
+    /// The line's OEM numbers for display: the invoice's own first (a cell can hold several), then the matched
+    /// part's, each once (compared without spaces, dots or dashes), in that order.
+    /// </summary>
+    internal static IReadOnlyList<string> OemsOf(PartsReviewLineRow line)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var list = new List<string>();
+        foreach (var raw in (line.OemNumbers ?? new List<string>()).SelectMany(v => (v ?? "").Split(new[] { ' ', ',', ';', '/' },
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                 .Concat(line.PartOems ?? Array.Empty<string>()))
+        {
+            var key = new string(raw.Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
+            if (key.Length >= 5 && key.Any(char.IsDigit) && seen.Add(key)) list.Add(raw.Trim().ToUpperInvariant());
+        }
+        return list;
     }
 
     // ── Live recalculation ──────────────────────────────────────────────────────

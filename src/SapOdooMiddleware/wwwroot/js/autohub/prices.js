@@ -71,6 +71,124 @@
                (e.reason !== undefined && (e.reason || '') !== ((l.decision && l.decision.reason) || ''));
     }
 
+    // ---- money box ----
+    const grouped = n => Number(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    const digitsOf = s => String(s || '').replace(/[^0-9]/g, '');
+
+    // ---- OEM numbers and vehicle fitment (side panel) ----
+    const OEMS_ON_LINE = 3;
+    function oemLine(l) {
+        const oems = l.oem_numbers || [];
+        if (!oems.length) return '';
+        const more = oems.length - OEMS_ON_LINE;
+        return '<div class="oem-line">OEM ' + oems.slice(0, OEMS_ON_LINE).map(esc).join(', ') +
+            (more > 0 ? ' <a class="fit-open" data-fit="' + l.line_id + '">+' + more + ' more</a>' : '') + '</div>';
+    }
+
+    // Vehicle makes a fitment text can name (two-word ones first, so "LAND ROVER" wins over a single word).
+    const KNOWN_MAKES = ['ALFA ROMEO', 'ASTON MARTIN', 'LAND ROVER', 'MERCEDES-BENZ', 'ROLLS-ROYCE',
+        'VW', 'VOLKSWAGEN', 'AUDI', 'SKODA', 'SEAT', 'CUPRA', 'PORSCHE', 'BMW', 'MINI', 'JAGUAR', 'VOLVO', 'FORD', 'OPEL',
+        'VAUXHALL', 'PEUGEOT', 'CITROEN', 'CITROËN', 'RENAULT', 'DACIA', 'NISSAN', 'INFINITI', 'TOYOTA', 'LEXUS', 'HONDA',
+        'MAZDA', 'MITSUBISHI', 'SUBARU', 'SUZUKI', 'HYUNDAI', 'KIA', 'FIAT', 'JEEP', 'CHRYSLER', 'DODGE', 'CHEVROLET',
+        'SAAB', 'ISUZU', 'IVECO', 'BENTLEY', 'MASERATI', 'TESLA'];
+    const reEsc = s => s.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+    function makeOf(vehicle) {
+        const v = vehicle.toUpperCase();
+        return KNOWN_MAKES.find(m => v === m || v.startsWith(m + ' ')) || v.split(/\s+/)[0];
+    }
+
+    // One vehicle per entry: a new vehicle starts at a known make, at the text's first word, or at any word
+    // that starts a vehicle after ")" at least twice (as on the Issues tab).
+    function splitFitment(text) {
+        const t = String(text || '').trim();
+        if (!t) return [];
+        const makes = new Set([makeOf(t), ...KNOWN_MAKES]);
+        const after = {};
+        (t.match(/\)\s+[A-Z][A-Z-]{2,}(?=\s)/g) || []).forEach(m => {
+            const w = m.replace(/^\)\s+/, '');
+            after[w] = (after[w] || 0) + 1;
+        });
+        Object.keys(after).forEach(w => { if (after[w] >= 2) makes.add(w); });
+        const re = new RegExp('\\s+(?=(?:' + [...makes].map(reEsc).join('|') + ')\\s)', 'g');
+        return t.split(re).map(x => x.trim()).filter(Boolean);
+    }
+    const fitCache = {};
+    function vehiclesOf(l) {
+        if (!(l.line_id in fitCache)) {
+            const groups = new Map();
+            splitFitment(l.fit_for_auto).forEach(v => {
+                const make = makeOf(v);
+                if (!groups.has(make)) groups.set(make, []);
+                groups.get(make).push(v.slice(make.length).trim() || v);
+            });
+            fitCache[l.line_id] = groups;
+        }
+        return fitCache[l.line_id];
+    }
+    // "LAND ROVER" → "Land Rover", "MERCEDES-BENZ" → "Mercedes-Benz"; short makes (VW, BMW, KIA) stay as they are.
+    const titleCase = s => s.length <= 3 ? s : s.toLowerCase().replace(/(^|[\s-])\p{L}/gu, c => c.toUpperCase());
+    function fitPill(l) {
+        const groups = vehiclesOf(l);
+        const n = [...groups.values()].reduce((a, v) => a + v.length, 0);
+        if (!n) return '';
+        const makes = [...groups.keys()];
+        return '<button type="button" class="fit-pill fit-open" data-fit="' + l.line_id + '" title="Show every vehicle and OEM number">' +
+            '<b>' + n + ' vehicle' + (n === 1 ? '' : 's') + '</b> · ' + esc(makes.slice(0, 4).map(titleCase).join(', ')) +
+            (makes.length > 4 ? ' +' + (makes.length - 4) : '') + ' ›</button>';
+    }
+
+    let fitPanel = null;
+    function closeFit() {
+        if (!fitPanel) return;
+        fitPanel.remove(); fitPanel = null;
+        document.removeEventListener('keydown', fitKey, true);
+    }
+    function fitKey(ev) { if (ev.key === 'Escape') { ev.preventDefault(); closeFit(); } }
+    function openFit(lineId) {
+        const l = lineById(lineId);
+        if (!l) return;
+        closeFit();
+        const groups = vehiclesOf(l);
+        const n = [...groups.values()].reduce((a, v) => a + v.length, 0);
+        const oems = l.oem_numbers || [];
+        fitPanel = document.createElement('aside');
+        fitPanel.className = 'fit-panel';
+        fitPanel.setAttribute('role', 'dialog');
+        fitPanel.innerHTML =
+            '<button type="button" class="fit-close" title="Close (Esc)" aria-label="Close">✕</button>' +
+            '<h3>' + (n ? 'Fits ' + n + ' vehicle' + (n === 1 ? '' : 's') : 'Vehicle fitment') + '</h3>' +
+            '<div class="sub">Line ' + l.line_number + ' · ' + esc(l.description || '') + ' · ' + esc(l.article_number || '') + (l.brand ? ' ' + esc(l.brand) : '') + '</div>' +
+            (oems.length ? '<div class="fit-mk">OEM numbers (' + oems.length + ')</div><div class="fit-oems">' + oems.map(o => '<span>' + esc(o) + '</span>').join('') + '</div>' : '') +
+            (n ? '<input type="search" class="fit-filter" placeholder="Filter: model, engine or year">' +
+                 [...groups.entries()].map(([mk, vs]) =>
+                    '<div class="fit-group"><div class="fit-mk">' + esc(mk) + ' (' + vs.length + ')</div>' +
+                    vs.map(v => '<div class="fit-v">' + esc(v) + '</div>').join('') + '</div>').join('')
+               : '<p class="sub">No vehicle fitment for this part.</p>');
+        document.body.appendChild(fitPanel);
+        document.addEventListener('keydown', fitKey, true);
+        fitPanel.querySelector('.fit-close').addEventListener('click', closeFit);
+        const filter = fitPanel.querySelector('.fit-filter');
+        if (filter) {
+            filter.addEventListener('input', () => {
+                const q = filter.value.trim().toLowerCase();
+                fitPanel.querySelectorAll('.fit-group').forEach(g => {
+                    const mk = g.querySelector('.fit-mk').textContent.toLowerCase();
+                    let shown = 0;
+                    g.querySelectorAll('.fit-v').forEach(v => {
+                        const hit = !q || mk.includes(q) || v.textContent.toLowerCase().includes(q);
+                        v.style.display = hit ? '' : 'none';
+                        if (hit) shown++;
+                    });
+                    g.style.display = shown ? '' : 'none';
+                });
+            });
+            filter.focus();
+        }
+    }
+    document.addEventListener('click', ev => {
+        if (fitPanel && !fitPanel.contains(ev.target) && !ev.target.closest('.fit-open')) closeFit();
+    });
+
     // ---- render ----
     function renderCounts() {
         const s = review.summary;
@@ -126,12 +244,17 @@
         const changed = isChanged(l);
         const reason = e.reason !== undefined ? e.reason : ((l.decision && l.decision.reason) || '');
         const discount = l.discount_pct ? '<div class="sub">less ' + Number(l.discount_pct) + '% = ' + money(l.effective_unit_price) + '</div>' : '';
+        // vs the calculated PL03, shown under the box once it is changed.
+        const vsCalc = changed && Number(l.formula_pl03) > 0
+            ? '<div class="money-note">was ' + tzs(l.formula_pl03) + ' · ' + signedPct(Number(pl03) / Number(l.formula_pl03) - 1) + '</div>' : '';
         const pl03Cell = l.error
             ? '–'
             : (EDITABLE
-                ? '<input class="pl03" type="number" min="1" step="1" value="' + esc(pl03 != null ? Math.round(pl03) : '') + '">' +
+                ? '<label class="money' + (changed ? ' changed' : '') + '"><span>TZS</span>' +
+                  '<input class="pl03" type="text" inputmode="numeric" autocomplete="off" value="' + esc(pl03 != null ? grouped(Math.round(pl03)) : '') + '"></label>' +
+                  vsCalc +
                   (changed ? '<input class="reason" type="text" maxlength="500" placeholder="Reason for the change (required)" value="' + esc(reason) + '">' : '')
-                : tzs(pl03) + (reason ? '<div class="sub">' + esc(reason) + '</div>' : ''));
+                : tzs(pl03) + vsCalc + (reason ? '<div class="sub">' + esc(reason) + '</div>' : ''));
         return '<tr class="pr-row' + (changed ? ' changed' : '') + (l.error ? ' line-error' : '') + '" data-line-id="' + l.line_id + '">' +
             '<td class="num">' + l.line_number + '</td>' +
             '<td class="desc">' + (l.picture_url
@@ -140,6 +263,7 @@
                 : '') +
                 '<div>' + esc(l.description || '') + '</div>' +
                 '<div class="sub">' + esc(l.article_number || '') + (l.brand ? ' · ' + esc(l.brand) : '') + '</div>' +
+                oemLine(l) + fitPill(l) +
                 (l.error ? '<div class="err">' + esc(l.error) + '</div>' : '') + '</td>' +
             '<td class="num">' + (l.quantity != null ? Number(l.quantity) : '–') + '</td>' +
             '<td class="num">' + money(l.unit_price_foreign, review.currency) + discount + '</td>' +
@@ -353,12 +477,18 @@
         timers[lineId] = setTimeout(async () => {
             const e = edits[lineId];
             if (!e || e.pl03 === undefined || !(Number(e.pl03) > 0)) return;
+            const asked = Number(e.pl03);
             try {
-                const r = await api('POST', '/preview', { lines: [{ line_id: lineId, pl03: Number(e.pl03) }] });
+                const r = await api('POST', '/preview', { lines: [{ line_id: lineId, pl03: asked }] });
+                // A slower answer for an earlier keystroke must not overwrite the figures of the PL03 now in the box.
+                if (Number(e.pl03) !== asked) return;
                 const p = r.lines[0];
                 e.preview = p.error ? null : p;
                 if (p.error) showMessage(esc(p.error), 'error');
-            } catch (err) { showMessage('Could not recalculate: ' + esc(err.message), 'error'); }
+            } catch (err) {
+                if (Number(e.pl03) !== asked) return;
+                showMessage('Could not recalculate: ' + esc(err.message), 'error');
+            }
             rerenderRow(lineId);
         }, 300);
     }
@@ -390,7 +520,15 @@
         const id = tr.dataset.lineId;
         const e = edits[id] || (edits[id] = {});
         if (ev.target.classList.contains('pl03')) {
-            e.pl03 = ev.target.value === '' ? null : Number(ev.target.value);
+            // Accounting format as you type: keep only digits, regroup, and keep the caret after the same digit.
+            const input = ev.target;
+            const caretDigits = digitsOf(input.value.slice(0, input.selectionStart || 0)).length;
+            const digits = digitsOf(input.value).replace(/^0+(?=\d)/, '');
+            input.value = digits ? grouped(Number(digits)) : '';
+            let pos = 0, seen = 0;
+            while (pos < input.value.length && seen < caretDigits) { if (/\d/.test(input.value[pos])) seen++; pos++; }
+            try { input.setSelectionRange(pos, pos); } catch (_) { }
+            e.pl03 = digits === '' ? null : Number(digits);
             e.preview = null;
             const l = lineById(id);
             const nowChanged = isChanged(l);
@@ -404,6 +542,8 @@
     body.addEventListener('click', ev => {
         const med = ev.target.closest('button[data-median]');
         if (med) { useMedian(med.dataset.median); return; }
+        const fit = ev.target.closest('.fit-open');
+        if (fit) { openFit(fit.dataset.fit); return; }
         const tr = ev.target.closest('tr.pr-row');
         if (!tr) return;
         const id = tr.dataset.lineId;

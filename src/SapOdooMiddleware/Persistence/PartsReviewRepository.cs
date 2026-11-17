@@ -21,7 +21,10 @@ public sealed record PartsReviewLineRow(
     // will need a marque assignment before it can mint. Absent block → false.
     bool NeedsMarque,
     // The picture of the part the line points to: its catalogue (oitm) row's image, else the stored image.
-    string? PictureUrl = null);
+    string? PictureUrl = null,
+    // The matched part's vehicle fitment text and OEM numbers from the enrichment (item_data.fit_for_auto /
+    // item_data.filtered_oems); null / empty when the line was never enriched.
+    string? FitForAuto = null, IReadOnlyList<string>? PartOems = null);
 
 /// <summary>A 'create_new' line reduced to what provisioning needs (incl. the persisted enrichment).</summary>
 public sealed record PartsProvisioningLine(
@@ -155,7 +158,12 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         // The id is only cast when it is all digits (shape-tolerant, as above).
         "COALESCE((SELECT NULLIF(btrim(o.image_url), '') FROM oitm o WHERE o.id = CASE " +
         "WHEN (\"EnrichmentPayloadJson\"->>'neon_oitm_id') ~ '^[0-9]{1,18}$' THEN (\"EnrichmentPayloadJson\"->>'neon_oitm_id')::bigint END), " +
-        "NULLIF(btrim(\"EnrichmentPayloadJson\"#>>'{item_data,image_url}'), ''))";
+        "NULLIF(btrim(\"EnrichmentPayloadJson\"#>>'{item_data,image_url}'), ''))," +
+        // FitForAuto and PartOems (the matched part's fitment and OEMs). Shape-tolerant like the rest: the
+        // OEM list is only read when it is an array.
+        "\"EnrichmentPayloadJson\"#>>'{item_data,fit_for_auto}'," +
+        "CASE WHEN jsonb_typeof(\"EnrichmentPayloadJson\"#>'{item_data,filtered_oems}') = 'array' " +
+        "THEN (\"EnrichmentPayloadJson\"#>'{item_data,filtered_oems}')::text END";
 
     private readonly ICompanyContext _company;
     public PartsReviewRepository(ICompanyContext company) => _company = company;
@@ -698,7 +706,9 @@ public sealed class PartsReviewRepository : IPartsReviewRepository
         SelectedSupplier:        r.IsDBNull(29) ? null : r.GetString(29),
         HasDonorCandidates:      !r.IsDBNull(30) && r.GetBoolean(30),
         NeedsMarque:             !r.IsDBNull(31) && r.GetBoolean(31),
-        PictureUrl:              r.IsDBNull(32) ? null : r.GetString(32));
+        PictureUrl:              r.IsDBNull(32) ? null : r.GetString(32),
+        FitForAuto:              r.IsDBNull(33) ? null : r.GetString(33),
+        PartOems:                ParseOems(r, 34));
 
     private static List<string> ParseOems(NpgsqlDataReader r, int ordinal)
     {
