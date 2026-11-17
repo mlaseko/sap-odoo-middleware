@@ -120,8 +120,8 @@
     @if (Model.IsEditable)
     {
         <button id="pr-approve-clean" class="btn btn-sm btn-primary" type="button"
-                title="Approve, at the calculated PL03, every line not yet approved that has no warning and no unsaved change">
-            Approve all without warnings
+                title="Approve every line not yet approved at the PL03 in its box (yours, or the calculated one). Lines below cost and held lines are left out.">
+            Approve all
         </button>
     }
 </div>
@@ -150,4 +150,5 @@
 </div>
 
 <script src="~/js/autohub/pic-zoom.js" asp-append-version="true"></script>
+<script src="~/js/autohub/confirm-dialog.js" asp-append-version="true"></script>
 <script src="~/js/autohub/prices.js" asp-append-version="true"></script>

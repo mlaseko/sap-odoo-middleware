@@ -250,6 +250,32 @@ public class PriceReviewServiceTests
     }
 
     [Fact]
+    public async Task A_PL03_changed_by_hand_is_saved_with_an_automatic_reason()
+    {
+        var line = Line(1, 10m);
+        var svc = Service(new[] { line }, out var repo);
+        IReadOnlyList<PartsPriceDecision>? saved = null;
+        repo.Setup(r => r.UpsertAsync(It.IsAny<IReadOnlyList<PartsPriceDecision>>(), It.IsAny<CancellationToken>()))
+            .Callback((IReadOnlyList<PartsPriceDecision> d, CancellationToken _) => saved = d)
+            .Returns(Task.CompletedTask);
+
+        var result = await svc.DecideAsync(DocId, new[]
+        {
+            new PriceReviewDecisionRequestLine(line.Id, "approved", 90000m, null),
+        }, "rev", CancellationToken.None);
+
+        Assert.Empty(result!.Errors);
+        var d = Assert.Single(saved!);
+        Assert.Equal(90000m, d.FinalPl03);
+        Assert.StartsWith("Set by hand on the Prices tab: ", d.Reason);
+        Assert.EndsWith("→ 90,000", d.Reason);
+    }
+
+    [Fact]
+    public void Automatic_reason_shows_both_prices() =>
+        Assert.Equal("Set by hand on the Prices tab: 700,000 → 600,000", PriceReviewService.AutoReason(700000m, 600000m));
+
+    [Fact]
     public async Task Accepting_the_calculated_price_needs_no_reason()
     {
         var line = Line(1, 10m);
@@ -279,7 +305,7 @@ public class PriceReviewServiceTests
 
         var result = await svc.DecideAsync(DocId, new[]
         {
-            new PriceReviewDecisionRequestLine(good.Id, "approved", 90000m, null),   // changed, no reason
+            new PriceReviewDecisionRequestLine(good.Id, "approved", 90000m, null),   // changed, no reason: fine now
             new PriceReviewDecisionRequestLine(noPrice.Id, "approved", null, null),  // cannot be priced
             new PriceReviewDecisionRequestLine(other.Id, "approved", null, null),    // not waiting to be created
             new PriceReviewDecisionRequestLine(good.Id, "approved", null, null),     // duplicate
@@ -287,7 +313,7 @@ public class PriceReviewServiceTests
         }, "rev", CancellationToken.None);
 
         Assert.Equal(0, result!.Saved);
-        Assert.Contains(result.Errors, e => e.LineId == good.Id && e.Error.Contains("reason is required"));
+        Assert.DoesNotContain(result.Errors, e => e.Error.Contains("reason"));
         Assert.Contains(result.Errors, e => e.LineId == good.Id && e.Error.Contains("more than once"));
         Assert.Contains(result.Errors, e => e.LineId == noPrice.Id && e.Error.Contains("cannot be priced"));
         Assert.Contains(result.Errors, e => e.LineId == other.Id && e.Error.Contains("not waiting to be created"));

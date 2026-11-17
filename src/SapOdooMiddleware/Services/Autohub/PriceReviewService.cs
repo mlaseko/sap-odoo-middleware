@@ -73,7 +73,8 @@ public sealed record PriceReviewPreviewResult(IReadOnlyList<PriceReviewPreviewLi
 
 /// <summary>
 /// One decision to save. Status is "approved" or "held". PL03 null means "the calculated PL03";
-/// a PL03 different from the calculated one needs a Reason.
+/// a PL03 different from the calculated one is recorded with the given Reason, or else an automatic one
+/// ("Set by hand on the Prices tab: 700,000 → 600,000"): the reviewer is never asked to type one.
 /// </summary>
 public sealed record PriceReviewDecisionRequestLine(Guid LineId, string Status, decimal? Pl03, string? Reason);
 
@@ -191,6 +192,11 @@ public sealed class PriceReviewService : IPriceReviewService
 
         return new PriceReviewDocument(documentId, currency, rate, forexError, Summarise(result), result);
     }
+
+    /// <summary>The reason recorded for a PL03 changed by hand without one (parts_price_review requires a reason).</summary>
+    internal static string AutoReason(decimal formulaPl03, decimal pl03) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"Set by hand on the Prices tab: {formulaPl03:N0} → {pl03:N0}");
 
     /// <summary>
     /// The line's OEM numbers for display: the invoice's own first (a cell can hold several), then the matched
@@ -312,10 +318,7 @@ public sealed class PriceReviewService : IPriceReviewService
             var priced = await PriceAtAsync(line, req.Pl03, ct);
             var reason = string.IsNullOrWhiteSpace(req.Reason) ? null : req.Reason.Trim();
             if (priced.Changed && reason is null)
-            {
-                errors.Add(new(req.LineId, "A reason is required when PL03 differs from the calculated price."));
-                continue;
-            }
+                reason = AutoReason(line.FormulaPl03.Value, priced.Pl03);
 
             rows.Add(new PartsPriceDecision(
                 LineId: line.LineId, DocumentId: documentId, Status: status,
