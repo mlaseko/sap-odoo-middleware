@@ -167,6 +167,14 @@ public interface IAutohubInventorySqlService
     /// </summary>
     Task<List<VendorSummary>> GetVendorsAsync(string? search, int limit, CancellationToken ct);
 
+    /// <summary>
+    /// The active SAP item (OITM, not frozen) with this supplier article (U_Article_No) and, when a brand is
+    /// given, that selling brand (U_MdlTEST, first word or whole, any case): the oldest one when several.
+    /// Bulk Create's duplicate check: SAP is the system of record and sits next to the middleware, so this
+    /// is fast and sees items created by an earlier run that never got their catalogue card.
+    /// </summary>
+    Task<string?> FindItemCodeByArticleAsync(string article, string? brand, CancellationToken ct);
+
     /// <summary>The vendor (OCRD CardType 'S') with this code, or null.</summary>
     Task<VendorSummary?> GetVendorAsync(string cardCode, CancellationToken ct);
 
@@ -1354,6 +1362,27 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         while (await reader.ReadAsync(ct))
             list.Add(ReadVendor(reader));
         return list;
+    }
+
+    public async Task<string?> FindItemCodeByArticleAsync(string article, string? brand, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(article)) return null;
+        const string sql = """
+            SELECT TOP 1 ItemCode FROM OITM
+            WHERE LTRIM(RTRIM(U_Article_No)) = @article
+              AND ISNULL(frozenFor, 'N') = 'N'
+              AND (@brand IS NULL
+                   OR UPPER(LTRIM(RTRIM(ISNULL(U_MdlTEST, '')))) = @brand
+                   OR UPPER(LTRIM(RTRIM(ISNULL(U_MdlTEST, '')))) LIKE @brand + ' %'
+                   OR @brand LIKE UPPER(LTRIM(RTRIM(ISNULL(U_MdlTEST, '')))) + ' %')
+            ORDER BY CreateDate, ItemCode;
+            """;
+        await using var conn = await OpenAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 15 };
+        cmd.Parameters.Add("@article", System.Data.SqlDbType.NVarChar, 100).Value = article.Trim();
+        cmd.Parameters.Add("@brand", System.Data.SqlDbType.NVarChar, 100).Value =
+            string.IsNullOrWhiteSpace(brand) ? DBNull.Value : brand.Trim().ToUpperInvariant();
+        return await cmd.ExecuteScalarAsync(ct) as string;
     }
 
     public async Task<VendorSummary?> GetVendorAsync(string cardCode, CancellationToken ct)

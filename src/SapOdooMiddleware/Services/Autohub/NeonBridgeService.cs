@@ -277,6 +277,7 @@ public sealed class NeonBridgeService : INeonBridgeService
         var minted = await TryDeepMintAsync(new MintItemRequest(
             ArticleNumber: articleNumber ?? donorArticle, SupplierName: supplierName, OemNumbers: donorOems,
             DonorTecdocArticleId: donorTecdocId, Source: source, ItemCode: sapItemCode, RequestId: null), ct);
+        if (minted == MintPending) return null;
         if (minted is { } deepId) return deepId;
 
         await using var conn = new NpgsqlConnection(ConnectionString);
@@ -452,6 +453,7 @@ public sealed class NeonBridgeService : INeonBridgeService
             ArticleNumber: articleNumber, SupplierName: supplierName, OemNumbers: oemNumbers,
             DonorTecdocArticleId: null, Source: source, ItemCode: sapItemCode, RequestId: null,
             Description: description), ct);
+        if (minted == MintPending) return null;
         if (minted is { } deepId) return deepId;
 
         await using var conn = new NpgsqlConnection(ConnectionString);
@@ -509,16 +511,40 @@ public sealed class NeonBridgeService : INeonBridgeService
         return newId;
     }
 
-    /// <summary>Try the DGX deep mint (<c>/mint_item</c>). Returns the new oitm id, or null on any failure
-    /// (unavailable / 501 / error / throw) so the caller falls back to the shallow local INSERT.</summary>
+    /// <summary>
+    /// How long Bulk Create waits for the DGX deep mint of one catalogue card. The mint (TecDoc details,
+    /// specs, vehicles, categories) normally takes a few seconds; a stuck one used to hold the item until
+    /// the 120 s per-item limit.
+    /// </summary>
+    internal static readonly TimeSpan MintTimeout = TimeSpan.FromSeconds(20);
+
+    /// <summary>The DGX was still minting when <see cref="MintTimeout"/> ran out: it may yet write the card.</summary>
+    internal const long MintPending = -1;
+
+    /// <summary>
+    /// Try the DGX deep mint (<c>/mint_item</c>), bounded by <see cref="MintTimeout"/>. Returns the new oitm
+    /// id; null on a failure (unavailable / 501 / error response / connection refused), so the caller falls
+    /// back to the shallow local INSERT; <see cref="MintPending"/> when the time ran out — the DGX may still
+    /// finish and write the card itself, so no local card is made (that would give the item two cards).
+    /// </summary>
     private async Task<long?> TryDeepMintAsync(MintItemRequest req, CancellationToken ct)
     {
         MintItemResponse res;
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        limit.CancelAfter(MintTimeout);
         try
         {
-            res = await _dgx.MintItemAsync(req, ct);
+            res = await _dgx.MintItemAsync(req, limit.Token);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "DGX /mint_item for {Article}/{Supplier} (ItemCode {Code}) took over {Seconds}s; not waiting. The DGX may " +
+                "still write the catalogue card; if not, the item has no card yet (catalogue card repair finds it).",
+                req.ArticleNumber, req.SupplierName, req.ItemCode, MintTimeout.TotalSeconds);
+            return MintPending;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "DGX /mint_item threw for {Article}/{Supplier}; falling back to local insert.",
                 req.ArticleNumber, req.SupplierName);
