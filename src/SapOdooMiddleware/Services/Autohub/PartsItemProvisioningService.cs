@@ -418,29 +418,9 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
         return new PartsProvisioningOutcome("created", itemCode, null);
     }
 
-    /// <summary>
-    /// D5 ItemName: up to five OEMs, then the supplier article, then any alternate Germax article numbers
-    /// that still fit — joined by '/'. The OEM chain + primary article are ALWAYS kept (hard-capped at 200);
-    /// alternates are appended only while the whole name stays within the cap, so a long OEM chain never
-    /// pushes out the primary. No alternates ⇒ identical to before.
-    /// </summary>
-    internal static string BuildItemName(IReadOnlyList<string> oems, string article, IReadOnlyList<string>? alternateArticles = null)
-    {
-        const int maxLen = 200;
-        var parts = oems.Take(5).ToList();
-        parts.Add(article);
-        var name = string.Join("/", parts);
-        if (name.Length > maxLen) return name[..maxLen];   // OEM chain + primary already at the cap
-
-        foreach (var alt in alternateArticles ?? Enumerable.Empty<string>())
-        {
-            if (string.IsNullOrWhiteSpace(alt)) continue;
-            var candidate = name + "/" + alt.Trim();
-            if (candidate.Length > maxLen) break;          // append alternates only while they fit
-            name = candidate;
-        }
-        return name;
-    }
+    /// <summary>D5 ItemName (see <see cref="ItemNames.Build"/>): OEMs, article, alternates, all regularized.</summary>
+    internal static string BuildItemName(IReadOnlyList<string> oems, string article, IReadOnlyList<string>? alternateArticles = null) =>
+        ItemNames.Build(oems, article, alternateArticles);
 
     /// <summary>Milliseconds per step of one item, for the log ("sap_lookup=120 pricing=40 sap_create=2100 …").</summary>
     internal sealed class StepTimer
@@ -475,19 +455,10 @@ public sealed class PartsItemProvisioningService : IPartsItemProvisioningService
 
     /// <summary>
     /// The line's invoice OEM(s) first, then the enrichment cross-reference OEMs (filtered_oems),
-    /// de-duplicated (case-insensitive, order preserved). <see cref="BuildItemName"/> keeps up to five.
+    /// without spaces, each number once (<see cref="ItemNames.MergeOems"/>). <see cref="BuildItemName"/> keeps up to five.
     /// </summary>
-    private static List<string> MergeOems(IReadOnlyList<string> lineOems, IReadOnlyList<string>? enrichedOems)
-    {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var merged = new List<string>();
-        foreach (var o in lineOems.Concat(enrichedOems ?? Enumerable.Empty<string>()))
-        {
-            var t = o?.Trim();
-            if (!string.IsNullOrEmpty(t) && seen.Add(t)) merged.Add(t);
-        }
-        return merged;
-    }
+    private static List<string> MergeOems(IReadOnlyList<string> lineOems, IReadOnlyList<string>? enrichedOems) =>
+        ItemNames.MergeOems(lineOems, enrichedOems);
 
     /// <summary>
     /// Forex conversion with a SHORT exponential backoff (1s → 2s → 4s, 3 attempts) to ride out a transient

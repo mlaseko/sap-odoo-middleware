@@ -45,8 +45,10 @@ public sealed class OemFilterService : IOemFilterService
 
     // OemNumbers elements arrive as multi-token strings straight from invoice text, e.g.
     // "3.0L Diesel LR097157 LR029146 LR074623". Split each element into individual tokens so the real
-    // OE codes aren't discarded as one un-matchable blob. Separators: whitespace, comma, semicolon, slash.
-    private static readonly Regex TokenSeparator = new(@"[\s,;/]+", RegexOptions.Compiled);
+    // OE codes aren't discarded as one un-matchable blob. Separators: whitespace, comma, semicolon, slash,
+    // and plus — invoices join a part's OEMs as "06M109601G+06M109611S", which used to be dropped as noise
+    // (the item then got no OEM in its name).
+    private static readonly Regex TokenSeparator = new(@"[\s,;/+]+", RegexOptions.Compiled);
 
     private static readonly char[] EdgePunctuation = { '(', ')', '[', ']', '.', ',', ';', ':', '\'', '"' };
 

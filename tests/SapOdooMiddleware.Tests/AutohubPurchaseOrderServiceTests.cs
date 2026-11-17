@@ -53,10 +53,14 @@ public class AutohubPurchaseOrderServiceTests
             Sql.Setup(s => s.GetWarehouseBranchAsync("003", It.IsAny<CancellationToken>()))
                .ReturnsAsync(new WarehouseBranch { BplId = 1, BranchName = "Main", Active = true });
             // 1 EUR = 3,000 TZS; PL01 = cost × 1.25.
-            Forex.Setup(f => f.ConvertToTzsAsync(It.IsAny<decimal>(), "EUR", It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
-                 .ReturnsAsync((decimal amount, string _, DateTime _, CancellationToken _) => amount * 3000m);
-            Pricing.Setup(p => p.CalculateAsync(It.IsAny<decimal>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-                   .ReturnsAsync((decimal cost, string _, CancellationToken _) => new PricingResult(cost * 1.25m, cost * 2m, cost * 1.5m, 2m));
+            Forex.Setup(f => f.GetRateAsync("EUR", It.IsAny<DateTime>(), It.IsAny<CancellationToken>()))
+                 .ReturnsAsync(3000m);
+            Pricing.Setup(p => p.CalculateBatchDetailedAsync(
+                    It.IsAny<IReadOnlyList<(decimal SupplierPriceTzs, string? Brand)>>(), It.IsAny<CancellationToken>()))
+                   .ReturnsAsync((IReadOnlyList<(decimal SupplierPriceTzs, string? Brand)> ls, CancellationToken _) =>
+                       ls.Select(l => new PricingBatchResult(
+                           new PricingQuote(l.SupplierPriceTzs, l.SupplierPriceTzs * 1.25m, l.SupplierPriceTzs * 2m,
+                               l.SupplierPriceTzs * 1.5m, 2m, l.Brand ?? "", 0m, null, false, null, 1), null)).ToList());
             Sap.Setup(s => s.FindPurchaseOrderByNumAtCardAsync(It.IsAny<string>(), It.IsAny<string>()))
                .ReturnsAsync(((int, int)?)null);
             Sap.Setup(s => s.CreatePurchaseOrderAsync(It.IsAny<SapPurchaseOrderRequest>()))

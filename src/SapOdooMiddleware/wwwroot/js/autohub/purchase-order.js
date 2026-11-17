@@ -28,6 +28,12 @@
     }
 
     async function load() {
+        if (!preview || !root.innerHTML.trim())
+            root.innerHTML = '<div class="fi-card"><h3>Purchase order</h3><div class="sub">Loading the purchase order…</div></div>';
+        else {
+            const btn = document.getElementById('po-create');
+            if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+        }
         const q = cardCode ? '?card_code=' + encodeURIComponent(cardCode) : '';
         try { preview = await api('GET', '/documents/' + docId + '/purchase-order' + q); }
         catch (e) { root.innerHTML = '<div class="fi-card"><h3>Purchase order</h3><div class="note-error">Could not load: ' + esc(e.message) + '</div></div>'; return; }
