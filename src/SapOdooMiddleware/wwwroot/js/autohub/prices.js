@@ -252,8 +252,7 @@
             : (EDITABLE
                 ? '<label class="money' + (changed ? ' changed' : '') + '"><span>TZS</span>' +
                   '<input class="pl03" type="text" inputmode="numeric" autocomplete="off" value="' + esc(pl03 != null ? grouped(Math.round(pl03)) : '') + '"></label>' +
-                  vsCalc +
-                  (changed ? '<input class="reason" type="text" maxlength="500" placeholder="Reason for the change (required)" value="' + esc(reason) + '">' : '')
+                  vsCalc
                 : tzs(pl03) + vsCalc + (reason ? '<div class="sub">' + esc(reason) + '</div>' : ''));
         return '<tr class="pr-row' + (changed ? ' changed' : '') + (l.error ? ' line-error' : '') + '" data-line-id="' + l.line_id + '">' +
             '<td class="num">' + l.line_number + '</td>' +
@@ -552,7 +551,7 @@
             e.preview = null;
             const l = lineById(id);
             const nowChanged = isChanged(l);
-            if (nowChanged !== tr.classList.contains('changed')) rerenderRow(id);   // show / hide the reason box
+            if (nowChanged !== tr.classList.contains('changed')) rerenderRow(id);   // amber outline and "was …" note
             schedulePreview(id);
         } else if (ev.target.classList.contains('reason')) {
             e.reason = ev.target.value;
@@ -583,8 +582,9 @@
         const pl03 = currentPl03(l);
         if (pl03 == null || !(Number(pl03) > 0)) { showMessage('Line ' + l.line_number + ': enter a PL03 above zero.', 'error'); return; }
         const e = edits[id] || {};
-        const reason = e.reason !== undefined ? e.reason : (l.decision && l.decision.reason) || '';
-        decide([{ line_id: id, status: act, pl03: isChanged(l) ? Number(pl03) : null, reason: isChanged(l) ? reason : null }]);
+        // No reason asked: "Use median" passes its own; otherwise the server records "Set by hand …".
+        const reason = (e.reason || '').trim();
+        decide([{ line_id: id, status: act, pl03: isChanged(l) ? Number(pl03) : null, reason: isChanged(l) && reason ? reason : null }]);
     });
 
     document.getElementById('pr-filter').addEventListener('click', ev => {
@@ -598,15 +598,42 @@
     document.getElementById('pr-rel-open').addEventListener('click', () => setAllRelated(true));
     document.getElementById('pr-rel-close').addEventListener('click', () => setAllRelated(false));
 
-    const approveClean = document.getElementById('pr-approve-clean');
-    if (approveClean) approveClean.addEventListener('click', () => {
-        const items = review.lines
-            .filter(l => !l.error && (l.flags || []).length === 0 && decisionState(l) !== 'approved'
-                         && !hasUnsaved(l) && !isChanged(l))
-            .map(l => ({ line_id: l.line_id, status: 'approved', pl03: null, reason: null }));
-        if (!items.length) { showMessage('No unapproved lines without warnings at the calculated price.'); return; }
-        if (!confirm('Approve ' + items.length + ' line(s) at their calculated PL03?')) return;
-        decide(items);
+    // Approve all: every line not yet approved (or changed since), at the PL03 in its box: the one typed or
+    // set by "Use median", else the calculated one. Left out: lines that cannot be priced, lines whose PL03
+    // is below cost, and held lines not changed since. No reason is asked: the server records the change.
+    const flagsNow = l => { const e = edits[l.line_id]; return (e && e.preview ? e.preview.flags : l.flags) || []; };
+    const approveAll = document.getElementById('pr-approve-clean');
+    if (approveAll) approveAll.addEventListener('click', async () => {
+        const state = l => decisionState(l);
+        const open = review.lines.filter(l => !l.error && (state(l) === 'todo' || hasUnsaved(l)));
+        const belowCost = open.filter(l => flagsNow(l).some(f => f.code === 'below_cost'));
+        const held = review.lines.filter(l => !l.error && state(l) === 'held' && !hasUnsaved(l));
+        const take = open.filter(l => !belowCost.includes(l));
+        if (!take.length) {
+            showMessage(belowCost.length ? 'Every line left to approve is below cost: correct their PL03 first.' : 'Nothing left to approve.');
+            return;
+        }
+        const yours = take.filter(isChanged).length;
+        const warned = take.filter(l => flagsNow(l).length > 0).length;
+        const skipped = [];
+        if (belowCost.length) skipped.push(belowCost.length + ' below cost (line ' + belowCost.map(l => l.line_number).join(', ') + ')');
+        if (held.length) skipped.push(held.length + ' held');
+        if (!await window.ahConfirm({
+            title: 'Approve ' + take.length + ' line(s)?',
+            rows: [
+                ['At your PL03', String(yours)],
+                ['At the calculated PL03', String(take.length - yours)],
+                ['With a warning, approved anyway', String(warned)],
+            ],
+            note: skipped.length ? 'Left out: ' + skipped.join(', ') + '.' : null,
+            ok: 'Approve ' + take.length,
+        })) return;
+        decide(take.map(l => {
+            const e = edits[l.line_id] || {};
+            const changed = isChanged(l);
+            return { line_id: l.line_id, status: 'approved', pl03: changed ? Number(currentPl03(l)) : null,
+                     reason: changed && (e.reason || '').trim() ? e.reason.trim() : null };
+        }));
     });
 
     async function reload() {
