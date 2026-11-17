@@ -85,3 +85,48 @@ public class PartsItemNameTests
         Assert.False(PartsItemProvisioningService.IsUnresolvedPrefix(prefix));
     }
 }
+
+/// <summary>Regularized ItemNames: no spaces, each OEM once, invoice OEMs joined with '+' split.</summary>
+public class ItemNamesRegularizeTests
+{
+    [Fact]
+    public void SpacedCardOemsAreWrittenWithoutSpacesAndOnlyOnce()
+    {
+        var oems = ItemNames.MergeOems(new[] { "17517600530" }, new[] { "17 51 7 600 530", "17 21 7 597 891" });
+        Assert.Equal("17517600530/17217597891/11075601", ItemNames.Build(oems, "11075601"));
+    }
+
+    [Fact]
+    public void MercedesSpellingsOfOneNumberAreOneOem()
+    {
+        var oems = ItemNames.MergeOems(new[] { "A0004212512" }, new[] { "000 421 25 12", "A000 421 25 12" });
+        Assert.Equal(new[] { "A0004212512" }, oems);
+    }
+
+    [Fact]
+    public void LeadingZeroSpellingIsTheSameOem()
+    {
+        var oems = ItemNames.MergeOems(new[] { "06D109601M" }, new[] { "06D 109 601 M", "6D 109 601 M" });
+        Assert.Equal(new[] { "06D109601M" }, oems);
+    }
+
+    [Fact]
+    public void DashesAndDotsAreKept()
+    {
+        Assert.Equal("A2053230965-SK/K41797101", ItemNames.Build(new[] { "A2053230965-SK" }, "K41797101"));
+        Assert.Equal("0 986.452-041".Replace(" ", ""), ItemNames.Regularize("0 986.452-041"));
+    }
+
+    [Fact]
+    public void ArticleIsWrittenWithoutSpaces()
+    {
+        Assert.Equal("LR128263/0986452041", ItemNames.Build(new[] { "LR128263" }, "0 986 452 041"));
+    }
+
+    [Fact]
+    public void InvoiceOemsJoinedWithPlusAreSplit()
+    {
+        var clean = new OemFilterService().Filter(new[] { "06M109601G+06M109611S" }, "B13399", "Borsehung").CleanOems;
+        Assert.Equal(new[] { "06M109601G", "06M109611S" }, clean);
+    }
+}
