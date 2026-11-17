@@ -6,15 +6,19 @@ using SapOdooMiddleware.Persistence;
 namespace SapOdooMiddleware.Services.Autohub;
 
 /// <summary>
-/// A related part: catalogue details from Neon (name, part, brand, article, supplier, image, vehicle
-/// count, stock from the SAP mirror) and prices from SAP (PL03, PL05, average cost).
+/// A related part: catalogue details from Neon (name, part, brand, supplier, image, vehicle count, stock
+/// from the SAP mirror) and from SAP its prices (PL03, PL05, average cost) and its article number. When
+/// the catalogue row carrying the item code has another article number than SAP, SAP's article and name
+/// are shown and CatalogueArticleNumber holds the catalogue's, so the wrong catalogue link can be fixed.
+/// SameArticle: the item's SAP article number is the invoice line's own, so the part may already be in SAP.
 /// </summary>
 public sealed record ComparablePart(
     string ItemCode, string? Name, string? ItemName, string? PartComponent, string? PartGroup,
     string? Brand, string Tier, bool TierMapped, string? ArticleNumber, string? SupplierName,
     string? ImageUrl, int VehiclesCount, decimal OnHand, decimal Available,
     decimal? Pl03, decimal? Pl05, decimal? AvgCost,
-    IReadOnlyList<string> SharedOems, IReadOnlyList<string> Via);
+    IReadOnlyList<string> SharedOems, IReadOnlyList<string> Via,
+    string? CatalogueArticleNumber = null, bool SameArticle = false);
 
 /// <summary>PL03 spread of a group of related parts (only parts with a PL03 count).</summary>
 public sealed record ComparableStats(int N, decimal Min, decimal Median, decimal Max);
@@ -188,6 +192,8 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
         var tokens = SplitOems(line.OemNumbers);
 
         var partKey = NormPart(anchors.PartComponent);
+        var lineArticle = NormArticle(line.SupplierArticleNumber);
+        var sameArticleItems = new List<string>();
         var same = new List<ComparablePart>();
         var otherTier = new List<ComparablePart>();
         var samePartCosts = new List<decimal>();
@@ -198,14 +204,25 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
             if (!sap.TryGetValue(c.ItemCode, out var price) || !price.Active) continue;
 
             var (cTier, cMapped) = TierOf(c.Brand, tiers);
+            // SAP says what the item is: a catalogue row with another article number describes another part.
+            var sapArticle = price.ArticleNumber;
+            bool catalogueDisagrees = sapArticle is not null && c.ArticleNumber is not null
+                && NormArticle(sapArticle) != NormArticle(c.ArticleNumber);
+            var article = sapArticle ?? c.ArticleNumber;
+            bool sameArticle = lineArticle is not null && article is not null && NormArticle(article) == lineArticle;
             var part = new ComparablePart(
-                ItemCode: c.ItemCode, Name: c.Name ?? c.ItemName, ItemName: c.ItemName,
+                ItemCode: c.ItemCode,
+                Name: catalogueDisagrees ? (c.ItemName ?? price.ItemName ?? c.Name) : (c.Name ?? c.ItemName),
+                ItemName: c.ItemName,
                 PartComponent: c.PartComponent, PartGroup: c.PartGroup,
                 Brand: c.Brand, Tier: cTier, TierMapped: cMapped,
-                ArticleNumber: c.ArticleNumber, SupplierName: c.SupplierName, ImageUrl: c.ImageUrl,
+                ArticleNumber: article, SupplierName: c.SupplierName, ImageUrl: c.ImageUrl,
                 VehiclesCount: c.VehiclesCount, OnHand: c.OnHand, Available: c.Available,
                 Pl03: price.Pl03, Pl05: price.Pl05, AvgCost: price.AvgCost,
-                SharedOems: c.SharedOems, Via: c.Via);
+                SharedOems: c.SharedOems, Via: c.Via,
+                CatalogueArticleNumber: catalogueDisagrees ? c.ArticleNumber : null,
+                SameArticle: sameArticle);
+            if (sameArticle) sameArticleItems.Add(c.ItemCode);
 
             if (partKey is not null && NormPart(c.PartComponent) != partKey)
             {
@@ -239,6 +256,11 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
         else if (position == "below")
             flags.Add(new("below_related", $"PL03 is {-vsMedian:P0} below the median of {sameStats!.N} related parts."));
 
+        if (sameArticleItems.Count > 0)
+            flags.Add(new("same_article",
+                $"{string.Join(", ", sameArticleItems)} in SAP has the same supplier article ({line.SupplierArticleNumber?.Trim()}): " +
+                "this part may already exist in SAP; consider matching the line instead of creating it."));
+
         string? note = null;
         if (anchors.AnchorIds.Count == 0 && tokens.Count == 0)
             note = "The line has no linked catalogue part and no OEM number, so related parts cannot be found.";
@@ -270,6 +292,9 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
             }
         return set.ToList();
     }
+
+    /// <summary>Article number for comparison: letters and digits only, upper case. Null when empty.</summary>
+    internal static string? NormArticle(string? article) => ArticleNumbers.Normalize(article);
 
     /// <summary>Lower-case, letters/digits/spaces only, single spaces. Null when empty.</summary>
     internal static string? NormPart(string? name)

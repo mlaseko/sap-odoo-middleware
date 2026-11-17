@@ -37,10 +37,10 @@
     const money = (v, cur) => v == null ? '–' : Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (cur ? ' ' + cur : '');
     const FLAG_CSS = { below_cost: 'pill-red', margin_low: 'pill-orange', margin_high: 'pill-yellow',
                        floor_bound: 'pill-grey', no_brand_ratio: 'pill-grey', above_related: 'pill-yellow',
-                       below_related: 'pill-blue', cost_outlier: 'pill-red' };
+                       below_related: 'pill-blue', cost_outlier: 'pill-red', same_article: 'pill-orange' };
     const FLAG_LABEL = { below_cost: 'below cost', margin_low: 'low margin', margin_high: 'high margin',
                          floor_bound: 'brand minimum', no_brand_ratio: 'default ratio', above_related: 'above related',
-                         below_related: 'below related', cost_outlier: 'cost outlier' };
+                         below_related: 'below related', cost_outlier: 'cost outlier', same_article: 'already in SAP?' };
     const flagsHtml = flags => (flags || []).map(f =>
         '<span class="pill flag ' + (FLAG_CSS[f.code] || 'pill-grey') + '" title="' + esc(f.text) + '">' + esc(FLAG_LABEL[f.code] || f.code) + '</span>').join('');
 
@@ -196,6 +196,36 @@
 
     const relCount = c => ((c.same || []).length + (c.other_tier || []).length);
 
+    // PL03 at the related parts' median, rounded like the calculated PL03 (the line's retail rounding step).
+    function medianPl03(l, c) {
+        const m = c && c.same_stats ? Number(c.same_stats.median) : null;
+        if (!(m > 0)) return null;
+        const step = Number(l.retail_rounding_step) > 0 ? Number(l.retail_rounding_step) : 1;
+        return Math.max(step, Math.round(m / step) * step);
+    }
+
+    // "Use median" sets PL03 to the median; shown when the line is editable and is not already there.
+    function medianButton(l, c) {
+        if (!EDITABLE || l.error) return '';
+        const target = medianPl03(l, c);
+        if (target == null || Number(currentPl03(l)) === target) return '';
+        return '<button class="btn btn-sm use-median" type="button" data-median="' + l.line_id + '" ' +
+            'title="Set PL03 to ' + tzs(target) + ', the median of ' + c.same_stats.n + ' related part(s)">Use median ' + tzs(target) + '</button>';
+    }
+
+    function useMedian(lineId) {
+        const l = lineById(lineId), c = relCache[lineId];
+        const target = medianPl03(l, c);
+        if (target == null) return;
+        const e = edits[lineId] || (edits[lineId] = {});
+        e.pl03 = target;
+        e.preview = null;
+        if (isChanged(l) && !(e.reason || '').trim())
+            e.reason = 'Set to the median PL03 of ' + c.same_stats.n + ' related part(s): ' + tzs(c.same_stats.median) + '.';
+        rerenderRow(lineId);
+        schedulePreview(lineId);
+    }
+
     // The Related column: median, count and position at a glance, and the toggle for the parts list.
     function relSummaryCell(l) {
         const c = relCache[l.line_id];
@@ -208,9 +238,12 @@
         let html = '<span class="rel-toggle" data-rel="1">' + arrow + ' ' + n + ' related</span>';
         if (c.same_stats)
             html += '<div class="sub">median ' + tzs(c.same_stats.median) + ' (' + c.same_stats.n + ')</div>' +
-                    (vs != null ? '<div class="pos-' + esc(pos) + '"><strong>' + signedPct(vs) + '</strong> vs median</div>' : '');
+                    (vs != null ? '<div class="pos-' + esc(pos) + '"><strong>' + signedPct(vs) + '</strong> vs median</div>' : '') +
+                    medianButton(l, c);
         else
             html += '<div class="sub">other tiers only</div>';
+        const same = (c.flags || []).find(f => f.code === 'same_article');
+        if (same) html += '<div>' + flagsHtml([same]) + '</div>';
         return html;
     }
 
@@ -232,6 +265,7 @@
             if (vs != null)
                 html += '<span>' + esc(ourLabel) + ' ' + tzs(ours) + ' is <span class="big pos-' + esc(pos) + '">' +
                         signedPct(vs) + '</span> vs the median</span>';
+            html += medianButton(l, c);
         } else {
             html += '<span>No priced related parts in the same tier.</span>';
         }
@@ -261,7 +295,12 @@
                 '<td>' + esc(p.item_code) + '</td>' +
                 '<td>' + esc(p.name || p.item_name || '') + (p.part_component ? '<div class="sub">' + esc(p.part_component) + (p.vehicles_count ? ' · fits ' + p.vehicles_count + ' vehicles' : '') + '</div>' : '') + '</td>' +
                 '<td>' + esc(p.brand || '') + '<div class="sub">' + esc(p.tier) + (p.tier_mapped ? '' : ' (not mapped)') + '</div></td>' +
-                '<td>' + esc(p.article_number || '') + '<div class="sub">' + esc(p.supplier_name || '') + '</div></td>' +
+                '<td>' + esc(p.article_number || '') +
+                    (p.same_article ? ' ' + flagsHtml([{ code: 'same_article', text: 'Same supplier article as this invoice line: the part may already be in SAP.' }]) : '') +
+                    '<div class="sub">' + esc(p.supplier_name || '') + '</div>' +
+                    (p.catalogue_article_number ? '<div class="stale" title="The catalogue row linked to ' + esc(p.item_code) +
+                        ' describes another part. Article and name shown are SAP\'s.">catalogue says ' + esc(p.catalogue_article_number) + '</div>' : '') +
+                    '</td>' +
                 '<td class="num">' + Number(p.on_hand || 0) + '</td>' +
                 '<td class="num">' + tzs(p.pl03) + '</td>' +
                 '<td class="num">' + tzs(p.pl05) + '</td>' +
@@ -363,6 +402,8 @@
     });
 
     body.addEventListener('click', ev => {
+        const med = ev.target.closest('button[data-median]');
+        if (med) { useMedian(med.dataset.median); return; }
         const tr = ev.target.closest('tr.pr-row');
         if (!tr) return;
         const id = tr.dataset.lineId;

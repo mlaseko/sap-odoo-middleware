@@ -16,7 +16,10 @@ namespace SapOdooMiddleware.Services.Autohub;
 /// when not set. AvgCost is SAP's average cost, used for the invoice-cost check. Active is false when
 /// the item is inactive (frozen) in SAP.
 /// </summary>
-public sealed record ComparableSapItem(string ItemCode, decimal? AvgCost, decimal? Pl03, decimal? Pl05, bool Active);
+/// <summary>A related item as SAP knows it: prices, active flag, and its own article number and name
+/// (OITM.U_Article_No / ItemName), which win over the Neon catalogue's when the two disagree.</summary>
+public sealed record ComparableSapItem(string ItemCode, decimal? AvgCost, decimal? Pl03, decimal? Pl05, bool Active,
+    string? ArticleNumber = null, string? ItemName = null);
 
 public interface IAutohubInventorySqlService
 {
@@ -1743,6 +1746,8 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         return prices;
     }
 
+    private static string? NullIfBlank(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
     public async Task<Dictionary<string, ComparableSapItem>> GetComparableItemsAsync(
         IReadOnlyCollection<string> itemCodes, CancellationToken ct)
     {
@@ -1757,7 +1762,8 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
         {
             var names = chunk.Select((_, i) => $"@c{i}").ToList();
             var sql = $"""
-                SELECT I.ItemCode, I.AvgPrice, P3.Price, P5.Price, ISNULL(I.frozenFor, 'N')
+                SELECT I.ItemCode, I.AvgPrice, P3.Price, P5.Price, ISNULL(I.frozenFor, 'N'),
+                       I.U_Article_No, I.ItemName
                 FROM OITM I
                 LEFT JOIN ITM1 P3 ON P3.ItemCode = I.ItemCode AND P3.PriceList = 3
                 LEFT JOIN ITM1 P5 ON P5.ItemCode = I.ItemCode AND P5.PriceList = 5
@@ -1776,7 +1782,9 @@ public sealed class AutohubInventorySqlService : IAutohubInventorySqlService
                     AvgCost: Positive(1),
                     Pl03: Positive(2),
                     Pl05: Positive(3),
-                    Active: reader.GetString(4) != "Y");   // frozenFor = 'Y' means inactive in SAP
+                    Active: reader.GetString(4) != "Y",   // frozenFor = 'Y' means inactive in SAP
+                    ArticleNumber: reader.IsDBNull(5) ? null : NullIfBlank(reader.GetString(5)),
+                    ItemName: reader.IsDBNull(6) ? null : NullIfBlank(reader.GetString(6)));
             }
         }
         return items;

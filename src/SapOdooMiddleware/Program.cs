@@ -307,6 +307,8 @@ builder.Services.AddScoped<IInvoiceIssuesService, InvoiceIssuesService>();      
 builder.Services.AddScoped<IInvoiceActivityLog, InvoiceActivityLog>();                   // invoice history (invoice_activity)
 builder.Services.AddScoped<IAutohubPurchaseOrderRepository, AutohubPurchaseOrderRepository>();   // PO from a reviewed invoice
 builder.Services.AddScoped<IAutohubPurchaseOrderService, AutohubPurchaseOrderService>();
+builder.Services.AddScoped<ICatalogueCardRepairRepository, CatalogueCardRepairRepository>();      // one-time catalogue card repair
+builder.Services.AddScoped<ICatalogueCardRepairService, CatalogueCardRepairService>();
 builder.Services.AddScoped<SapOdooMiddleware.Controllers.AutohubActivityFilter>();       // records history after each change
 builder.Services.AddScoped<INeonBridgeService, NeonBridgeService>();
 builder.Services.AddScoped<IPartsItemProvisioningService, PartsItemProvisioningService>();
