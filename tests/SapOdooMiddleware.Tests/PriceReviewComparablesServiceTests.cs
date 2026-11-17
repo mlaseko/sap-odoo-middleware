@@ -203,4 +203,93 @@ public class PriceReviewComparablesServiceTests
     {
         Assert.Equal((tier, mapped), PriceReviewComparablesService.TierOf(brand, Tiers));
     }
+
+    // ── Batch: every line when the page opens ──
+
+    [Fact]
+    public async Task Batch_returns_every_review_line_pricing_the_review_and_SAP_once()
+    {
+        var second = Guid.NewGuid();
+        var lines = new Mock<IPartsReviewRepository>();
+        lines.Setup(r => r.ListByDocumentAsync(DocId, It.IsAny<CancellationToken>()))
+             .ReturnsAsync(new[] { Line(), Line() with { Id = second, LineNumber = 2 }, Line() with { Id = Guid.NewGuid(), LineNumber = 3 } });
+
+        var repo = new Mock<IPartsComparablesRepository>();
+        repo.Setup(r => r.GetLineAnchorsAsync(DocId, It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Guid _, Guid id, CancellationToken _) => new PartsLineAnchors(id, new long[] { 7 }, Array.Empty<string>(), "Water Pump"));
+        repo.Setup(r => r.FindCandidatesAsync(It.IsAny<IReadOnlyList<long>>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { Cand("VK1"), Cand("VK2"), Cand("FB1", brand: "FEBI BILSTEIN") });
+        repo.Setup(r => r.GetBrandTiersAsync(It.IsAny<CancellationToken>())).ReturnsAsync(Tiers);
+
+        var sap = new Mock<IAutohubInventorySqlService>();
+        sap.Setup(s => s.GetComparableItemsAsync(It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<CancellationToken>()))
+           .ReturnsAsync(new[] { Sap("VK1", 100000m), Sap("VK2", 120000m), Sap("FB1", 300000m) }
+               .ToDictionary(i => i.ItemCode, StringComparer.OrdinalIgnoreCase));
+
+        // Lines 1 and 2 are in the review; line 3 is not (e.g. already created) and is left out.
+        var review = new Mock<IPriceReviewService>();
+        review.Setup(r => r.GetReviewAsync(DocId, It.IsAny<CancellationToken>()))
+              .ReturnsAsync(new PriceReviewDocument(DocId, "USD", 2700m, null, new PriceReviewSummary(2, 0, 0, 0, 2, 0, 0),
+                  new[] { ReviewLine(110000m, 30000m), ReviewLine(150000m, 30000m) with { LineId = second, LineNumber = 2 } }));
+
+        var svc = new PriceReviewComparablesService(review.Object, lines.Object, repo.Object, sap.Object,
+            Options.Create(new AutohubPricingSettings()));
+        var batch = (await svc.GetForDocumentAsync(DocId, CancellationToken.None))!;
+
+        Assert.Empty(batch.Errors);
+        Assert.Equal(new[] { LineId, second }, batch.Lines.Select(l => l.LineId));
+        Assert.All(batch.Lines, l => { Assert.Equal(2, l.Same.Count); Assert.Single(l.OtherTier); Assert.Equal(110000m, l.SameStats!.Median); });
+        Assert.Equal(110000m, batch.Lines[0].LinePl03);
+        Assert.Equal("in_line", batch.Lines[0].Position);
+        Assert.Equal(150000m, batch.Lines[1].LinePl03);
+        Assert.Equal("above", batch.Lines[1].Position);
+        review.Verify(r => r.GetReviewAsync(DocId, It.IsAny<CancellationToken>()), Times.Once);
+        repo.Verify(r => r.GetBrandTiersAsync(It.IsAny<CancellationToken>()), Times.Once);
+        sap.Verify(s => s.GetComparableItemsAsync(It.Is<IReadOnlyCollection<string>>(c => c.Count == 3), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Batch_a_line_that_fails_is_reported_and_the_others_still_come_back()
+    {
+        var second = Guid.NewGuid();
+        var lines = new Mock<IPartsReviewRepository>();
+        lines.Setup(r => r.ListByDocumentAsync(DocId, It.IsAny<CancellationToken>()))
+             .ReturnsAsync(new[] { Line(), Line() with { Id = second, LineNumber = 2 } });
+        var repo = new Mock<IPartsComparablesRepository>();
+        repo.Setup(r => r.GetLineAnchorsAsync(DocId, LineId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PartsLineAnchors(LineId, new long[] { 7 }, Array.Empty<string>(), "Water Pump"));
+        repo.Setup(r => r.GetLineAnchorsAsync(DocId, second, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("timeout"));
+        repo.Setup(r => r.FindCandidatesAsync(It.IsAny<IReadOnlyList<long>>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { Cand("VK1") });
+        repo.Setup(r => r.GetBrandTiersAsync(It.IsAny<CancellationToken>())).ReturnsAsync(Tiers);
+        var sap = new Mock<IAutohubInventorySqlService>();
+        sap.Setup(s => s.GetComparableItemsAsync(It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<CancellationToken>()))
+           .ReturnsAsync(new[] { Sap("VK1", 100000m) }.ToDictionary(i => i.ItemCode, StringComparer.OrdinalIgnoreCase));
+        var review = new Mock<IPriceReviewService>();
+        review.Setup(r => r.GetReviewAsync(DocId, It.IsAny<CancellationToken>()))
+              .ReturnsAsync(new PriceReviewDocument(DocId, "USD", 2700m, null, new PriceReviewSummary(2, 0, 0, 0, 2, 0, 0),
+                  new[] { ReviewLine(110000m, 30000m), ReviewLine(110000m, 30000m) with { LineId = second, LineNumber = 2 } }));
+
+        var batch = (await new PriceReviewComparablesService(review.Object, lines.Object, repo.Object, sap.Object,
+            Options.Create(new AutohubPricingSettings())).GetForDocumentAsync(DocId, CancellationToken.None))!;
+
+        Assert.Equal(LineId, Assert.Single(batch.Lines).LineId);
+        var error = Assert.Single(batch.Errors);
+        Assert.Equal(second, error.LineId);
+        Assert.Contains("timeout", error.Error);
+    }
+
+    [Fact]
+    public async Task Batch_unknown_document_is_null()
+    {
+        var review = new Mock<IPriceReviewService>();
+        review.Setup(r => r.GetReviewAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>())).ReturnsAsync((PriceReviewDocument?)null);
+        var svc = new PriceReviewComparablesService(review.Object, new Mock<IPartsReviewRepository>().Object,
+            new Mock<IPartsComparablesRepository>().Object, new Mock<IAutohubInventorySqlService>().Object,
+            Options.Create(new AutohubPricingSettings()));
+        Assert.Null(await svc.GetForDocumentAsync(Guid.NewGuid(), CancellationToken.None));
+    }
 }

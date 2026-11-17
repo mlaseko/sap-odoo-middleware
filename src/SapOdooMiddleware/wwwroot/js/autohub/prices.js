@@ -12,6 +12,8 @@
     const edits = {};           // lineId -> { pl03, reason, preview }
     const relCache = {};        // lineId -> comparables response
     const openRel = new Set();  // lineIds with the related-parts row open
+    let relLoading = false;     // the related parts of every line are being read (page open)
+    let relAutoOpened = false;  // lines with related parts were opened once; after that the reviewer decides
 
     async function api(method, path, payload) {
         const opts = { method, headers: {} };
@@ -132,7 +134,11 @@
                 : tzs(pl03) + (reason ? '<div class="sub">' + esc(reason) + '</div>' : ''));
         return '<tr class="pr-row' + (changed ? ' changed' : '') + (l.error ? ' line-error' : '') + '" data-line-id="' + l.line_id + '">' +
             '<td class="num">' + l.line_number + '</td>' +
-            '<td class="desc"><div>' + esc(l.description || '') + '</div>' +
+            '<td class="desc">' + (l.picture_url
+                ? '<span class="ln-pic"><img class="ln-thumb" loading="lazy" alt="" title="Click to enlarge" src="' + esc(l.picture_url) +
+                  '" data-zoom="' + esc(l.picture_url) + '" onerror="this.parentElement.remove()"></span>'
+                : '') +
+                '<div>' + esc(l.description || '') + '</div>' +
                 '<div class="sub">' + esc(l.article_number || '') + (l.brand ? ' · ' + esc(l.brand) : '') + '</div>' +
                 (l.error ? '<div class="err">' + esc(l.error) + '</div>' : '') + '</td>' +
             '<td class="num">' + (l.quantity != null ? Number(l.quantity) : '–') + '</td>' +
@@ -144,7 +150,7 @@
             '<td class="num">' + pct(margin) + '</td>' +
             '<td>' + flagsHtml(flags) + '</td>' +
             '<td>' + decisionCell(l) + '</td>' +
-            '<td><span class="rel-toggle" data-rel="1">' + (openRel.has(l.line_id) ? '▾' : '▸') + ' Related</span></td>' +
+            '<td class="rel-cell">' + relSummaryCell(l) + '</td>' +
             '</tr>' +
             (openRel.has(l.line_id) ? '<tr class="rel-row" data-rel-for="' + l.line_id + '"><td colspan="12">' + relHtml(l) + '</td></tr>' : '');
     }
@@ -177,18 +183,44 @@
     }
 
     // ---- related parts ----
+    // Where the PL03 in the box (typed, saved or calculated) sits against the related parts' median.
+    function relPosition(l, c) {
+        const typed = currentPl03(l);
+        const ours = typed != null && Number(typed) > 0 ? Number(typed) : c.line_pl03;
+        const median = c.same_stats ? c.same_stats.median : null;
+        const vs = ours && median ? ours / median - 1 : null;
+        const band = Number(c.comparable_band || 0.25);
+        const pos = vs == null ? null : (vs > band ? 'above' : (vs < -band ? 'below' : 'in_line'));
+        return { ours, median, vs, pos };
+    }
+
+    const relCount = c => ((c.same || []).length + (c.other_tier || []).length);
+
+    // The Related column: median, count and position at a glance, and the toggle for the parts list.
+    function relSummaryCell(l) {
+        const c = relCache[l.line_id];
+        const arrow = openRel.has(l.line_id) ? '▾' : '▸';
+        if (!c) return relLoading ? '<span class="sub">Loading…</span>' : '<span class="rel-toggle" data-rel="1">' + arrow + ' Related</span>';
+        if (c.error) return '<span class="err" title="' + esc(c.error) + '">Not available</span>';
+        const n = relCount(c);
+        if (!n) return '<span class="sub">No related parts</span>';
+        const { vs, pos } = relPosition(l, c);
+        let html = '<span class="rel-toggle" data-rel="1">' + arrow + ' ' + n + ' related</span>';
+        if (c.same_stats)
+            html += '<div class="sub">median ' + tzs(c.same_stats.median) + ' (' + c.same_stats.n + ')</div>' +
+                    (vs != null ? '<div class="pos-' + esc(pos) + '"><strong>' + signedPct(vs) + '</strong> vs median</div>' : '');
+        else
+            html += '<div class="sub">other tiers only</div>';
+        return html;
+    }
+
     function relHtml(l) {
         const c = relCache[l.line_id];
         if (!c) return 'Loading related parts…';
         if (c.error) return '<span class="err">' + esc(c.error) + '</span>';
         // Compare the PL03 in the box (typed, saved or calculated), not only what the server last saw.
-        const typed = currentPl03(l);
-        const ours = typed != null && Number(typed) > 0 ? Number(typed) : c.line_pl03;
+        const { ours, median, vs, pos } = relPosition(l, c);
         const ourLabel = isChanged(l) ? 'your PL03' : (c.line_pl03_source === 'decision' ? 'approved PL03' : 'calculated PL03');
-        const median = c.same_stats ? c.same_stats.median : null;
-        const vs = ours && median ? ours / median - 1 : null;
-        const band = Number(c.comparable_band || 0.25);
-        const pos = vs == null ? null : (vs > band ? 'above' : (vs < -band ? 'below' : 'in_line'));
         const flags = (c.flags || []).filter(f => f.code !== 'above_related' && f.code !== 'below_related');
         if (pos === 'above') flags.push({ code: 'above_related', text: 'PL03 is ' + Math.round(vs * 100) + '% above the median of ' + c.same_stats.n + ' related parts.' });
         if (pos === 'below') flags.push({ code: 'below_related', text: 'PL03 is ' + Math.round(-vs * 100) + '% below the median of ' + c.same_stats.n + ' related parts.' });
@@ -224,7 +256,8 @@
         return '<table class="rel"><thead><tr><th></th><th>Item</th><th>Part</th><th>Brand / tier</th><th>Article · supplier</th>' +
             '<th class="num">Stock</th><th class="num">PL03</th><th class="num">PL05</th><th class="num">Ours vs this</th><th>Shared OEMs</th></tr></thead><tbody>' +
             parts.map(p => '<tr>' +
-                '<td>' + (p.image_url ? '<img loading="lazy" src="' + esc(p.image_url) + '" alt="" onerror="this.remove()">' : '') + '</td>' +
+                '<td>' + (p.image_url ? '<img loading="lazy" src="' + esc(p.image_url) + '" data-zoom="' + esc(p.image_url) +
+                    '" alt="" title="Click to enlarge" onerror="this.remove()">' : '') + '</td>' +
                 '<td>' + esc(p.item_code) + '</td>' +
                 '<td>' + esc(p.name || p.item_name || '') + (p.part_component ? '<div class="sub">' + esc(p.part_component) + (p.vehicles_count ? ' · fits ' + p.vehicles_count + ' vehicles' : '') + '</div>' : '') + '</td>' +
                 '<td>' + esc(p.brand || '') + '<div class="sub">' + esc(p.tier) + (p.tier_mapped ? '' : ' (not mapped)') + '</div></td>' +
@@ -236,6 +269,35 @@
                 '<td class="sub">' + esc((p.shared_oems || []).join(', ')) + '</td>' +
                 '</tr>').join('') +
             '</tbody></table>';
+    }
+
+    // Every line's related parts in one call when the page opens; lines with related parts open once.
+    async function loadAllRelated() {
+        relLoading = true;
+        render();
+        try {
+            const r = await api('GET', '/comparables');
+            (r.lines || []).forEach(c => { relCache[c.line_id] = c; });
+            (r.errors || []).forEach(e => { relCache[e.line_id] = { error: e.error }; });
+            review.lines.forEach(l => { if (!relCache[l.line_id]) relCache[l.line_id] = { same: [], other_tier: [], note: 'No related parts.' }; });
+            if (!relAutoOpened) {
+                review.lines.forEach(l => { const c = relCache[l.line_id]; if (c && !c.error && relCount(c)) openRel.add(l.line_id); });
+                relAutoOpened = true;
+            }
+        } catch (e) {
+            showMessage('Could not load the related parts: ' + esc(e.message) + '. Open them line by line with “Related”.', 'error');
+        }
+        relLoading = false;
+        render();
+    }
+
+    function setAllRelated(open) {
+        review.lines.forEach(l => {
+            const c = relCache[l.line_id];
+            if (open && c && !c.error && relCount(c)) openRel.add(l.line_id);
+            if (!open) openRel.delete(l.line_id);
+        });
+        render();
     }
 
     async function loadRelated(lineId, force) {
@@ -332,6 +394,9 @@
         render();
     });
 
+    document.getElementById('pr-rel-open').addEventListener('click', () => setAllRelated(true));
+    document.getElementById('pr-rel-close').addEventListener('click', () => setAllRelated(false));
+
     const approveClean = document.getElementById('pr-approve-clean');
     if (approveClean) approveClean.addEventListener('click', () => {
         const items = review.lines
@@ -347,6 +412,7 @@
         try {
             review = await api('GET', '');
             render();
+            if (!relAutoOpened) loadAllRelated();
         } catch (e) {
             body.innerHTML = '<tr><td colspan="12" class="err">Could not load the price review: ' + esc(e.message) + '</td></tr>';
         }

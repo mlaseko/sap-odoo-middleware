@@ -39,6 +39,13 @@ public sealed record PriceReviewComparables(
     decimal? VsMedian, string? Position, decimal ComparableBand, decimal? MedianAvgCost, int MedianAvgCostN,
     IReadOnlyList<PriceReviewFlag> Flags, string? Note);
 
+/// <summary>A line whose related parts could not be read (the others are still returned).</summary>
+public sealed record PriceReviewComparablesError(Guid LineId, string Error);
+
+/// <summary>Related parts for every line of the price review, read in one go when the page opens.</summary>
+public sealed record PriceReviewComparablesBatch(
+    IReadOnlyList<PriceReviewComparables> Lines, IReadOnlyList<PriceReviewComparablesError> Errors);
+
 public interface IPriceReviewComparablesService
 {
     /// <summary>
@@ -46,6 +53,13 @@ public interface IPriceReviewComparablesService
     /// on the document. Read-only.
     /// </summary>
     Task<PriceReviewComparables?> GetAsync(Guid documentId, Guid lineId, CancellationToken ct);
+
+    /// <summary>
+    /// Related parts for every line in the price review, with the review priced once, the brand tiers
+    /// read once and the SAP prices of all related items read in one query. Null when the document does
+    /// not exist. A line that fails is listed in Errors; the others are still returned. Read-only.
+    /// </summary>
+    Task<PriceReviewComparablesBatch?> GetForDocumentAsync(Guid documentId, CancellationToken ct);
 }
 
 /// <summary>
@@ -83,6 +97,9 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
         _settings = settings.Value;
     }
 
+    /// <summary>How many lines read their related parts from Neon at the same time in the batch.</summary>
+    public const int BatchConcurrency = 4;
+
     public async Task<PriceReviewComparables?> GetAsync(Guid documentId, Guid lineId, CancellationToken ct)
     {
         var line = await _lines.GetByIdAsync(lineId, ct);
@@ -93,6 +110,73 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
         // The price the line would be created at, when it is in the review.
         var review = await _review.GetReviewAsync(documentId, ct);
         var reviewLine = review?.Lines.FirstOrDefault(l => l.LineId == lineId);
+        var tiers = await _comparables.GetBrandTiersAsync(ct);
+
+        var candidates = await _comparables.FindCandidatesAsync(
+            anchors.AnchorIds, SplitOems(line.OemNumbers), anchors.OwnItemCodes, CandidateLimit, ct);
+        var sap = await _sap.GetComparableItemsAsync(candidates.Select(c => c.ItemCode).ToList(), ct);
+        return Build(line, anchors, reviewLine, tiers, candidates, sap);
+    }
+
+    public async Task<PriceReviewComparablesBatch?> GetForDocumentAsync(Guid documentId, CancellationToken ct)
+    {
+        var review = await _review.GetReviewAsync(documentId, ct);
+        if (review is null) return null;
+        var tiers = await _comparables.GetBrandTiersAsync(ct);
+        var reviewLines = review.Lines.ToDictionary(l => l.LineId);
+        var lines = (await _lines.ListByDocumentAsync(documentId, ct))
+            .Where(l => reviewLines.ContainsKey(l.Id))
+            .OrderBy(l => l.LineNumber)
+            .ToList();
+
+        // Neon lookups per line, a few at a time; each opens its own connection.
+        var found = new (PartsLineAnchors? Anchors, IReadOnlyList<PartsComparableCandidate> Candidates, string? Error)[lines.Count];
+        using var gate = new SemaphoreSlim(BatchConcurrency);
+        await Task.WhenAll(lines.Select(async (line, i) =>
+        {
+            await gate.WaitAsync(ct);
+            try
+            {
+                var anchors = await _comparables.GetLineAnchorsAsync(documentId, line.Id, ct);
+                var candidates = anchors is null
+                    ? Array.Empty<PartsComparableCandidate>()
+                    : await _comparables.FindCandidatesAsync(
+                        anchors.AnchorIds, SplitOems(line.OemNumbers), anchors.OwnItemCodes, CandidateLimit, ct);
+                found[i] = (anchors, candidates, null);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                found[i] = (null, Array.Empty<PartsComparableCandidate>(), "Could not read related parts: " + ex.Message);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }));
+
+        // One SAP query for the prices of every related item of every line.
+        var sap = await _sap.GetComparableItemsAsync(
+            found.SelectMany(f => f.Candidates).Select(c => c.ItemCode).Distinct(StringComparer.OrdinalIgnoreCase).ToList(), ct);
+
+        var results = new List<PriceReviewComparables>(lines.Count);
+        var errors = new List<PriceReviewComparablesError>();
+        for (int i = 0; i < lines.Count; i++)
+        {
+            var (anchors, candidates, error) = found[i];
+            if (error is not null) { errors.Add(new(lines[i].Id, error)); continue; }
+            if (anchors is null) continue;
+            results.Add(Build(lines[i], anchors, reviewLines[lines[i].Id], tiers, candidates, sap));
+        }
+        return new PriceReviewComparablesBatch(results, errors);
+    }
+
+    /// <summary>The comparison for one line from what was read for it (shared by the single and batch reads).</summary>
+    private PriceReviewComparables Build(
+        PartsReviewLineRow line, PartsLineAnchors anchors, PriceReviewLine? reviewLine,
+        IReadOnlyDictionary<string, string> tiers, IReadOnlyList<PartsComparableCandidate> candidates,
+        IReadOnlyDictionary<string, ComparableSapItem> sap)
+    {
+        var lineId = line.Id;
         decimal? linePl03 = null;
         string? source = null;
         if (reviewLine?.Decision is { Stale: false, FinalPl03: { } final })
@@ -100,13 +184,8 @@ public sealed class PriceReviewComparablesService : IPriceReviewComparablesServi
         else if (reviewLine?.FormulaPl03 is { } formula)
             (linePl03, source) = (formula, "calculated");
 
-        var tiers = await _comparables.GetBrandTiersAsync(ct);
         var (tier, mapped) = TierOf(line.Brand, tiers);
         var tokens = SplitOems(line.OemNumbers);
-
-        var candidates = await _comparables.FindCandidatesAsync(
-            anchors.AnchorIds, tokens, anchors.OwnItemCodes, CandidateLimit, ct);
-        var sap = await _sap.GetComparableItemsAsync(candidates.Select(c => c.ItemCode).ToList(), ct);
 
         var partKey = NormPart(anchors.PartComponent);
         var same = new List<ComparablePart>();
