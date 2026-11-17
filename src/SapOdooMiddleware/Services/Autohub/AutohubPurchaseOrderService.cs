@@ -133,9 +133,10 @@ public sealed class AutohubPurchaseOrderService : IAutohubPurchaseOrderService
 
         // Prices: the stored PL01 of created lines; this invoice's PL01 for the rest.
         var lines = new List<AutohubPoLine>();
+        var pl01 = await Pl01Async(include, doc.Currency, ct);
         foreach (var l in include)
         {
-            var (price, priceSource, error) = await Pl01Async(l, doc.Currency, ct);
+            var (price, priceSource, error) = pl01[l.Id];
             if (error is not null) { blocking.Add($"Line {l.LineNumber} ({l.ItemCode}): {error}"); continue; }
             var qty = l.Quantity!.Value;
             lines.Add(new AutohubPoLine(l.Id, l.LineNumber, l.ItemCode!, l.SupplierArticleNumber, l.Description,
@@ -194,36 +195,68 @@ public sealed class AutohubPurchaseOrderService : IAutohubPurchaseOrderService
     }
 
     /// <summary>
-    /// PL01 for one line. Created: the PL01 Bulk Create stored. Otherwise: as Bulk Create works it out —
+    /// PL01 per line. Created: the PL01 Bulk Create stored. Otherwise: as Bulk Create works it out —
     /// the invoice unit price less its discount, converted to TZS at the forex rate, through the pricing
-    /// engine (cost markup) — so a part that already existed is costed at this invoice's price.
+    /// engine (cost markup) — so a part that already existed is costed at this invoice's price. All the
+    /// calculated lines go through the pricing engine in one batch (its config is read once, not per
+    /// line: one call per line took ~0.85 s, about two minutes for an invoice with 130 matched lines).
     /// </summary>
-    private async Task<(decimal Price, string Source, string? Error)> Pl01Async(
-        AutohubPoSourceLine line, string? currency, CancellationToken ct)
+    private async Task<Dictionary<Guid, (decimal Price, string Source, string? Error)>> Pl01Async(
+        IReadOnlyList<AutohubPoSourceLine> lines, string? currency, CancellationToken ct)
     {
-        if (line.ReviewStatus == "created" && line.Pl01Tzs is > 0m)
-            return (Math.Round(line.Pl01Tzs.Value, 2, MidpointRounding.AwayFromZero), "created", null);
+        var result = new Dictionary<Guid, (decimal, string, string?)>();
+        var toPrice = new List<(AutohubPoSourceLine Line, decimal CostTzs)>();
+        decimal? rate = null;
+        string? rateError = null;
 
-        if (line.UnitPriceForeign is not > 0m)
-            return (0m, "calculated", "no unit price on the invoice line.");
-        if (string.IsNullOrWhiteSpace(currency))
-            return (0m, "calculated", "the invoice has no currency.");
+        foreach (var line in lines)
+        {
+            if (line.ReviewStatus == "created" && line.Pl01Tzs is > 0m)
+            {
+                result[line.Id] = (Math.Round(line.Pl01Tzs.Value, 2, MidpointRounding.AwayFromZero), "created", null);
+                continue;
+            }
+            if (line.UnitPriceForeign is not > 0m) { result[line.Id] = (0m, "calculated", "no unit price on the invoice line."); continue; }
+            if (string.IsNullOrWhiteSpace(currency)) { result[line.Id] = (0m, "calculated", "the invoice has no currency."); continue; }
 
-        var unit = EffectiveUnitPrice(line.UnitPriceForeign.Value, line.DiscountPct);
-        try
-        {
-            var costTzs = string.Equals(currency.Trim(), PoCurrency, StringComparison.OrdinalIgnoreCase)
-                ? unit
-                : await _forex.ConvertToTzsAsync(unit, currency.Trim(), DateTime.UtcNow, ct);
-            var prices = await _pricing.CalculateAsync(costTzs, line.Brand ?? "", ct);
-            if (prices.Cost <= 0m)
-                return (0m, "calculated", "PL01 works out at zero.");
-            return (Math.Round(prices.Cost, 2, MidpointRounding.AwayFromZero), "calculated", null);
+            var unit = EffectiveUnitPrice(line.UnitPriceForeign.Value, line.DiscountPct);
+            if (string.Equals(currency.Trim(), PoCurrency, StringComparison.OrdinalIgnoreCase))
+            {
+                toPrice.Add((line, unit));
+                continue;
+            }
+            if (rate is null && rateError is null)
+            {
+                try { rate = await _forex.GetRateAsync(currency.Trim(), DateTime.UtcNow, ct); }
+                catch (Exception ex) { rateError = ex.Message; }
+            }
+            if (rateError is not null) { result[line.Id] = (0m, "calculated", $"PL01 could not be worked out ({rateError})."); continue; }
+            toPrice.Add((line, unit * rate!.Value));
         }
-        catch (Exception ex)
+
+        if (toPrice.Count > 0)
         {
-            return (0m, "calculated", $"PL01 could not be worked out ({ex.Message}).");
+            IReadOnlyList<PricingBatchResult> priced;
+            try
+            {
+                priced = await _pricing.CalculateBatchDetailedAsync(
+                    toPrice.Select(p => (p.CostTzs, (string?)(p.Line.Brand ?? ""))).ToList(), ct);
+            }
+            catch (Exception ex)
+            {
+                foreach (var p in toPrice) result[p.Line.Id] = (0m, "calculated", $"PL01 could not be worked out ({ex.Message}).");
+                return result;
+            }
+            for (var i = 0; i < toPrice.Count; i++)
+            {
+                var (q, err) = (priced[i].Quote, priced[i].Error);
+                var id = toPrice[i].Line.Id;
+                if (q is null) result[id] = (0m, "calculated", $"PL01 could not be worked out ({err ?? "pricing failed"}).");
+                else if (q.Cost <= 0m) result[id] = (0m, "calculated", "PL01 works out at zero.");
+                else result[id] = (Math.Round(q.Cost, 2, MidpointRounding.AwayFromZero), "calculated", null);
+            }
         }
+        return result;
     }
 
     /// <summary>The invoice unit price less the line discount (a discount of 0 or ≥ 100 is not applied), as Bulk Create does.</summary>
