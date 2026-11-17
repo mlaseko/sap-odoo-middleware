@@ -292,4 +292,47 @@ public class PriceReviewComparablesServiceTests
             Options.Create(new AutohubPricingSettings()));
         Assert.Null(await svc.GetForDocumentAsync(Guid.NewGuid(), CancellationToken.None));
     }
+
+    // ── SAP's article number wins over a mislinked catalogue row ──
+
+    [Fact]
+    public async Task Sap_article_wins_when_the_catalogue_row_describes_another_part_and_same_article_is_flagged()
+    {
+        // VAG12331 case: the catalogue row carrying the code says B12746 "Timing Chain"; SAP says B12698,
+        // which is the invoice line's own article, so the part may already be in SAP.
+        var mislinked = Cand("VAG12331") with { Name = "Timing Chain", ItemName = "Oil pump B12698", ArticleNumber = "B12746" };
+        var agreeing = Cand("VK2") with { ArticleNumber = "A-VK2" };
+        var svc = Service(
+            new[] { mislinked, agreeing },
+            new[]
+            {
+                new ComparableSapItem("VAG12331", 20000m, 450000m, 272872m, true, ArticleNumber: "B-12698", ItemName: "06J115105AB/B12698"),
+                new ComparableSapItem("VK2", 20000m, 400000m, 320000m, true, ArticleNumber: "A-VK2"),
+            },
+            ReviewLine(320000m, 84260m),
+            line: Line() with { SupplierArticleNumber = "B12698" });
+
+        var r = (await svc.GetAsync(DocId, LineId, CancellationToken.None))!;
+
+        var p = r.Same.Single(x => x.ItemCode == "VAG12331");
+        Assert.Equal("B-12698", p.ArticleNumber);
+        Assert.Equal("B12746", p.CatalogueArticleNumber);
+        Assert.Equal("Oil pump B12698", p.Name);
+        Assert.True(p.SameArticle);
+
+        var ok = r.Same.Single(x => x.ItemCode == "VK2");
+        Assert.Null(ok.CatalogueArticleNumber);
+        Assert.False(ok.SameArticle);
+        Assert.Equal("neon VK2", ok.Name);
+
+        var flag = Assert.Single(r.Flags, f => f.Code == "same_article");
+        Assert.Contains("VAG12331", flag.Text);
+    }
+
+    [Theory]
+    [InlineData("B12698", "B-12698", true)]
+    [InlineData("b 12698", "B12698", true)]
+    [InlineData("B12698", "B12746", false)]
+    public void Article_numbers_compare_on_letters_and_digits(string a, string b, bool same) =>
+        Assert.Equal(same, PriceReviewComparablesService.NormArticle(a) == PriceReviewComparablesService.NormArticle(b));
 }
