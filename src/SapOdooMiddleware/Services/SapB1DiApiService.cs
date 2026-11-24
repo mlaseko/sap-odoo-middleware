@@ -5225,25 +5225,61 @@ SELECT SUM(OnHand * ValuationPriceTZS) AS TotalValue FROM Valuation";
 
             _logger.LogInformation("Executing Movement Clock stock classification query");
 
+            // Days_Since_Last_Sale is measured from the last sale EVER (9999 = never sold), not only within
+            // the 36-month window: an item last sold 4 years ago is obsolete, not "never sold".
+            // Never-sold items are classified first, before the age-based OBSOLETE/DEAD rules that 9999
+            // would otherwise always satisfy: NO SALES after 180 days, NEW (No Sales Yet) up to 180 days.
+            // Quantities are sales less customer returns (credit memos). Months_With_Sales_Last_12Mo counts
+            // the last 12 calendar months with net sales; Avg_Monthly_Consumption is the last 12 months' net
+            // quantity / 12 (both used to run over the whole 36-month window). Holding cost is the cost accumulated over the
+            // time the stock was actually held: since the last sale, never longer than the item has
+            // existed (a never-sold item: its age), instead of 9999 days.
             const string sql = @"
-WITH SalesAggregated AS (
-    SELECT
-        T0.ItemCode,
-        DATEDIFF(DAY, MAX(T1.DocDate), GETDATE()) AS Days_Since_Last_Sale,
-        COUNT(DISTINCT CONCAT(YEAR(T1.DocDate), '-', MONTH(T1.DocDate))) AS Months_With_Sales_Last_12Mo,
-        ISNULL(SUM(T0.Quantity) / 12.0, 0) AS Avg_Monthly_Consumption,
-        ISNULL(SUM(CASE
-            WHEN T1.DocDate >= DATEADD(MONTH, -36, GETDATE())
-            THEN T0.Quantity ELSE 0
-        END) / 36.0, 0) AS Avg_36Month_Consumption,
-        ISNULL(SUM(CASE
-            WHEN T1.DocDate >= DATEADD(MONTH, -12, GETDATE())
-            THEN T0.Quantity ELSE 0
-        END), 0) AS Total_Qty_Last_12Mo
+WITH Movements AS (
+    -- Sales (A/R invoices) less customer returns (A/R credit memos), last 36 months.
+    SELECT T0.ItemCode, T1.DocDate, T0.Quantity AS Qty
     FROM INV1 T0
     INNER JOIN OINV T1 ON T0.DocEntry = T1.DocEntry
     WHERE T1.DocDate >= DATEADD(MONTH, -36, GETDATE())
       AND T1.CANCELED = 'N'
+      AND T0.Quantity > 0
+    UNION ALL
+    SELECT T0.ItemCode, T1.DocDate, -T0.Quantity
+    FROM RIN1 T0
+    INNER JOIN ORIN T1 ON T0.DocEntry = T1.DocEntry
+    WHERE T1.DocDate >= DATEADD(MONTH, -36, GETDATE())
+      AND T1.CANCELED = 'N'
+      AND T0.Quantity > 0
+      AND ISNULL(T0.NoInvtryMv, 'N') = 'N'   -- goods returned, not a price-only credit
+),
+MonthlyNet AS (
+    SELECT ItemCode, DATEFROMPARTS(YEAR(DocDate), MONTH(DocDate), 1) AS Sale_Month, SUM(Qty) AS Net_Qty
+    FROM Movements
+    GROUP BY ItemCode, DATEFROMPARTS(YEAR(DocDate), MONTH(DocDate), 1)
+),
+SalesAggregated AS (
+    SELECT
+        M.ItemCode,
+        CASE WHEN SUM(CASE WHEN M.DocDate >= DATEADD(MONTH, -12, GETDATE()) THEN M.Qty ELSE 0 END) > 0
+             THEN SUM(CASE WHEN M.DocDate >= DATEADD(MONTH, -12, GETDATE()) THEN M.Qty ELSE 0 END)
+             ELSE 0 END AS Total_Qty_Last_12Mo,
+        CASE WHEN SUM(M.Qty) > 0 THEN SUM(M.Qty) / 36.0 ELSE 0 END AS Avg_36Month_Consumption
+    FROM Movements M
+    GROUP BY M.ItemCode
+),
+SalesMonths AS (
+    -- Calendar months of the last 12 (this month and the 11 before) with net sales above zero.
+    SELECT ItemCode, COUNT(*) AS Months_With_Sales_Last_12Mo
+    FROM MonthlyNet
+    WHERE Net_Qty > 0
+      AND Sale_Month >= DATEFROMPARTS(YEAR(DATEADD(MONTH, -11, GETDATE())), MONTH(DATEADD(MONTH, -11, GETDATE())), 1)
+    GROUP BY ItemCode
+),
+LastSale AS (
+    SELECT T0.ItemCode, MAX(T1.DocDate) AS Last_Sale_Date
+    FROM INV1 T0
+    INNER JOIN OINV T1 ON T0.DocEntry = T1.DocEntry
+    WHERE T1.CANCELED = 'N'
       AND T0.Quantity > 0
     GROUP BY T0.ItemCode
 ),
@@ -5258,53 +5294,65 @@ ItemMaster AS (
     FROM OITM
     WHERE validFor = 'Y'
 ),
-ClassifiedItems AS (
+Base AS (
     SELECT
         IM.ItemCode, IM.ItemName, IM.Current_Stock, IM.Average_Cost,
         IM.Item_Creation_Date, IM.Item_Age_Days,
-        ISNULL(SA.Days_Since_Last_Sale, 9999) AS Days_Since_Last_Sale,
-        ISNULL(SA.Months_With_Sales_Last_12Mo, 0) AS Months_With_Sales_Last_12Mo,
-        ISNULL(SA.Avg_Monthly_Consumption, 0) AS Avg_Monthly_Consumption,
+        ISNULL(DATEDIFF(DAY, LS.Last_Sale_Date, GETDATE()), 9999) AS Days_Since_Last_Sale,
+        ISNULL(SM.Months_With_Sales_Last_12Mo, 0) AS Months_With_Sales_Last_12Mo,
+        ISNULL(SA.Total_Qty_Last_12Mo, 0) / 12.0 AS Avg_Monthly_Consumption,
         ISNULL(SA.Total_Qty_Last_12Mo, 0) AS Total_Qty_Last_12Mo,
-        ISNULL(SA.Avg_36Month_Consumption, 0) AS Avg_36Month_Consumption,
-        CASE
-            WHEN IM.Item_Age_Days <= 90 AND SA.ItemCode IS NULL
-                 THEN 'NEW (No Sales Yet - Monitor)'
-            WHEN IM.Item_Age_Days <= 90 AND ISNULL(SA.Days_Since_Last_Sale, 9999) > 30
-                 THEN 'NEW (Slow Start - Under Review)'
-            WHEN IM.Item_Age_Days <= 180
-                 AND ISNULL(SA.Days_Since_Last_Sale, 9999) <= 30
-                 AND ISNULL(SA.Avg_Monthly_Consumption, 0) >= 1
-                 THEN 'NEW (Promising - Monthly)'
-            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) > 730
-                 AND IM.Item_Age_Days > 730
-                 THEN 'OBSOLETE (2Y+)'
-            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) > 365
-                 AND IM.Item_Age_Days > 365
-                 THEN 'DEAD (Yearly+)'
-            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) > 90
-                 AND ISNULL(SA.Avg_36Month_Consumption, 0) >= 0.5
-                 AND ISNULL(SA.Months_With_Sales_Last_12Mo, 0) <= 2
-                 AND IM.Item_Age_Days > 180
-                 THEN 'SLOW (Yearly - Bulk)'
-            WHEN (ISNULL(SA.Days_Since_Last_Sale, 9999) BETWEEN 91 AND 365
-                  OR ISNULL(SA.Months_With_Sales_Last_12Mo, 0) <= 2)
-                 AND IM.Item_Age_Days > 180
-                 THEN 'YEARLY'
-            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) BETWEEN 31 AND 90
-                 AND ISNULL(SA.Months_With_Sales_Last_12Mo, 0) >= 3
-                 AND IM.Item_Age_Days > 180
-                 THEN 'QUARTERLY'
-            WHEN ISNULL(SA.Days_Since_Last_Sale, 9999) <= 30
-                 AND ISNULL(SA.Avg_Monthly_Consumption, 0) >= 1
-                 AND IM.Item_Age_Days > 180
-                 THEN 'MONTHLY'
-            WHEN SA.ItemCode IS NULL AND IM.Item_Age_Days > 180
-                 THEN 'NO SALES (Investigate)'
-            ELSE 'UNCLASSIFIED'
-        END AS Movement_Clock_Classification
+        ISNULL(SA.Avg_36Month_Consumption, 0) AS Avg_36Month_Consumption
     FROM ItemMaster IM
     LEFT JOIN SalesAggregated SA ON IM.ItemCode = SA.ItemCode
+    LEFT JOIN SalesMonths SM ON IM.ItemCode = SM.ItemCode
+    LEFT JOIN LastSale LS ON IM.ItemCode = LS.ItemCode
+),
+ClassifiedItems AS (
+    SELECT
+        B.*,
+        CASE
+            WHEN B.Days_Since_Last_Sale = 9999 AND B.Item_Age_Days > 180
+                 THEN 'NO SALES (Investigate)'
+            WHEN B.Days_Since_Last_Sale = 9999
+                 THEN 'NEW (No Sales Yet - Monitor)'
+            WHEN B.Item_Age_Days <= 90 AND B.Days_Since_Last_Sale > 30
+                 THEN 'NEW (Slow Start - Under Review)'
+            WHEN B.Item_Age_Days <= 180
+                 AND B.Days_Since_Last_Sale <= 30
+                 AND B.Avg_Monthly_Consumption >= 1
+                 THEN 'NEW (Promising - Monthly)'
+            WHEN B.Days_Since_Last_Sale > 730
+                 AND B.Item_Age_Days > 730
+                 THEN 'OBSOLETE (2Y+)'
+            WHEN B.Days_Since_Last_Sale > 365
+                 AND B.Item_Age_Days > 365
+                 THEN 'DEAD (Yearly+)'
+            WHEN B.Days_Since_Last_Sale > 90
+                 AND B.Avg_36Month_Consumption >= 0.5
+                 AND B.Months_With_Sales_Last_12Mo <= 2
+                 AND B.Item_Age_Days > 180
+                 THEN 'SLOW (Yearly - Bulk)'
+            WHEN (B.Days_Since_Last_Sale BETWEEN 91 AND 365
+                  OR B.Months_With_Sales_Last_12Mo <= 2)
+                 AND B.Item_Age_Days > 180
+                 THEN 'YEARLY'
+            WHEN B.Days_Since_Last_Sale BETWEEN 31 AND 90
+                 AND B.Months_With_Sales_Last_12Mo >= 3
+                 AND B.Item_Age_Days > 180
+                 THEN 'QUARTERLY'
+            WHEN B.Days_Since_Last_Sale <= 30
+                 AND B.Avg_Monthly_Consumption >= 1
+                 AND B.Item_Age_Days > 180
+                 THEN 'MONTHLY'
+            ELSE 'UNCLASSIFIED'
+        END AS Movement_Clock_Classification,
+        CASE
+            WHEN B.Days_Since_Last_Sale = 9999 THEN B.Item_Age_Days
+            WHEN B.Days_Since_Last_Sale < B.Item_Age_Days THEN B.Days_Since_Last_Sale
+            ELSE B.Item_Age_Days
+        END AS Held_Days
+    FROM Base B
 )
 SELECT
     ItemCode, ItemName, Current_Stock, Average_Cost,
@@ -5322,11 +5370,10 @@ SELECT
         ELSE 'Regular review'
     END AS Recommended_Action,
     CASE
-        WHEN Days_Since_Last_Sale > 365
-             AND Item_Age_Days > 365
+        WHEN Held_Days > 365
              AND Current_Stock > 0
              AND Average_Cost > 0
-        THEN ROUND(Current_Stock * Average_Cost * 0.15 * (Days_Since_Last_Sale / 365.0), 2)
+        THEN ROUND(Current_Stock * Average_Cost * 0.15 * (Held_Days / 365.0), 2)
         ELSE 0
     END AS Estimated_Holding_Cost_TZS,
     CASE Movement_Clock_Classification
