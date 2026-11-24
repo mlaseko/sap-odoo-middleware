@@ -5231,7 +5231,10 @@ SELECT SUM(OnHand * ValuationPriceTZS) AS TotalValue FROM Valuation";
             // would otherwise always satisfy: NO SALES after 180 days, NEW (No Sales Yet) up to 180 days.
             // Quantities are sales less customer returns (credit memos). Months_With_Sales_Last_12Mo counts
             // the last 12 calendar months with net sales; Avg_Monthly_Consumption is the last 12 months' net
-            // quantity / 12 (both used to run over the whole 36-month window). Holding cost is the cost accumulated over the
+            // quantity / 12 (both used to run over the whole 36-month window).
+            // No sold item is left unclassified: every item up to 180 days old that has sold but is not
+            // "Promising" is NEW (Slow Start); an older item sold in the last 30 days in 3+ of the last 12
+            // months but under 1 a month is QUARTERLY (a steady slow seller), like one last sold 31-90 days ago. Holding cost is the cost accumulated over the
             // time the stock was actually held: since the last sale, never longer than the item has
             // existed (a never-sold item: its age), instead of 9999 days.
             const string sql = @"
@@ -5322,6 +5325,8 @@ ClassifiedItems AS (
                  AND B.Days_Since_Last_Sale <= 30
                  AND B.Avg_Monthly_Consumption >= 1
                  THEN 'NEW (Promising - Monthly)'
+            WHEN B.Item_Age_Days <= 180
+                 THEN 'NEW (Slow Start - Under Review)'
             WHEN B.Days_Since_Last_Sale > 730
                  AND B.Item_Age_Days > 730
                  THEN 'OBSOLETE (2Y+)'
@@ -5345,6 +5350,10 @@ ClassifiedItems AS (
                  AND B.Avg_Monthly_Consumption >= 1
                  AND B.Item_Age_Days > 180
                  THEN 'MONTHLY'
+            WHEN B.Days_Since_Last_Sale <= 30
+                 AND B.Months_With_Sales_Last_12Mo >= 3
+                 AND B.Item_Age_Days > 180
+                 THEN 'QUARTERLY'
             ELSE 'UNCLASSIFIED'
         END AS Movement_Clock_Classification,
         CASE
